@@ -56,7 +56,7 @@ impl DetectedEncoding {
 /// Decodes `bytes` to UTF-8 using `encoding`.
 pub fn decode_to_utf8(bytes: &[u8], encoding: DetectedEncoding) -> Option<String> {
     match encoding {
-        DetectedEncoding::Utf8 => String::from_utf8(bytes.to_vec()).ok(),
+        DetectedEncoding::Utf8 => Some(String::from_utf8_lossy(bytes).into_owned()),
         DetectedEncoding::Utf16Le => decode_utf16(bytes, true),
         DetectedEncoding::Utf16Be => decode_utf16(bytes, false),
         _ => decode_codepage(bytes, encoding.codepage()),
@@ -64,9 +64,23 @@ pub fn decode_to_utf8(bytes: &[u8], encoding: DetectedEncoding) -> Option<String
 }
 
 /// Decodes a raw pathname byte sequence: detects the encoding first and then
-/// converts it to UTF-8.  Returns `None` only when the bytes cannot be
-/// decoded at all.
+/// converts it to UTF-8.  Never fails for non-empty input: undecodable bytes
+/// are replaced with U+FFFD so a single odd entry cannot fail an archive
+/// listing.
 pub fn decode_name(bytes: &[u8]) -> Option<String> {
+    // ISO-2022-JP is 7-bit ASCII and would pass the UTF-8 checks below, so
+    // it must be tested first (same order as the reference detector).
+    if has_jis_escape_sequence(bytes) {
+        return decode_to_utf8(bytes, DetectedEncoding::Iso2022Jp);
+    }
+    // Strictly valid UTF-8 passes through unchanged.  The ported detector's
+    // validator is deliberately lenient (it mirrors the C++ reference), so
+    // run detection only for bytes that are not strictly valid UTF-8;
+    // otherwise overlong/surrogate byte pairs from legacy CJK encodings
+    // would be misdetected as UTF-8 and replaced with U+FFFD.
+    if let Ok(name) = std::str::from_utf8(bytes) {
+        return Some(name.to_owned());
+    }
     decode_to_utf8(bytes, detect(bytes))
 }
 
@@ -632,7 +646,9 @@ fn decode_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
         MultiByteToWideChar(codepage, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None)
     };
     if wide_len <= 0 {
-        return None;
+        // The bytes are not representable in this codepage at all; fall back
+        // to a lossy copy so a single odd entry cannot fail the whole archive.
+        return Some(String::from_utf8_lossy(bytes).into_owned());
     }
     let mut wide = vec![0u16; wide_len as usize];
     // SAFETY: `wide` has exactly the size the API requested.
@@ -677,7 +693,7 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> Option<String> {
     if units.first() == Some(&0xFEFF) {
         units.remove(0);
     }
-    String::from_utf16(&units).ok()
+    Some(String::from_utf16_lossy(&units))
 }
 
 #[cfg(test)]

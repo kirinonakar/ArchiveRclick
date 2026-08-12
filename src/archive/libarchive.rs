@@ -146,7 +146,7 @@ mod platform_impl {
 
     type ArchiveEntryNew = unsafe extern "C" fn() -> *mut RawEntry;
     type ArchiveEntryFree = unsafe extern "C" fn(*mut RawEntry);
-    type ArchiveEntrySetPathnameUtf8 = unsafe extern "C" fn(*mut RawEntry, *const c_char);
+    type ArchiveEntryCopyPathnameW = unsafe extern "C" fn(*mut RawEntry, *const u16);
     type ArchiveEntrySetFiletype = unsafe extern "C" fn(*mut RawEntry, u32);
     type ArchiveEntrySetMode = unsafe extern "C" fn(*mut RawEntry, u16);
     type ArchiveEntrySetSize = unsafe extern "C" fn(*mut RawEntry, i64);
@@ -265,7 +265,7 @@ mod platform_impl {
         free: ArchiveWriteUnary,
         entry_new: ArchiveEntryNew,
         entry_free: ArchiveEntryFree,
-        entry_set_pathname_utf8: ArchiveEntrySetPathnameUtf8,
+        entry_copy_pathname_w: ArchiveEntryCopyPathnameW,
         entry_set_filetype: ArchiveEntrySetFiletype,
         entry_set_perm: ArchiveEntrySetMode,
         entry_set_size: ArchiveEntrySetSize,
@@ -289,12 +289,6 @@ mod platform_impl {
             allow_unsupported: bool,
             archiveint_fallback: bool,
         ) -> ArchiveResult<Self> {
-            // libarchive converts pathnames between the CRT locale and
-            // Unicode.  The CRT starts in the ASCII-only "C" locale, which
-            // makes writing any non-ASCII entry fail with "Can't translate
-            // pathname to current locale"; switch it to a UTF-8 code page
-            // once so every archive format accepts arbitrary Unicode names.
-            ensure_utf8_process_locale();
             let version_number_fn =
                 required_symbol!(library, "archive_version_number", ArchiveVersionNumber);
             // SAFETY: this process-global accessor has no preconditions.
@@ -730,10 +724,10 @@ mod platform_impl {
                 free: optional_symbol!(library, "archive_write_free", ArchiveWriteUnary)?,
                 entry_new: optional_symbol!(library, "archive_entry_new", ArchiveEntryNew)?,
                 entry_free: optional_symbol!(library, "archive_entry_free", ArchiveEntryFree)?,
-                entry_set_pathname_utf8: optional_symbol!(
+                entry_copy_pathname_w: optional_symbol!(
                     library,
-                    "archive_entry_set_pathname_utf8",
-                    ArchiveEntrySetPathnameUtf8
+                    "archive_entry_copy_pathname_w",
+                    ArchiveEntryCopyPathnameW
                 )?,
                 entry_set_filetype: optional_symbol!(
                     library,
@@ -1101,52 +1095,62 @@ mod platform_impl {
 
         fn copy_entry(&self, entry: *mut RawEntry) -> ArchiveResult<RawEntryInfo> {
             // SAFETY: entry is borrowed from the live reader until next_header.
-            let wide_path = unsafe { copy_wide_string((self.api.entry_pathname_w)(entry))? };
-            let path = match wide_path {
-                Some(path) => Some(PathBuf::from(path)),
-                None => match self.api.entry_pathname_utf8 {
-                    Some(getter) => {
-                        // SAFETY: getter borrows a NUL-terminated string from
-                        // this live entry; the bounded copy prevents an
-                        // attacker-controlled pathname from causing an
-                        // unbounded scan/allocation in the UTF-8 fallback.
-                        unsafe {
-                            copy_c_string_bounded(
-                                getter(entry),
-                                MAX_ARCHIVE_PATH_UTF8_BYTES,
-                                "archive UTF-8 pathname",
-                            )?
-                        }
-                        .map(PathBuf::from)
-                    }
-                    None => None,
-                },
+            // Prefer the raw pathname bytes.  libarchive keeps legacy
+            // (non-UTF-8) names as raw bytes, while the locale-based wide and
+            // UTF-8 getters would either fail or return mojibake for them
+            // under the default CRT locale.  Valid UTF-8 passes through
+            // unchanged; other encodings are recovered by the heuristic
+            // encoding detector (CP949 / Shift_JIS / GBK / Big5 / ...).
+            let raw = unsafe {
+                copy_c_string_bytes_bounded(
+                    (self.api.entry_pathname)(entry),
+                    MAX_ARCHIVE_PATH_UTF8_BYTES,
+                    "archive raw pathname",
+                )?
             };
+            let path = raw
+                .and_then(|raw| encoding::decode_name(&raw))
+                .filter(|name| !name.is_empty())
+                .map(PathBuf::from);
             let path = match path {
                 Some(path) => path,
                 None => {
-                    // ZIP entries without the UTF-8 language encoding flag
-                    // (general purpose bit 11) and similar legacy entries
-                    // store pathnames as raw bytes in some legacy codepage.
-                    // libarchive cannot translate those under the UTF-8 CRT
-                    // locale, so recover the raw bytes and run the heuristic
-                    // encoding detector (CP949 / Shift_JIS / GBK / Big5 / ...).
-                    let raw = unsafe {
-                        copy_c_string_bytes_bounded(
-                            (self.api.entry_pathname)(entry),
-                            MAX_ARCHIVE_PATH_UTF8_BYTES,
-                            "archive raw pathname",
-                        )?
-                    };
-                    match raw.and_then(|raw| encoding::decode_name(&raw)) {
-                        Some(name) => PathBuf::from(name),
-                        None => {
-                            return Err(ArchiveError::LibArchive {
-                                operation: "decoding archive pathname",
-                                message: "entry pathname is missing or cannot be decoded"
-                                    .to_owned(),
-                            });
-                        }
+                    // Formats that store Unicode directly (7z, RAR, Joliet
+                    // ISO 9660) do not expose raw mbs bytes; fall back to the
+                    // wide getter, which libarchive fills from its internal
+                    // Unicode copy.
+                    let wide_path =
+                        unsafe { copy_wide_string((self.api.entry_pathname_w)(entry))? };
+                    match wide_path {
+                        Some(path) => PathBuf::from(path),
+                        None => match self.api.entry_pathname_utf8 {
+                            Some(getter) => {
+                                // SAFETY: getter borrows a NUL-terminated string
+                                // from this live entry; the bounded copy prevents
+                                // an attacker-controlled pathname from causing an
+                                // unbounded scan/allocation in the UTF-8 fallback.
+                                unsafe {
+                                    copy_c_string_bounded(
+                                        getter(entry),
+                                        MAX_ARCHIVE_PATH_UTF8_BYTES,
+                                        "archive UTF-8 pathname",
+                                    )?
+                                }
+                                .map(PathBuf::from)
+                                .ok_or_else(|| ArchiveError::LibArchive {
+                                    operation: "decoding archive pathname",
+                                    message: "entry pathname is missing or cannot be decoded"
+                                        .to_owned(),
+                                })?
+                            }
+                            None => {
+                                return Err(ArchiveError::LibArchive {
+                                    operation: "decoding archive pathname",
+                                    message: "entry pathname is missing or cannot be decoded"
+                                        .to_owned(),
+                                });
+                            }
+                        },
                     }
                 }
             };
@@ -1444,13 +1448,21 @@ mod platform_impl {
             if item.kind == SourceKind::Directory && !name.ends_with('/') {
                 name.push('/');
             }
-            let name = CString::new(name).map_err(|_| {
-                ArchiveError::InvalidInput("archive pathname contains NUL".to_owned())
-            })?;
+            if name.contains('\0') {
+                return Err(ArchiveError::InvalidInput(
+                    "archive pathname contains NUL".to_owned(),
+                ));
+            }
+            // The wide API keeps the entry's internal copy independent of the
+            // CRT locale (the default "C" locale cannot translate UTF-8
+            // names); ZIP's `hdrcharset=UTF-8` option then writes the name
+            // as UTF-8 with the language-encoding flag set.
+            let mut wide: Vec<u16> = name.encode_utf16().collect();
+            wide.push(0);
             let raw_entry = guard.raw.as_ptr();
             // SAFETY: setters copy scalar/string metadata into the live entry.
             unsafe {
-                (self.write.entry_set_pathname_utf8)(raw_entry, name.as_ptr());
+                (self.write.entry_copy_pathname_w)(raw_entry, wide.as_ptr());
                 (self.write.entry_set_filetype)(
                     raw_entry,
                     u32::from(match item.kind {
@@ -2705,46 +2717,6 @@ mod platform_impl {
                     .into_owned(),
             )
         }
-    }
-
-    /// Switches the process CRT to a UTF-8 code page so libarchive's
-    /// locale-based pathname conversions accept arbitrary Unicode names.
-    ///
-    /// The CRT default locale is the ASCII-only "C" locale; without this,
-    /// writing a header for a non-ASCII pathname fails with "Can't translate
-    /// pathname to current locale".  This crate only uses Windows file APIs
-    /// (never CRT locale formatting), so the process-wide change is safe.
-    /// Best effort: on systems without a UTF-8 CRT locale the ZIP writer
-    /// still works through the `hdrcharset=UTF-8` format option.
-    fn ensure_utf8_process_locale() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            type SetLocaleFn = unsafe extern "C" fn(c_int, *const c_char) -> *mut c_char;
-            const LC_ALL: c_int = 0;
-            // ".UTF-8" requires Windows 10 1903+; the classic locale name
-            // below selects the same UTF-8 code page (65001) on older systems.
-            let locale_names: [&[u8]; 2] = [b".UTF-8\0", b"English_United States.65001\0"];
-            for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
-                let Ok(library) = DynamicLibrary::load(Path::new(dll), true) else {
-                    continue;
-                };
-                let Some(setlocale) = library.symbol(b"setlocale\0") else {
-                    continue;
-                };
-                // SAFETY: the symbol name and signature are part of the
-                // stable UCRT ABI.
-                let setlocale: SetLocaleFn =
-                    unsafe { mem::transmute::<usize, SetLocaleFn>(setlocale) };
-                for name in locale_names {
-                    // SAFETY: `name` is a static NUL-terminated locale name;
-                    // the returned process-lifetime CRT buffer is ignored.
-                    let result = unsafe { setlocale(LC_ALL, name.as_ptr().cast::<c_char>()) };
-                    if !result.is_null() {
-                        return;
-                    }
-                }
-            }
-        });
     }
 
     fn secret_c_string(secret: &str) -> ArchiveResult<CString> {
