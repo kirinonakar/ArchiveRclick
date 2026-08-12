@@ -3,7 +3,8 @@ import {
     CheckBox,
     LineEdit,
     ListView,
-    Palette
+    Palette,
+    ProgressIndicator
 } from "std-widgets.slint";
 import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
 import { ConflictOverlay, ProgressOverlay } from "progress.slint";
@@ -608,6 +609,67 @@ export component AppWindow inherits Window {
                         enabled: password-entry.text != "";
                         clicked => { root.password-response(password-entry.text, true); }
                     }
+                }
+            }
+        }
+    }
+}
+
+// Standalone progress window used by the command-line subcommands so that
+// Explorer right-click operations show live progress.
+export component CliProgressWindow inherits Window {
+    title: "ArchiveRclick";
+    width: 560px;
+    height: 224px;
+
+    in property <string> operation-title;
+    in property <string> current-file;
+    in property <string> detail;
+    in property <float> value;
+
+    callback cancelled();
+
+    Rectangle {
+        background: Palette.background;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: root.operation-title;
+                font-size: 19px;
+                font-weight: 600;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.current-file;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            ProgressIndicator {
+                progress: root.value;
+                indeterminate: root.value < 0;
+                accessible-label: "Operation progress";
+                accessible-value: root.value < 0 ? "Working" : "" + Math.round(root.value * 100) + "%";
+            }
+
+            Text {
+                text: root.detail;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
                 }
             }
         }

@@ -9,10 +9,11 @@ use std::{
 use slint::{ComponentHandle, Model, ModelRc};
 
 use crate::{
-    AppWindow,
+    AppWindow, CliProgressWindow,
     archive::{
-        ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
-        ExtractOptions, ExtractSelection, InitialConflictPolicy, libarchive::LibArchiveEngine,
+        ArchiveEngine, ArchiveError, ArchiveResult, ConflictChoice, ConflictResolver, CreateFormat,
+        CreateOptions, ExtractOptions, ExtractSelection, InitialConflictPolicy, ProgressSink,
+        libarchive::LibArchiveEngine,
     },
     platform,
     tasks::{CancellationToken, ProgressSnapshot},
@@ -187,7 +188,10 @@ fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
     let Some(archive_arg) = args.first() else {
         return Err("Usage: ArchiveRclick extract <archive> [destination]".to_owned());
     };
-    let archive = PathBuf::from(archive_arg);
+    let requested = PathBuf::from(archive_arg);
+    let Some(archive) = resolve_existing_path(&requested) else {
+        return Err(missing_path_message(&requested));
+    };
     if !archive.is_file() {
         return Err(format!("Not an archive file: {}", archive.display()));
     }
@@ -199,10 +203,45 @@ fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
             .unwrap_or_else(|| Path::new("."))
             .join(archive_directory_name(&archive)),
     };
+    if cfg!(test) {
+        cli_extract_headless(&archive, &destination)
+    } else {
+        let archive_for_operation = archive.clone();
+        let destination_for_operation = destination.clone();
+        run_cli_gui(
+            "Extracting archive".to_owned(),
+            move |progress, cancel| {
+                let engine = LibArchiveEngine::load()?;
+                let options = ExtractOptions {
+                    selection: ExtractSelection::All,
+                    // The CLI has no conflict dialog; existing files are overwritten.
+                    conflict_policy: InitialConflictPolicy::OverwriteAll,
+                    ..ExtractOptions::default()
+                };
+                engine.extract(
+                    &archive_for_operation,
+                    &destination_for_operation,
+                    &options,
+                    progress,
+                    &CliConflictResolver,
+                    cancel,
+                )
+            },
+            move |summary| {
+                format!(
+                    "Extracted {} entries to {}",
+                    summary.entries_processed,
+                    destination.display()
+                )
+            },
+        )
+    }
+}
+
+fn cli_extract_headless(archive: &Path, destination: &Path) -> Result<(), String> {
     let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
     let options = ExtractOptions {
         selection: ExtractSelection::All,
-        // Headless operation cannot prompt, so existing files are overwritten.
         conflict_policy: InitialConflictPolicy::OverwriteAll,
         ..ExtractOptions::default()
     };
@@ -210,8 +249,8 @@ fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
     let progress = |_snapshot: ProgressSnapshot| {};
     let summary = engine
         .extract(
-            &archive,
-            &destination,
+            archive,
+            destination,
             &options,
             &progress,
             &CliConflictResolver,
@@ -237,10 +276,12 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     if args.is_empty() {
         return Err(format!("Usage: ArchiveRclick {verb} <file-or-folder>..."));
     }
-    let sources: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
-    for source in &sources {
-        if !source.exists() {
-            return Err(format!("No such file or folder: {}", source.display()));
+    let mut sources: Vec<PathBuf> = Vec::with_capacity(args.len());
+    for argument in args {
+        let requested = PathBuf::from(argument);
+        match resolve_existing_path(&requested) {
+            Some(source) => sources.push(source),
+            None => return Err(missing_path_message(&requested)),
         }
     }
     let destination = cli_archive_destination(&sources, format);
@@ -250,6 +291,42 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
             destination.display()
         ));
     }
+    if cfg!(test) {
+        cli_create_headless(&sources, &destination, format)
+    } else {
+        let destination_for_operation = destination.clone();
+        run_cli_gui(
+            format!("Creating {} archive", format.label()),
+            move |progress, cancel| {
+                let engine = LibArchiveEngine::load()?;
+                let options = CreateOptions {
+                    format,
+                    ..CreateOptions::default()
+                };
+                engine.create(
+                    &destination_for_operation,
+                    &sources,
+                    &options,
+                    progress,
+                    cancel,
+                )
+            },
+            move |summary| {
+                format!(
+                    "Created {} ({} entries)",
+                    destination.display(),
+                    summary.entries_processed
+                )
+            },
+        )
+    }
+}
+
+fn cli_create_headless(
+    sources: &[PathBuf],
+    destination: &Path,
+    format: CreateFormat,
+) -> Result<(), String> {
     let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
     let options = CreateOptions {
         format,
@@ -258,7 +335,7 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     let cancel = CancellationToken::new();
     let progress = |_snapshot: ProgressSnapshot| {};
     let summary = engine
-        .create(&destination, &sources, &options, &progress, &cancel)
+        .create(destination, sources, &options, &progress, &cancel)
         .map_err(|error| error.to_string())?;
     let message = format!(
         "Created {} ({} entries)",
@@ -268,6 +345,128 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     println!("{message}");
     platform::show_info("ArchiveRclick", &message);
     Ok(())
+}
+
+fn missing_path_message(path: &Path) -> String {
+    format!(
+        "No such file or folder: {}\n\nIf the name contains non-ASCII characters, use the Explorer right-click menu instead of a console so the exact Unicode name is preserved.",
+        path.display()
+    )
+}
+
+/// Runs a CLI operation behind a small progress window. The operation runs on
+/// a worker thread and reports progress through the Slint event loop; the
+/// window closes when the worker finishes.
+fn run_cli_gui<T: Send + 'static>(
+    title: String,
+    operation: impl FnOnce(&dyn ProgressSink, &CancellationToken) -> ArchiveResult<T>
+        + Send
+        + 'static,
+    summarize: impl FnOnce(T) -> String,
+) -> Result<(), String> {
+    let ui = CliProgressWindow::new()
+        .map_err(|error| format!("Could not create the progress window: {error}"))?;
+    ui.set_operation_title(title.into());
+    ui.set_current_file("Starting…".into());
+    ui.set_detail("".into());
+    ui.set_value(-1.0);
+
+    let cancel = CancellationToken::new();
+    let cancel_for_ui = cancel.clone();
+    ui.on_cancelled(move || cancel_for_ui.cancel());
+
+    let weak = ui.as_weak();
+    let weak_progress = weak.clone();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let progress = move |snapshot: ProgressSnapshot| {
+            let detail = progress_detail(&snapshot);
+            let value = snapshot.fraction();
+            let current = snapshot.current_file;
+            let _ = weak_progress.upgrade_in_event_loop(move |ui| {
+                ui.set_current_file(current.into());
+                ui.set_detail(detail.into());
+                ui.set_value(value);
+            });
+        };
+        let result = operation(&progress, &cancel);
+        let _ = sender.send(result);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let _ = ui.hide();
+        });
+    });
+
+    ui.show()
+        .map_err(|error| format!("Could not show the progress window: {error}"))?;
+    ui.run()
+        .map_err(|error| format!("Progress window event loop failed: {error}"))?;
+    match receiver
+        .recv()
+        .map_err(|error| format!("Operation thread failed: {error}"))?
+    {
+        Ok(value) => {
+            let message = summarize(value);
+            println!("{message}");
+            platform::show_info("ArchiveRclick", &message);
+            Ok(())
+        }
+        Err(ArchiveError::Cancelled) => {
+            platform::show_info("ArchiveRclick", "Operation cancelled");
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn progress_detail(snapshot: &ProgressSnapshot) -> String {
+    match (snapshot.total_entries, snapshot.total_bytes) {
+        (Some(entries), Some(bytes)) => format!(
+            "{} / {} entries · {} / {}",
+            snapshot.entries_processed,
+            entries,
+            compact_bytes(snapshot.bytes_processed),
+            compact_bytes(bytes)
+        ),
+        (Some(entries), _) => format!("{} / {} entries", snapshot.entries_processed, entries),
+        _ => format!("{} entries", snapshot.entries_processed),
+    }
+}
+
+/// Resolves a CLI source path. Console codepages (for example CP949 on
+/// Korean Windows) replace characters that are not in the codepage with
+/// '?', so a name typed into cmd or PowerShell may not match the real file.
+/// When the exact path is missing, scan the parent folder and accept the
+/// single entry that matches with each '?' treated as a wildcard.
+fn resolve_existing_path(requested: &Path) -> Option<PathBuf> {
+    if requested.exists() {
+        return Some(requested.to_path_buf());
+    }
+    let name = requested.file_name()?.to_string_lossy();
+    if !name.contains('?') {
+        return None;
+    }
+    let pattern = name.to_lowercase();
+    let parent = requested.parent()?;
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let candidate = entry.file_name().to_string_lossy().to_lowercase();
+        if loose_name_matches(&pattern, &candidate) {
+            matches.push(entry.path());
+        }
+    }
+    (matches.len() == 1).then(|| matches.remove(0))
+}
+
+fn loose_name_matches(pattern: &str, candidate: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let candidate: Vec<char> = candidate.chars().collect();
+    pattern.len() == candidate.len()
+        && pattern
+            .iter()
+            .zip(&candidate)
+            .all(|(pattern_char, candidate_char)| {
+                *pattern_char == '?' || pattern_char == candidate_char
+            })
 }
 
 /// Places the new archive next to the sources, naming it after the folder.
