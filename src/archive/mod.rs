@@ -1,6 +1,8 @@
 mod engine;
 mod entry;
 mod error;
+#[cfg(windows)]
+pub mod encoding;
 pub mod libarchive;
 mod options;
 mod path_safety;

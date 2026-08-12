@@ -44,7 +44,8 @@ mod platform_impl {
     use super::super::{
         ArchiveEngine, ArchiveEntry, ArchiveEntryKind, ArchiveError, ArchiveListing, ArchiveResult,
         ConflictChoice, ConflictResolver, CreateFormat, CreateOptions, ExtractOptions,
-        InitialConflictPolicy, OperationSummary, ProgressSink, ensure_no_reparse_ancestors,
+        InitialConflictPolicy, OperationSummary, ProgressSink, encoding,
+        ensure_no_reparse_ancestors,
         safe_relative_path,
     };
 
@@ -128,6 +129,7 @@ mod platform_impl {
 
     type ArchiveEntryPathnameW = unsafe extern "C" fn(*mut RawEntry) -> *const u16;
     type ArchiveEntryPathnameUtf8 = unsafe extern "C" fn(*mut RawEntry) -> *const c_char;
+    type ArchiveEntryPathname = unsafe extern "C" fn(*mut RawEntry) -> *const c_char;
     type ArchiveEntrySize = unsafe extern "C" fn(*mut RawEntry) -> i64;
     type ArchiveEntryFlag = unsafe extern "C" fn(*mut RawEntry) -> c_int;
     type ArchiveEntryFiletype = unsafe extern "C" fn(*mut RawEntry) -> u16;
@@ -232,6 +234,7 @@ mod platform_impl {
         filter_bytes: ArchiveFilterBytes,
         entry_pathname_w: ArchiveEntryPathnameW,
         entry_pathname_utf8: Option<ArchiveEntryPathnameUtf8>,
+        entry_pathname: ArchiveEntryPathname,
         entry_size: ArchiveEntrySize,
         entry_size_is_set: ArchiveEntryFlag,
         entry_filetype: ArchiveEntryFiletype,
@@ -286,6 +289,12 @@ mod platform_impl {
             allow_unsupported: bool,
             archiveint_fallback: bool,
         ) -> ArchiveResult<Self> {
+            // libarchive converts pathnames between the CRT locale and
+            // Unicode.  The CRT starts in the ASCII-only "C" locale, which
+            // makes writing any non-ASCII entry fail with "Can't translate
+            // pathname to current locale"; switch it to a UTF-8 code page
+            // once so every archive format accepts arbitrary Unicode names.
+            ensure_utf8_process_locale();
             let version_number_fn =
                 required_symbol!(library, "archive_version_number", ArchiveVersionNumber);
             // SAFETY: this process-global accessor has no preconditions.
@@ -587,6 +596,11 @@ mod platform_impl {
                     library,
                     "archive_entry_pathname_utf8",
                     ArchiveEntryPathnameUtf8
+                ),
+                entry_pathname: required_symbol!(
+                    library,
+                    "archive_entry_pathname",
+                    ArchiveEntryPathname
                 ),
                 entry_size: required_symbol!(library, "archive_entry_size", ArchiveEntrySize),
                 entry_size_is_set: required_symbol!(
@@ -1107,11 +1121,35 @@ mod platform_impl {
                     }
                     None => None,
                 },
-            }
-            .ok_or_else(|| ArchiveError::LibArchive {
-                operation: "decoding archive pathname",
-                message: "entry pathname is missing or cannot be decoded".to_owned(),
-            })?;
+            };
+            let path = match path {
+                Some(path) => path,
+                None => {
+                    // ZIP entries without the UTF-8 language encoding flag
+                    // (general purpose bit 11) and similar legacy entries
+                    // store pathnames as raw bytes in some legacy codepage.
+                    // libarchive cannot translate those under the UTF-8 CRT
+                    // locale, so recover the raw bytes and run the heuristic
+                    // encoding detector (CP949 / Shift_JIS / GBK / Big5 / ...).
+                    let raw = unsafe {
+                        copy_c_string_bytes_bounded(
+                            (self.api.entry_pathname)(entry),
+                            MAX_ARCHIVE_PATH_UTF8_BYTES,
+                            "archive raw pathname",
+                        )?
+                    };
+                    match raw.and_then(|raw| encoding::decode_name(&raw)) {
+                        Some(name) => PathBuf::from(name),
+                        None => {
+                            return Err(ArchiveError::LibArchive {
+                                operation: "decoding archive pathname",
+                                message: "entry pathname is missing or cannot be decoded"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                }
+            };
 
             // SAFETY: all accessors borrow immutable fields from `entry`.
             let (size, filetype, modified, hardlink, encrypted) = unsafe {
@@ -1292,6 +1330,12 @@ mod platform_impl {
             match options.format {
                 CreateFormat::Zip => {
                     self.call_unary(self.write.set_format_zip, "selecting ZIP format")?;
+                    // Write entry names as UTF-8 and set the ZIP language
+                    // encoding flag (general purpose bit 11), the standard
+                    // UTF-8 extension for ZIP headers.  Without this option
+                    // the writer falls back to the CRT locale and fails with
+                    // "Can't translate pathname to current locale".
+                    self.format_option("zip", "hdrcharset", "UTF-8")?;
                     let method = if options.compression_level == 0 {
                         "store"
                     } else {
@@ -2626,6 +2670,30 @@ mod platform_impl {
         Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
     }
 
+    unsafe fn copy_c_string_bytes_bounded(
+        pointer: *const c_char,
+        max_bytes: usize,
+        subject: &str,
+    ) -> ArchiveResult<Option<Vec<u8>>> {
+        if pointer.is_null() {
+            return Ok(None);
+        }
+        let mut length = 0usize;
+        // SAFETY: libarchive promises a NUL-terminated string. The explicit
+        // maximum bounds the attacker-influenced scan and resulting allocation.
+        while length <= max_bytes && unsafe { *pointer.add(length) } != 0 {
+            length += 1;
+        }
+        if length > max_bytes {
+            return Err(ArchiveError::LimitExceeded(format!(
+                "{subject} exceeds {max_bytes} bytes"
+            )));
+        }
+        // SAFETY: the bounded scan established `length` initialized bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
+        Ok(Some(bytes.to_vec()))
+    }
+
     fn copy_c_string(pointer: *const c_char) -> Option<String> {
         if pointer.is_null() {
             None
@@ -2637,6 +2705,46 @@ mod platform_impl {
                     .into_owned(),
             )
         }
+    }
+
+    /// Switches the process CRT to a UTF-8 code page so libarchive's
+    /// locale-based pathname conversions accept arbitrary Unicode names.
+    ///
+    /// The CRT default locale is the ASCII-only "C" locale; without this,
+    /// writing a header for a non-ASCII pathname fails with "Can't translate
+    /// pathname to current locale".  This crate only uses Windows file APIs
+    /// (never CRT locale formatting), so the process-wide change is safe.
+    /// Best effort: on systems without a UTF-8 CRT locale the ZIP writer
+    /// still works through the `hdrcharset=UTF-8` format option.
+    fn ensure_utf8_process_locale() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            type SetLocaleFn = unsafe extern "C" fn(c_int, *const c_char) -> *mut c_char;
+            const LC_ALL: c_int = 0;
+            // ".UTF-8" requires Windows 10 1903+; the classic locale name
+            // below selects the same UTF-8 code page (65001) on older systems.
+            let locale_names: [&[u8]; 2] = [b".UTF-8\0", b"English_United States.65001\0"];
+            for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+                let Ok(library) = DynamicLibrary::load(Path::new(dll), true) else {
+                    continue;
+                };
+                let Some(setlocale) = library.symbol(b"setlocale\0") else {
+                    continue;
+                };
+                // SAFETY: the symbol name and signature are part of the
+                // stable UCRT ABI.
+                let setlocale: SetLocaleFn =
+                    unsafe { mem::transmute::<usize, SetLocaleFn>(setlocale) };
+                for name in locale_names {
+                    // SAFETY: `name` is a static NUL-terminated locale name;
+                    // the returned process-lifetime CRT buffer is ignored.
+                    let result = unsafe { setlocale(LC_ALL, name.as_ptr().cast::<c_char>()) };
+                    if !result.is_null() {
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     fn secret_c_string(secret: &str) -> ArchiveResult<CString> {
@@ -2677,7 +2785,8 @@ mod platform_impl {
             ARCHIVE_OK, ARCHIVE_WARN, ArchiveError, ArchiveReadSupport, LibArchiveEngine,
             MAX_LIST_ENTRIES, MAX_LIST_PATH_BYTES, MAX_SUPPORTED_LIBARCHIVE_VERSION,
             MAX_TEST_OUTPUT_BYTES, RawArchive, ScanBudget, canonical_library_file,
-            checked_add_with_limit, copy_c_string_bounded, enforce_limit,
+            checked_add_with_limit, copy_c_string_bounded, copy_c_string_bytes_bounded,
+            enforce_limit,
             ensure_supported_libarchive_abi, looks_like_password_error, probe_supported_formats,
             system_time_seconds,
         };
@@ -2794,6 +2903,23 @@ mod platform_impl {
             );
             // SAFETY: same valid string, with an intentionally smaller cap.
             assert!(unsafe { copy_c_string_bounded(value.as_ptr(), 3, "path") }.is_err());
+        }
+
+        #[test]
+        fn raw_pathname_copy_is_bounded_and_preserves_bytes() {
+            let value = CString::new("four").unwrap();
+            // SAFETY: `value` is live and NUL-terminated for both calls.
+            assert_eq!(
+                unsafe { copy_c_string_bytes_bounded(value.as_ptr(), 4, "path") }.unwrap(),
+                Some(b"four".to_vec())
+            );
+            // SAFETY: same valid string, with an intentionally smaller cap.
+            assert!(unsafe { copy_c_string_bytes_bounded(value.as_ptr(), 3, "path") }.is_err());
+            // SAFETY: a null pointer yields None without touching memory.
+            assert_eq!(
+                unsafe { copy_c_string_bytes_bounded(std::ptr::null(), 4, "path") }.unwrap(),
+                None
+            );
         }
 
         #[test]
