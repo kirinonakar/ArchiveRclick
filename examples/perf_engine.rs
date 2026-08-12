@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use archive_rclick::{
+use archive_rclick_core::{
     archive::{
         ArchiveEngine, ConflictChoice, ConflictResolver, ExtractOptions,
         libarchive::LibArchiveEngine,
@@ -107,8 +107,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn prepare_root_model(
-    listing: archive_rclick::archive::ArchiveListing,
-) -> (archive_rclick::archive::ArchiveListing, usize) {
+    listing: archive_rclick_core::archive::ArchiveListing,
+) -> (archive_rclick_core::archive::ArchiveListing, usize) {
     let mut root_names = std::collections::HashSet::new();
     for entry in &listing.entries {
         if let Some(name) = entry

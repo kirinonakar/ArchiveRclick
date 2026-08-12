@@ -1,8 +1,10 @@
-//! Explorer context-menu shell extension (IContextMenu).
+//! Explorer context-menu shell extension (IContextMenu + IExplorerCommand).
 //!
 //! Static registry verbs cannot show per-file labels, so this DLL computes
 //! the menu items from the selected paths and displays the real names, e.g.
 //! "보고서.zip으로 압축하기", "보고서.7z로 압축하기" and "보고서\ 에 풀기".
+//! IContextMenu feeds the classic menu and Windows 11's "추가 옵션 표시";
+//! IExplorerCommand shows the same verbs in the Windows 11 default menu.
 //! Invoking an item launches archive-rclick.exe directly with Unicode
 //! arguments (no PowerShell, no cmd), and the app shows its progress window.
 #![cfg(windows)]
@@ -12,26 +14,35 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::Mutex,
 };
 
 use windows::{
-    core::{implement, w, BOOL, IUnknown, Interface, Ref, GUID, HSTRING, PCWSTR, PSTR},
+    core::{implement, w, BOOL, IUnknown, Interface, Ref, GUID, HSTRING, PCWSTR, PSTR, PWSTR},
     Win32::{
-        Foundation::ERROR_SUCCESS,
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
         System::{
-            Com::{FORMATETC, IClassFactory, IClassFactory_Impl, IDataObject, STGMEDIUM},
+            Com::{
+                CoTaskMemAlloc, CoTaskMemFree, FORMATETC, IClassFactory, IClassFactory_Impl,
+                IBindCtx, IDataObject, STGMEDIUM,
+            },
             LibraryLoader::{GetModuleFileNameW, GetModuleHandleW},
             Ole::ReleaseStgMedium,
             Registry::{
-                HKEY, HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegCreateKeyW,
-                RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+                HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey,
+                RegCreateKeyW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+                RegSetValueExW,
             },
         },
         UI::{
             Shell::{
-                CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, HDROP, IContextMenu,
-                IContextMenu_Impl, IShellExtInit, IShellExtInit_Impl, ShellExecuteW,
+                CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, ECF_HASSUBCOMMANDS,
+                ECS_ENABLED, ECS_HIDDEN, HDROP, IContextMenu, IContextMenu_Impl,
+                IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
+                IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl, IShellItem,
+                IShellItemArray, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
+                SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{AppendMenuW, HMENU, MF_STRING, SW_SHOWNORMAL},
         },
@@ -68,16 +79,43 @@ const OFF_7Z: usize = 2;
 
 // HRESULT constants kept local to avoid feature-flag surprises.
 const S_OK: windows::core::HRESULT = windows::core::HRESULT(0);
+const S_FALSE: windows::core::HRESULT = windows::core::HRESULT(1);
 const E_POINTER: windows::core::HRESULT = windows::core::HRESULT(0x8000_4003u32 as i32);
 const E_NOINTERFACE: windows::core::HRESULT = windows::core::HRESULT(0x8000_4002u32 as i32);
 const E_NOTIMPL: windows::core::HRESULT = windows::core::HRESULT(0x8000_4001u32 as i32);
 const E_FAIL: windows::core::HRESULT = windows::core::HRESULT(0x8000_4005u32 as i32);
+const E_OUTOFMEMORY: windows::core::HRESULT = windows::core::HRESULT(0x8007_000Eu32 as i32);
 const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT = windows::core::HRESULT(0x8004_0111u32 as i32);
 
-#[implement(IShellExtInit, IContextMenu)]
+/// Number of COM objects the host still holds, plus IClassFactory locks.
+/// `DllCanUnloadNow` must answer "no" while this is non-zero: saying "yes"
+/// lets Explorer unload this DLL underneath live objects and crash on the
+/// next call into the freed code.
+static LIVE_OBJECTS: AtomicUsize = AtomicUsize::new(0);
+
+fn increment_live_objects() {
+    LIVE_OBJECTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Underflow-guarded decrement: an object whose creation failed its
+/// QueryInterface is released without ever being counted, so its Drop must
+/// not take the counter below zero.
+fn decrement_live_objects() {
+    let _ = LIVE_OBJECTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        count.checked_sub(1)
+    });
+}
+
+#[implement(IShellExtInit, IContextMenu, IExplorerCommand)]
 struct ArchiveContextMenu {
     paths: Mutex<Vec<OsString>>,
     cmd_first: Mutex<u32>,
+}
+
+impl Drop for ArchiveContextMenu {
+    fn drop(&mut self) {
+        decrement_live_objects();
+    }
 }
 
 impl ArchiveContextMenu {
@@ -130,45 +168,16 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if paths.is_empty() {
             return S_OK;
         }
-        let all_archives = paths.iter().all(|path| is_archive_path(Path::new(path)));
+        let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let verbs = menu_verbs(&paths_buf);
 
         let mut next_id = id_cmd_first;
         let mut count = 0u32;
-        let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        let labels: Vec<String> = if all_archives {
-            // 실제 해제 폴더명 (이미 있으면 _2, _3 ...): "보고서\ 에 풀기"
-            let base = extract_destination_name(&paths);
-            let final_name = if paths_buf.len() == 1 {
-                let parent = paths_buf[0].parent().unwrap_or_else(|| Path::new("."));
-                unique_path(&parent.join(&base))
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or(base)
-            } else {
-                base
-            };
-            vec![format!("{final_name}\\ 에 풀기")]
-        } else {
-            // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
-            let zip_name = unique_path(&cli_archive_destination(&paths_buf, CreateFormat::Zip))
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "archive.zip".to_owned());
-            let seven_name =
-                unique_path(&cli_archive_destination(&paths_buf, CreateFormat::SevenZip))
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "archive.7z".to_owned());
-            vec![
-                format!("{zip_name}으로 압축하기"),
-                format!("{seven_name}로 압축하기"),
-            ]
-        };
-        for label in labels {
+        for (_, label) in &verbs {
             if next_id > id_cmd_last {
                 break;
             }
-            if let Some(wide_label) = wide(&label) {
+            if let Some(wide_label) = wide(label) {
                 // SAFETY: hmenu is valid for the duration of the menu and the
                 // label buffer stays alive for the call.
                 let _ = unsafe { AppendMenuW(hmenu, MF_STRING, next_id as usize, PCWSTR(wide_label.as_ptr())) };
@@ -198,12 +207,7 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
             return Ok(());
         };
         match offset {
-            OFF_EXTRACT => {
-                for path in &paths {
-                    let args = format!("extract \"{}\"", path.to_string_lossy());
-                    run_exe(&exe, &args);
-                }
-            }
+            OFF_EXTRACT => run_exe(&exe, &build_args("extract", &paths)),
             OFF_ZIP => run_exe(&exe, &build_args("zip", &paths)),
             OFF_7Z => run_exe(&exe, &build_args("7z", &paths)),
             _ => {}
@@ -219,6 +223,305 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         _commandstring: PSTR,
         _cch: u32,
     ) -> WinResult<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IExplorerCommand: the Windows 11 default menu reads this interface from the
+// same CLSID. The root item hosts a cascade whose children carry the verbs,
+// so the per-file labels ("보고서.zip으로 압축하기" ...) appear in the new
+// menu as well.
+// ---------------------------------------------------------------------------
+
+impl IExplorerCommand_Impl for ArchiveContextMenu_Impl {
+    fn GetTitle(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        wide_alloc("ArchiveRclick").ok_or_else(|| E_OUTOFMEMORY.into())
+    }
+
+    fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetCanonicalName(&self) -> WinResult<GUID> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetState(
+        &self,
+        psiitemarray: Ref<'_, IShellItemArray>,
+        _foktobeslow: BOOL,
+    ) -> WinResult<u32> {
+        let visible = psiitemarray
+            .as_ref()
+            .is_some_and(|array| !item_array_paths(array).is_empty());
+        Ok(if visible { ECS_ENABLED.0 as u32 } else { ECS_HIDDEN.0 as u32 })
+    }
+
+    fn Invoke(
+        &self,
+        _psiitemarray: Ref<'_, IShellItemArray>,
+        _pbc: Ref<'_, IBindCtx>,
+    ) -> WinResult<()> {
+        // The root item only hosts the cascade; each verb invokes the app.
+        Ok(())
+    }
+
+    fn GetFlags(&self) -> WinResult<u32> {
+        Ok(ECF_HASSUBCOMMANDS.0 as u32)
+    }
+
+    fn EnumSubCommands(&self) -> WinResult<IEnumExplorerCommand> {
+        let commands: Vec<IExplorerCommand> = [Verb::Extract, Verb::Zip, Verb::SevenZip]
+            .into_iter()
+            .map(|verb| {
+                increment_live_objects();
+                ArchiveVerbCommand::new(verb).into()
+            })
+            .collect();
+        increment_live_objects();
+        Ok(VerbEnumerator::new(commands).into())
+    }
+}
+
+/// The three actions the shell extension can run on a selection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Extract,
+    Zip,
+    SevenZip,
+}
+
+impl Verb {
+    fn subcommand(self) -> &'static str {
+        match self {
+            Verb::Extract => "extract",
+            Verb::Zip => "zip",
+            Verb::SevenZip => "7z",
+        }
+    }
+}
+
+/// (verb, label) pairs for the current selection, in menu order. Labels are
+/// computed from the real file names so each entry stays per-file, e.g.
+/// "보고서.zip으로 압축하기", "보고서.7z로 압축하기", "보고서\ 에 풀기".
+fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let all_archives = paths.iter().all(|path| is_archive_path(path));
+    if all_archives {
+        if paths.len() == 1 {
+            // 실제 해제 폴더명 (이미 있으면 _2, _3 ...): "보고서\ 에 풀기"
+            let base = archive_stem(&paths[0]);
+            let parent = paths[0].parent().unwrap_or_else(|| Path::new("."));
+            let final_name = unique_path(&parent.join(&base))
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(base);
+            vec![(Verb::Extract, format!("{final_name}\\ 에 풀기"))]
+        } else {
+            // 여러 압축파일을 선택하면 각각 자기 이름의 폴더에 푼다.
+            vec![(Verb::Extract, "각각의 폴더에 풀기".to_owned())]
+        }
+    } else {
+        // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
+        let zip_name = unique_path(&cli_archive_destination(paths, CreateFormat::Zip))
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive.zip".to_owned());
+        let seven_name = unique_path(&cli_archive_destination(paths, CreateFormat::SevenZip))
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive.7z".to_owned());
+        vec![
+            (Verb::Zip, format!("{zip_name}으로 압축하기")),
+            (Verb::SevenZip, format!("{seven_name}로 압축하기")),
+        ]
+    }
+}
+
+/// One IExplorerCommand subcommand ("압축하기"/"풀기"). Explorer asks for the
+/// title before it can display the item, so the selection is captured there
+/// and reused by Invoke; Invoke also re-reads its own argument as a fallback.
+#[implement(IExplorerCommand)]
+struct ArchiveVerbCommand {
+    verb: Verb,
+    paths: Mutex<Vec<OsString>>,
+}
+
+impl ArchiveVerbCommand {
+    fn new(verb: Verb) -> Self {
+        Self {
+            verb,
+            paths: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn label(&self, paths: &[PathBuf]) -> Option<String> {
+        menu_verbs(paths)
+            .into_iter()
+            .find_map(|(verb, label)| (verb == self.verb).then_some(label))
+    }
+
+    fn stash_paths(&self, paths: Vec<OsString>) {
+        if let Ok(mut guard) = self.paths.lock() {
+            *guard = paths;
+        }
+    }
+}
+
+impl Drop for ArchiveVerbCommand {
+    fn drop(&mut self) {
+        decrement_live_objects();
+    }
+}
+
+impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
+    fn GetTitle(&self, psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        let paths = psiitemarray
+            .as_ref()
+            .map(item_array_paths)
+            .unwrap_or_default();
+        self.stash_paths(paths.clone());
+        let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let Some(label) = self.label(&paths_buf) else {
+            return Ok(PWSTR::null());
+        };
+        wide_alloc(&label).ok_or_else(|| E_OUTOFMEMORY.into())
+    }
+
+    fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetCanonicalName(&self) -> WinResult<GUID> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetState(
+        &self,
+        psiitemarray: Ref<'_, IShellItemArray>,
+        _foktobeslow: BOOL,
+    ) -> WinResult<u32> {
+        let visible = psiitemarray.as_ref().is_some_and(|array| {
+            let paths_buf: Vec<PathBuf> =
+                item_array_paths(array).iter().map(PathBuf::from).collect();
+            !paths_buf.is_empty() && self.label(&paths_buf).is_some()
+        });
+        Ok(if visible { ECS_ENABLED.0 as u32 } else { ECS_HIDDEN.0 as u32 })
+    }
+
+    fn Invoke(
+        &self,
+        psiitemarray: Ref<'_, IShellItemArray>,
+        _pbc: Ref<'_, IBindCtx>,
+    ) -> WinResult<()> {
+        let paths = psiitemarray
+            .as_ref()
+            .map(item_array_paths)
+            .unwrap_or_default();
+        self.stash_paths(paths.clone());
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let Some(exe) = find_exe_path() else {
+            return Ok(());
+        };
+        run_exe(&exe, &build_args(self.verb.subcommand(), &paths));
+        Ok(())
+    }
+
+    fn GetFlags(&self) -> WinResult<u32> {
+        Ok(0)
+    }
+
+    fn EnumSubCommands(&self) -> WinResult<IEnumExplorerCommand> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+#[implement(IEnumExplorerCommand)]
+struct VerbEnumerator {
+    commands: Vec<IExplorerCommand>,
+    cursor: Mutex<usize>,
+}
+
+impl VerbEnumerator {
+    fn new(commands: Vec<IExplorerCommand>) -> Self {
+        Self {
+            commands,
+            cursor: Mutex::new(0),
+        }
+    }
+}
+
+impl Drop for VerbEnumerator {
+    fn drop(&mut self) {
+        decrement_live_objects();
+    }
+}
+
+impl IEnumExplorerCommand_Impl for VerbEnumerator_Impl {
+    fn Next(
+        &self,
+        celt: u32,
+        puicommand: *mut Option<IExplorerCommand>,
+        pceltfetched: *mut u32,
+    ) -> windows::core::HRESULT {
+        if puicommand.is_null() {
+            return E_POINTER;
+        }
+        let Ok(mut cursor) = self.cursor.lock() else {
+            return E_FAIL;
+        };
+        let mut fetched = 0u32;
+        while fetched < celt {
+            let Some(command) = self.commands.get(*cursor).cloned() else {
+                break;
+            };
+            // SAFETY: puicommand points to writable storage for celt interface
+            // pointers and fetched is always below celt here.
+            unsafe { puicommand.add(fetched as usize).write(Some(command)) };
+            *cursor += 1;
+            fetched += 1;
+        }
+        if !pceltfetched.is_null() {
+            // SAFETY: pceltfetched is the out-parameter provided by the caller.
+            unsafe { *pceltfetched = fetched };
+        }
+        if fetched == celt {
+            S_OK
+        } else {
+            S_FALSE
+        }
+    }
+
+    fn Skip(&self, celt: u32) -> WinResult<()> {
+        let Ok(mut cursor) = self.cursor.lock() else {
+            return Err(E_FAIL.into());
+        };
+        *cursor = cursor.saturating_add(celt as usize);
+        Ok(())
+    }
+
+    fn Reset(&self) -> WinResult<()> {
+        let Ok(mut cursor) = self.cursor.lock() else {
+            return Err(E_FAIL.into());
+        };
+        *cursor = 0;
+        Ok(())
+    }
+
+    fn Clone(&self) -> WinResult<IEnumExplorerCommand> {
         Err(E_NOTIMPL.into())
     }
 }
@@ -249,11 +552,22 @@ impl IClassFactory_Impl for ShellExtFactory_Impl {
         unsafe {
             let object = handler.as_raw() as *mut c_void;
             let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-            ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+            let result = ((*vtbl).QueryInterface)(object, riid, ppvobj);
+            if result.is_ok() {
+                // The caller now holds a reference: keep the DLL resident
+                // until the object is released.
+                increment_live_objects();
+            }
+            result.ok()
         }
     }
 
-    fn LockServer(&self, _flock: BOOL) -> WinResult<()> {
+    fn LockServer(&self, flock: BOOL) -> WinResult<()> {
+        if flock.as_bool() {
+            increment_live_objects();
+        } else {
+            decrement_live_objects();
+        }
         Ok(())
     }
 }
@@ -289,16 +603,26 @@ pub unsafe extern "system" fn DllGetClassObject(
 
 /// # Safety
 /// COM export: takes no arguments.
+///
+/// Never claim "unloadable" while the host still holds objects or locks:
+/// Explorer would unload this DLL underneath them and crash on the next call.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllCanUnloadNow() -> windows::core::HRESULT {
-    S_OK
+    if LIVE_OBJECTS.load(Ordering::Acquire) == 0 {
+        S_OK
+    } else {
+        S_FALSE
+    }
 }
 
 /// # Safety
 /// COM export: takes no arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
-    match register_server() {
+    let Some(dll) = module_file_name() else {
+        return E_FAIL;
+    };
+    match register_context_menu(Path::new(&dll)) {
         Ok(()) => S_OK,
         Err(_) => E_FAIL,
     }
@@ -308,7 +632,7 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
 /// COM export: takes no arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllUnregisterServer() -> windows::core::HRESULT {
-    match unregister_server() {
+    match unregister_context_menu() {
         Ok(()) => S_OK,
         Err(_) => E_FAIL,
     }
@@ -330,16 +654,6 @@ fn is_archive_path(path: &Path) -> bool {
 }
 
 
-/// Folder that will receive the extraction: the archive's stem, or the common
-/// parent folder name for several archives.
-fn extract_destination_name(paths: &[OsString]) -> String {
-    if paths.len() == 1 {
-        archive_stem(Path::new(&paths[0]))
-    } else {
-        common_parent_name(paths)
-    }
-}
-
 fn archive_stem(path: &Path) -> String {
     let mut name = path
         .file_name()
@@ -360,28 +674,6 @@ fn archive_stem(path: &Path) -> String {
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| "압축파일".to_owned())
-}
-
-fn common_parent_name(paths: &[OsString]) -> String {
-    let mut common = Path::new(&paths[0])
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    for path in &paths[1..] {
-        let mut ancestor = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
-        while !common.starts_with(ancestor) {
-            match ancestor.parent() {
-                Some(parent) => ancestor = parent,
-                None => return "선택항목".to_owned(),
-            }
-        }
-        common = ancestor.to_path_buf();
-    }
-    common
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "선택항목".to_owned())
 }
 
 fn build_args(subcommand: &str, paths: &[OsString]) -> String {
@@ -518,15 +810,23 @@ fn read_registry_string(hive: HKEY, key_path: &str, value: &str) -> Option<OsStr
     (!text.is_empty()).then(|| OsString::from(text))
 }
 
-fn register_server() -> Result<(), String> {
-    let dll = module_file_name().ok_or_else(|| "could not locate the shell extension DLL".to_owned())?;
-    let directory = Path::new(&dll)
+/// Writes the per-user registry entries that attach this shell extension to
+/// Explorer's right-click menu. `dll_path` is the registered InprocServer32
+/// module (archive_rclick_core.dll next to the app executable).
+pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
+    if !dll_path.is_file() {
+        return Err(format!(
+            "The shell extension DLL does not exist: {}",
+            dll_path.display()
+        ));
+    }
+    let directory = dll_path
         .parent()
-        .ok_or_else(|| "could not resolve the DLL directory".to_owned())?;
+        .ok_or_else(|| "could not resolve the shell extension directory".to_owned())?;
     let exe = directory.join(EXE_NAME);
     let guid = guid_string();
     let inproc = format!(r"Software\Classes\CLSID\{guid}\InprocServer32");
-    set_registry_string(HKEY_CURRENT_USER, &inproc, None, &dll.to_string_lossy())?;
+    set_registry_string(HKEY_CURRENT_USER, &inproc, None, &dll_path.to_string_lossy())?;
     set_registry_string(HKEY_CURRENT_USER, &inproc, Some("ThreadingModel"), "Apartment")?;
     set_registry_string(
         HKEY_CURRENT_USER,
@@ -541,14 +841,48 @@ fn register_server() -> Result<(), String> {
         &guid,
     )?;
     set_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, Some(EXE_PATH_VALUE), &exe.to_string_lossy())?;
+    notify_shell_change();
     Ok(())
 }
 
-fn unregister_server() -> Result<(), String> {
+/// Removes the registry entries written by [`register_context_menu`]. The
+/// `Software\ArchiveRclick` key itself is kept because it also holds the app's
+/// settings; only the recorded executable path is deleted.
+pub fn unregister_context_menu() -> Result<(), String> {
     delete_registry_tree(HKEY_CURRENT_USER, &format!(r"Software\Classes\CLSID\{}", guid_string()))?;
     delete_registry_tree(HKEY_CURRENT_USER, r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick")?;
     delete_registry_tree(HKEY_CURRENT_USER, r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick")?;
-    delete_registry_tree(HKEY_CURRENT_USER, SETTINGS_KEY)
+    delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
+    notify_shell_change();
+    Ok(())
+}
+
+/// Tells Explorer to pick up the changed context-menu registration without
+/// waiting for a shell restart.
+fn notify_shell_change() {
+    // SAFETY: SHCNE_ASSOCCHANGED with SHCNF_IDLIST requires no item pointers.
+    unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
+}
+
+/// Whether the context-menu handler is currently registered for this user.
+pub fn is_context_menu_registered() -> bool {
+    registry_key_exists(
+        HKEY_CURRENT_USER,
+        &format!(r"Software\Classes\CLSID\{}\InprocServer32", guid_string()),
+    )
+}
+
+fn registry_key_exists(hive: HKEY, key_path: &str) -> bool {
+    let key_name = HSTRING::from(key_path);
+    let mut raw = HKEY(ptr::null_mut());
+    // SAFETY: key name stays live and `raw` is an out-parameter.
+    let status = unsafe { RegOpenKeyExW(hive, &key_name, None, KEY_READ, &mut raw) };
+    if status != ERROR_SUCCESS {
+        return false;
+    }
+    // SAFETY: handle came from RegOpenKeyExW.
+    let _ = unsafe { RegCloseKey(raw) };
+    true
 }
 
 fn set_registry_string(hive: HKEY, key_path: &str, value_name: Option<&str>, value: &str) -> Result<(), String> {
@@ -576,10 +910,32 @@ fn delete_registry_tree(hive: HKEY, key_path: &str) -> Result<(), String> {
     let key_name = HSTRING::from(key_path);
     // SAFETY: key name stays live for the call.
     let status = unsafe { RegDeleteTreeW(hive, &key_name) };
-    if status == ERROR_SUCCESS {
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
         Ok(())
     } else {
         Err(format!("could not delete registry key {key_path} (error {status:?})"))
+    }
+}
+
+fn delete_registry_value(hive: HKEY, key_path: &str, value_name: &str) -> Result<(), String> {
+    let key_name = HSTRING::from(key_path);
+    let mut raw = HKEY(ptr::null_mut());
+    // SAFETY: key name stays live and `raw` is an out-parameter.
+    let status = unsafe { RegOpenKeyExW(hive, &key_name, None, KEY_READ | KEY_SET_VALUE, &mut raw) };
+    if status != ERROR_SUCCESS {
+        return Err(format!("could not open registry key {key_path} (error {status:?})"));
+    }
+    let value = HSTRING::from(value_name);
+    // SAFETY: key is live and the value name stays live for the call.
+    let status = unsafe { RegDeleteValueW(raw, PCWSTR(value.as_ptr())) };
+    // SAFETY: handle came from RegOpenKeyExW.
+    let _ = unsafe { RegCloseKey(raw) };
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not delete registry value {key_path}\\{value_name} (error {status:?})"
+        ))
     }
 }
 
@@ -605,6 +961,70 @@ fn wide(text: &str) -> Option<Vec<u16>> {
     let mut units: Vec<u16> = text.encode_utf16().collect();
     units.push(0);
     (!units.is_empty()).then_some(units)
+}
+
+/// Reads filesystem paths out of the IShellItemArray Explorer passes to the
+/// IExplorerCommand methods.
+fn item_array_paths(array: &IShellItemArray) -> Vec<OsString> {
+    // SAFETY: array is live for the duration of the call.
+    let Ok(items) = (unsafe { array.EnumItems() }) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    loop {
+        let mut batch: [Option<IShellItem>; 8] = std::array::from_fn(|_| None);
+        let mut fetched = 0u32;
+        // SAFETY: batch is writable storage for up to 8 interface pointers and
+        // fetched is an out-parameter.
+        let _ = unsafe { items.Next(&mut batch, Some(&mut fetched)) };
+        if fetched == 0 {
+            break;
+        }
+        for item in batch.into_iter().take(fetched as usize).flatten() {
+            if let Some(path) = item_filesystem_path(&item) {
+                paths.push(path);
+            }
+        }
+        if fetched < 8 {
+            break;
+        }
+    }
+    paths
+}
+
+/// Resolves a shell item to its filesystem path (SIGDN_FILESYSPATH).
+fn item_filesystem_path(item: &IShellItem) -> Option<OsString> {
+    // SAFETY: item is live; the returned name must be freed with CoTaskMemFree.
+    let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: the shell returned a NUL-terminated UTF-16 string.
+    let units = unsafe { name.as_wide() };
+    let path = (!units.is_empty()).then(|| OsString::from_wide(units));
+    // SAFETY: the string was allocated by the shell and must be released with
+    // CoTaskMemFree.
+    unsafe { CoTaskMemFree(Some(name.0 as *const c_void)) };
+    path
+}
+
+/// Copies `text` into a CoTaskMem-allocated NUL-terminated UTF-16 buffer, the
+/// allocation the shell expects for IExplorerCommand string out-parameters.
+fn wide_alloc(text: &str) -> Option<PWSTR> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let byte_count = (units.len() + 1) * std::mem::size_of::<u16>();
+    // SAFETY: byte_count is the exact allocation size requested.
+    let raw = unsafe { CoTaskMemAlloc(byte_count) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: raw points to byte_count writable bytes; the copy writes exactly
+    // the encoded units plus the terminating NUL.
+    unsafe {
+        raw.copy_from_nonoverlapping(units.as_ptr() as *const c_void, units.len() * 2);
+        raw.add(byte_count - 2).write_bytes(0, 2);
+    }
+    Some(PWSTR(raw as *mut u16))
 }
 
 fn utf16_bytes(value: &str) -> Vec<u8> {

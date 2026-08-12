@@ -8,6 +8,7 @@ publish = false
 build = "build.rs"
 
 [lib]
+name = "archive_rclick_core"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]

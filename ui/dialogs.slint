@@ -256,9 +256,12 @@ export component CreateOverlay inherits Rectangle {
 export component SettingsOverlay inherits Rectangle {
     in property <[string]> font-options;
     in property <int> font-selection;
+    in property <string> context-menu-state;
 
     callback accepted(int);
     callback cancelled();
+    callback register-context-menu();
+    callback unregister-context-menu();
 
     background: #00000080;
     accessible-role: region;
@@ -268,7 +271,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 500px;
-        height: 260px;
+        height: 396px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -299,6 +302,33 @@ export component SettingsOverlay inherits Rectangle {
                 text: "Auto picks Noto Sans JP when installed, otherwise Yu Gothic.";
                 color: Palette.foreground;
                 wrap: word-wrap;
+            }
+
+            Text {
+                text: "Explorer right-click menu";
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.context-menu-state;
+                color: Palette.foreground;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Button {
+                    text: "Register";
+                    clicked => { root.register-context-menu(); }
+                }
+
+                Button {
+                    text: "Remove";
+                    clicked => { root.unregister-context-menu(); }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
             }
 
             Rectangle { vertical-stretch: 1; }

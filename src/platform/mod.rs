@@ -4,7 +4,25 @@ pub mod associations;
 pub mod drop_target;
 pub mod settings;
 pub mod shell;
+#[cfg(windows)]
 pub mod shell_ext;
+#[cfg(not(windows))]
+pub mod shell_ext {
+    //! Fallback for platforms without Explorer shell integration.
+    use std::path::Path;
+
+    pub fn register_context_menu(_dll_path: &Path) -> Result<(), String> {
+        Err("The Explorer right-click menu is only available on Windows".to_owned())
+    }
+
+    pub fn unregister_context_menu() -> Result<(), String> {
+        Err("The Explorer right-click menu is only available on Windows".to_owned())
+    }
+
+    pub fn is_context_menu_registered() -> bool {
+        false
+    }
+}
 pub mod windows;
 
 pub use associations::{register_file_associations, unregister_file_associations};

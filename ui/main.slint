@@ -3,8 +3,7 @@ import {
     CheckBox,
     LineEdit,
     ListView,
-    Palette,
-    ProgressIndicator
+    Palette
 } from "std-widgets.slint";
 import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
 import { ConflictOverlay, ProgressOverlay } from "progress.slint";
@@ -240,6 +239,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> font-options;
     in-out property <int> font-selection;
     in-out property <bool> settings-visible;
+    in-out property <string> context-menu-state;
 
     callback open-requested();
     callback up-requested();
@@ -261,6 +261,8 @@ export component AppWindow inherits Window {
     callback settings-requested();
     callback settings-applied(int);
     callback settings-cancelled();
+    callback context-menu-register-requested();
+    callback context-menu-unregister-requested();
 
     in-out property <bool> extract-visible: false;
 
@@ -548,6 +550,9 @@ export component AppWindow inherits Window {
     if root.settings-visible : SettingsOverlay {
         font-options: root.font-options;
         font-selection: root.font-selection;
+        context-menu-state: root.context-menu-state;
+        register-context-menu => { root.context-menu-register-requested(); }
+        unregister-context-menu => { root.context-menu-unregister-requested(); }
         accepted(selection) => {
             root.settings-visible = false;
             root.settings-applied(selection);
@@ -609,67 +614,6 @@ export component AppWindow inherits Window {
                         enabled: password-entry.text != "";
                         clicked => { root.password-response(password-entry.text, true); }
                     }
-                }
-            }
-        }
-    }
-}
-
-// Standalone progress window used by the command-line subcommands so that
-// Explorer right-click operations show live progress.
-export component CliProgressWindow inherits Window {
-    title: "ArchiveRclick";
-    width: 560px;
-    height: 224px;
-
-    in property <string> operation-title;
-    in property <string> current-file;
-    in property <string> detail;
-    in property <float> value;
-
-    callback cancelled();
-
-    Rectangle {
-        background: Palette.background;
-
-        VerticalLayout {
-            padding: 18px;
-            spacing: 10px;
-
-            Text {
-                text: root.operation-title;
-                font-size: 19px;
-                font-weight: 600;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-
-            Text {
-                text: root.current-file;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-
-            ProgressIndicator {
-                progress: root.value;
-                indeterminate: root.value < 0;
-                accessible-label: "Operation progress";
-                accessible-value: root.value < 0 ? "Working" : "" + Math.round(root.value * 100) + "%";
-            }
-
-            Text {
-                text: root.detail;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-
-            Rectangle { vertical-stretch: 1; }
-
-            HorizontalLayout {
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    text: "Cancel";
-                    clicked => { root.cancelled(); }
                 }
             }
         }

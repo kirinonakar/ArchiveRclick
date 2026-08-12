@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use archive_rclick::{
+use archive_rclick_core::{
     archive::{
         ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
         ExtractOptions, libarchive::LibArchiveEngine,
@@ -62,7 +62,7 @@ fn load_runtime() -> LibArchiveEngine {
     })
 }
 
-fn quiet_progress(_: archive_rclick::tasks::ProgressSnapshot) {}
+fn quiet_progress(_: archive_rclick_core::tasks::ProgressSnapshot) {}
 
 #[test]
 fn bundled_runtime_is_supported_libarchive_3_8_9() {

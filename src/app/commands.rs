@@ -9,11 +9,10 @@ use std::{
 use slint::{ComponentHandle, Model, ModelRc};
 
 use crate::{
-    AppWindow, CliProgressWindow,
+    AppWindow,
     archive::{
-        ArchiveEngine, ArchiveError, ArchiveResult, ConflictChoice, ConflictResolver, CreateFormat,
-        CreateOptions, ExtractOptions, ExtractSelection, InitialConflictPolicy, ProgressSink,
-        libarchive::LibArchiveEngine,
+        ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
+        ExtractOptions, ExtractSelection, InitialConflictPolicy, libarchive::LibArchiveEngine,
     },
     platform,
     tasks::{CancellationToken, ProgressSnapshot},
@@ -45,15 +44,15 @@ pub fn run() -> Result<(), String> {
     match subcommand.as_deref() {
         Some("extract") => {
             let rest: Vec<OsString> = args.collect();
-            run_cli_extract(&rest)
+            run_gui_extract(&rest)
         }
         Some("zip") => {
             let rest: Vec<OsString> = args.collect();
-            run_cli_create(&rest, CreateFormat::Zip)
+            run_gui_create(&rest, CreateFormat::Zip)
         }
         Some("7z") => {
             let rest: Vec<OsString> = args.collect();
-            run_cli_create(&rest, CreateFormat::SevenZip)
+            run_gui_create(&rest, CreateFormat::SevenZip)
         }
         _ => run_with_startup_argument(command),
     }
@@ -81,7 +80,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 return Ok(());
             }
             "--help" | "-h" | "/?" => {
-                let help = "ArchiveRclick [archive|command]\n\nCommands:\n  extract <archive> [destination]  Extract into a subfolder named after the archive\n  zip <path>...                    Create a ZIP archive named after the source folder\n  7z <path>...                     Create a 7z archive named after the source folder\n\nOptions:\n  --register       Register as an available archive handler\n  --unregister     Remove that registration\n  --check-runtime  Verify the bundled archive engine and exit";
+                let help = "ArchiveRclick [archive|command]\n\nCommands:\n  extract <archive>...  Extract each archive into its own subfolder\n  zip <path>...         Create a ZIP archive named after the source folder\n  7z <path>...          Create a 7z archive named after the source folder\n\nOptions:\n  --register       Register as an available archive handler\n  --unregister     Remove that registration\n  --check-runtime  Verify the bundled archive engine and exit";
                 if cfg!(test) {
                     println!("{help}");
                 } else {
@@ -103,6 +102,23 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         }
     }
 
+    let (ui, state, engine, _writable_formats) = open_main_window()?;
+
+    if let Some(path) = startup_argument.map(PathBuf::from) {
+        if path.is_file() {
+            start_listing(&ui, Rc::clone(&state), Arc::clone(&engine), path, None);
+        } else {
+            ui.set_status_text(format!("Not a file: {}", path.display()).into());
+        }
+    }
+
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Builds the main application window and wires it up; shared by the
+/// interactive startup path and the Explorer context-menu operations.
+fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let state = Rc::new(AppState::new());
@@ -132,6 +148,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
             .position(|(_, key)| *key == font_preference.as_str())
             .unwrap_or(0) as i32,
     );
+    ui.set_context_menu_state(context_menu_state_text().into());
     let writable_formats = engine.writable_formats();
     if writable_formats.is_empty() {
         return Err(
@@ -148,7 +165,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         &ui,
         Rc::clone(&state),
         Arc::clone(&engine),
-        writable_formats,
+        writable_formats.clone(),
     );
 
     let weak = ui.as_weak();
@@ -166,115 +183,39 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 
     ui.show()
         .map_err(|error| format!("Could not show the UI: {error}"))?;
+    Ok((ui, state, engine, writable_formats))
+}
 
-    if let Some(path) = startup_argument.map(PathBuf::from) {
-        if path.is_file() {
-            start_listing(&ui, Rc::clone(&state), Arc::clone(&engine), path, None);
-        } else {
-            ui.set_status_text(format!("Not a file: {}", path.display()).into());
+
+// ---------------------------------------------------------------------------
+// Explorer context-menu operations. The shell extension launches the app with
+// these verbs and the work runs inside the main window with live progress.
+// ---------------------------------------------------------------------------
+
+fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("Usage: ArchiveRclick extract <archive>...".to_owned());
+    }
+    let mut archives: Vec<PathBuf> = Vec::with_capacity(args.len());
+    for argument in args {
+        let requested = PathBuf::from(argument);
+        match resolve_existing_path(&requested) {
+            Some(path) if path.is_file() => archives.push(path),
+            Some(path) => return Err(format!("Not an archive file: {}", path.display())),
+            None => return Err(missing_path_message(&requested)),
         }
     }
-
+    let (ui, state, engine, _writable_formats) = open_main_window()?;
+    start_extract_batch(&ui, Rc::clone(&state), Arc::clone(&engine), archives);
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
 
-
-// ---------------------------------------------------------------------------
-// Command-line subcommands (also used by the Explorer context-menu entries).
-// ---------------------------------------------------------------------------
-
-fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
-    let Some(archive_arg) = args.first() else {
-        return Err("Usage: ArchiveRclick extract <archive> [destination]".to_owned());
-    };
-    let requested = PathBuf::from(archive_arg);
-    let Some(archive) = resolve_existing_path(&requested) else {
-        return Err(missing_path_message(&requested));
-    };
-    if !archive.is_file() {
-        return Err(format!("Not an archive file: {}", archive.display()));
-    }
-    let destination = match args.get(1) {
-        Some(destination) => PathBuf::from(destination),
-        // Default: a subfolder named after the archive file, next to it.
-        // If that folder already exists, pick the next free name (_2, _3 ...).
-        None => unique_path(
-            &archive
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(archive_directory_name(&archive)),
-        ),
-    };
-    if cfg!(test) {
-        cli_extract_headless(&archive, &destination)
-    } else {
-        let archive_for_operation = archive.clone();
-        let destination_for_operation = destination.clone();
-        run_cli_gui(
-            "Extracting archive".to_owned(),
-            move |progress, cancel| {
-                let engine = LibArchiveEngine::load()?;
-                let options = ExtractOptions {
-                    selection: ExtractSelection::All,
-                    // The CLI has no conflict dialog; existing files are overwritten.
-                    conflict_policy: InitialConflictPolicy::OverwriteAll,
-                    ..ExtractOptions::default()
-                };
-                engine.extract(
-                    &archive_for_operation,
-                    &destination_for_operation,
-                    &options,
-                    progress,
-                    &CliConflictResolver,
-                    cancel,
-                )
-            },
-            move |summary| {
-                format!(
-                    "Extracted {} entries to {}",
-                    summary.entries_processed,
-                    destination.display()
-                )
-            },
-        )
-    }
-}
-
-fn cli_extract_headless(archive: &Path, destination: &Path) -> Result<(), String> {
-    let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
-    let options = ExtractOptions {
-        selection: ExtractSelection::All,
-        conflict_policy: InitialConflictPolicy::OverwriteAll,
-        ..ExtractOptions::default()
-    };
-    let cancel = CancellationToken::new();
-    let progress = |_snapshot: ProgressSnapshot| {};
-    let summary = engine
-        .extract(
-            archive,
-            destination,
-            &options,
-            &progress,
-            &CliConflictResolver,
-            &cancel,
-        )
-        .map_err(|error| error.to_string())?;
-    let message = format!(
-        "Extracted {} entries to {}",
-        summary.entries_processed,
-        destination.display()
-    );
-    println!("{message}");
-    platform::show_info("ArchiveRclick", &message);
-    Ok(())
-}
-
-fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String> {
+fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String> {
     let verb = match format {
         CreateFormat::Zip => "zip",
         CreateFormat::SevenZip => "7z",
-        _ => unreachable!("only zip and 7z are exposed as CLI subcommands"),
+        _ => unreachable!("only zip and 7z reach the context-menu create flow"),
     };
     if args.is_empty() {
         return Err(format!("Usage: ArchiveRclick {verb} <file-or-folder>..."));
@@ -290,60 +231,21 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     // When a file with the same name already exists, pick the next free name
     // (보고서.zip -> 보고서_2.zip -> 보고서_3.zip ...).
     let destination = unique_path(&cli_archive_destination(&sources, format));
-    if cfg!(test) {
-        cli_create_headless(&sources, &destination, format)
-    } else {
-        let destination_for_operation = destination.clone();
-        run_cli_gui(
-            format!("Creating {} archive", format.label()),
-            move |progress, cancel| {
-                let engine = LibArchiveEngine::load()?;
-                let options = CreateOptions {
-                    format,
-                    ..CreateOptions::default()
-                };
-                engine.create(
-                    &destination_for_operation,
-                    &sources,
-                    &options,
-                    progress,
-                    cancel,
-                )
-            },
-            move |summary| {
-                format!(
-                    "Created {} ({} entries)",
-                    destination.display(),
-                    summary.entries_processed
-                )
-            },
-        )
-    }
-}
-
-fn cli_create_headless(
-    sources: &[PathBuf],
-    destination: &Path,
-    format: CreateFormat,
-) -> Result<(), String> {
-    let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
+    let (ui, state, engine, _writable_formats) = open_main_window()?;
     let options = CreateOptions {
         format,
         ..CreateOptions::default()
     };
-    let cancel = CancellationToken::new();
-    let progress = |_snapshot: ProgressSnapshot| {};
-    let summary = engine
-        .create(destination, sources, &options, &progress, &cancel)
-        .map_err(|error| error.to_string())?;
-    let message = format!(
-        "Created {} ({} entries)",
-        destination.display(),
-        summary.entries_processed
+    start_create(
+        &ui,
+        Rc::clone(&state),
+        Arc::clone(&engine),
+        destination,
+        sources,
+        options,
     );
-    println!("{message}");
-    platform::show_info("ArchiveRclick", &message);
-    Ok(())
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
 }
 
 fn missing_path_message(path: &Path) -> String {
@@ -351,84 +253,6 @@ fn missing_path_message(path: &Path) -> String {
         "No such file or folder: {}\n\nIf the name contains non-ASCII characters, use the Explorer right-click menu instead of a console so the exact Unicode name is preserved.",
         path.display()
     )
-}
-
-/// Runs a CLI operation behind a small progress window. The operation runs on
-/// a worker thread and reports progress through the Slint event loop; the
-/// window closes when the worker finishes.
-fn run_cli_gui<T: Send + 'static>(
-    title: String,
-    operation: impl FnOnce(&dyn ProgressSink, &CancellationToken) -> ArchiveResult<T>
-        + Send
-        + 'static,
-    summarize: impl FnOnce(T) -> String,
-) -> Result<(), String> {
-    let ui = CliProgressWindow::new()
-        .map_err(|error| format!("Could not create the progress window: {error}"))?;
-    ui.set_operation_title(title.into());
-    ui.set_current_file("Starting…".into());
-    ui.set_detail("".into());
-    ui.set_value(-1.0);
-
-    let cancel = CancellationToken::new();
-    let cancel_for_ui = cancel.clone();
-    ui.on_cancelled(move || cancel_for_ui.cancel());
-
-    let weak = ui.as_weak();
-    let weak_progress = weak.clone();
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let progress = move |snapshot: ProgressSnapshot| {
-            let detail = progress_detail(&snapshot);
-            let value = snapshot.fraction();
-            let current = snapshot.current_file;
-            let _ = weak_progress.upgrade_in_event_loop(move |ui| {
-                ui.set_current_file(current.into());
-                ui.set_detail(detail.into());
-                ui.set_value(value);
-            });
-        };
-        let result = operation(&progress, &cancel);
-        let _ = sender.send(result);
-        let _ = weak.upgrade_in_event_loop(move |ui| {
-            let _ = ui.hide();
-        });
-    });
-
-    ui.show()
-        .map_err(|error| format!("Could not show the progress window: {error}"))?;
-    ui.run()
-        .map_err(|error| format!("Progress window event loop failed: {error}"))?;
-    match receiver
-        .recv()
-        .map_err(|error| format!("Operation thread failed: {error}"))?
-    {
-        Ok(value) => {
-            let message = summarize(value);
-            println!("{message}");
-            platform::show_info("ArchiveRclick", &message);
-            Ok(())
-        }
-        Err(ArchiveError::Cancelled) => {
-            platform::show_info("ArchiveRclick", "Operation cancelled");
-            Ok(())
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn progress_detail(snapshot: &ProgressSnapshot) -> String {
-    match (snapshot.total_entries, snapshot.total_bytes) {
-        (Some(entries), Some(bytes)) => format!(
-            "{} / {} entries · {} / {}",
-            snapshot.entries_processed,
-            entries,
-            compact_bytes(snapshot.bytes_processed),
-            compact_bytes(bytes)
-        ),
-        (Some(entries), _) => format!("{} / {} entries", snapshot.entries_processed, entries),
-        _ => format!("{} entries", snapshot.entries_processed),
-    }
 }
 
 /// Resolves a CLI source path. Console codepages (for example CP949 on
@@ -540,9 +364,11 @@ pub(crate) fn unique_path(path: &Path) -> PathBuf {
     unreachable!("the loop always finds a free name")
 }
 
-struct CliConflictResolver;
+/// Conflict policy for Explorer context-menu operations: existing files are
+/// simply overwritten because no interactive conflict dialog is shown there.
+struct OverwriteAllResolver;
 
-impl ConflictResolver for CliConflictResolver {
+impl ConflictResolver for OverwriteAllResolver {
     fn resolve(&self, _destination: &Path) -> ConflictChoice {
         ConflictChoice::OverwriteAll
     }
@@ -654,7 +480,49 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         ui.on_settings_requested(move || {
             if let Some(ui) = weak.upgrade() {
+                ui.set_context_menu_state(context_menu_state_text().into());
                 ui.set_settings_visible(true);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_context_menu_register_requested(move || {
+            let result = context_menu_dll_path()
+                .and_then(|dll| platform::shell_ext::register_context_menu(&dll));
+            let state_text = context_menu_state_text();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_context_menu_state(state_text.into());
+                match result {
+                    Ok(()) => {
+                        ui.set_status_text("Explorer right-click menu registered".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Register right-click menu", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_context_menu_unregister_requested(move || {
+            let result = platform::shell_ext::unregister_context_menu();
+            let state_text = context_menu_state_text();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_context_menu_state(state_text.into());
+                match result {
+                    Ok(()) => {
+                        ui.set_status_text("Explorer right-click menu removed".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Remove right-click menu", &error);
+                    }
+                }
             }
         });
     }
@@ -1175,6 +1043,85 @@ fn start_create(
     });
 }
 
+/// Extracts each archive into its own `<archive-name>` subfolder, one after
+/// another, inside the main window's progress overlay. Used by the Explorer
+/// right-click "extract" entries, including multi-selection.
+fn start_extract_batch(
+    ui: &AppWindow,
+    state: Rc<AppState>,
+    engine: Engine,
+    archives: Vec<PathBuf>,
+) {
+    let total = archives.len();
+    let first = archives[0].display().to_string();
+    let cancel = begin_operation(ui, &state, "Extracting archives", &first);
+    let weak = ui.as_weak();
+    let weak_progress = weak.clone();
+    std::thread::spawn(move || {
+        let mut processed = 0usize;
+        let mut failures: Vec<(PathBuf, ArchiveError)> = Vec::new();
+        for (index, archive) in archives.iter().enumerate() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let title = format!("Extracting archive {}/{}", index + 1, total);
+            let archive_display = archive.display().to_string();
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_progress_title(title.into());
+                ui.set_progress_file(archive_display.into());
+                ui.set_progress_detail("Starting…".into());
+                ui.set_progress_value(-1.0);
+            });
+            let parent = archive.parent().unwrap_or_else(|| Path::new("."));
+            let destination = unique_path(&parent.join(archive_directory_name(archive)));
+            let options = ExtractOptions {
+                selection: ExtractSelection::All,
+                conflict_policy: InitialConflictPolicy::OverwriteAll,
+                ..ExtractOptions::default()
+            };
+            let progress =
+                |snapshot: ProgressSnapshot| update_progress_details(&weak_progress, snapshot);
+            match engine.extract(
+                archive,
+                &destination,
+                &options,
+                &progress,
+                &OverwriteAllResolver,
+                &cancel,
+            ) {
+                Ok(_) => processed += 1,
+                Err(ArchiveError::Cancelled) => break,
+                Err(error) => failures.push((archive.clone(), error)),
+            }
+        }
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            finish_operation(&ui);
+            if cancel.is_cancelled() {
+                ui.set_status_text("Operation cancelled".into());
+            } else if failures.is_empty() {
+                let noun = if processed == 1 { "archive" } else { "archives" };
+                ui.set_status_text(format!("Extracted {processed} {noun}").into());
+            } else if processed == 0 {
+                let (path, error) = failures.remove(0);
+                let message = format!("{}: {error}", path.display());
+                ui.set_status_text(message.clone().into());
+                platform::show_error("Extract archives", &message);
+            } else {
+                let details = failures
+                    .iter()
+                    .map(|(path, error)| format!("{}: {error}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ui.set_status_text(format!("Extracted {processed} of {total} archives").into());
+                platform::show_error(
+                    "Extract archives",
+                    &format!("Some archives failed:\n{details}"),
+                );
+            }
+        });
+    });
+}
+
 fn start_test(
     ui: &AppWindow,
     state: Rc<AppState>,
@@ -1278,26 +1225,37 @@ fn finish_operation(ui: &AppWindow) {
     ui.set_conflict_visible(false);
 }
 
+fn apply_progress_to(ui: &AppWindow, snapshot: &ProgressSnapshot) {
+    ui.set_progress_file(snapshot.current_file.clone().into());
+    ui.set_progress_detail(
+        format!(
+            "{} entries  •  {} processed",
+            snapshot.entries_processed,
+            compact_bytes(snapshot.bytes_processed)
+        )
+        .into(),
+    );
+    let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
+        snapshot.fraction()
+    } else {
+        -1.0
+    };
+    ui.set_progress_value(fraction);
+}
+
 fn update_progress(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
     let weak = weak.clone();
     let _ = weak.upgrade_in_event_loop(move |ui| {
         ui.set_progress_title(snapshot.phase.label().into());
-        ui.set_progress_file(snapshot.current_file.clone().into());
-        ui.set_progress_detail(
-            format!(
-                "{} entries  •  {} processed",
-                snapshot.entries_processed,
-                compact_bytes(snapshot.bytes_processed)
-            )
-            .into(),
-        );
-        let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
-            snapshot.fraction()
-        } else {
-            -1.0
-        };
-        ui.set_progress_value(fraction);
+        apply_progress_to(&ui, &snapshot);
     });
+}
+
+/// Like [`update_progress`], but keeps the current operation title so that a
+/// batch operation can show "Extracting archive 2/3" while entries stream in.
+fn update_progress_details(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
+    let weak = weak.clone();
+    let _ = weak.upgrade_in_event_loop(move |ui| apply_progress_to(&ui, &snapshot));
 }
 
 struct UiConflictResolver {
@@ -1390,6 +1348,33 @@ fn update_folder_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
         let current = state.current_folder.borrow();
         ui.set_current_folder(current.to_string_lossy().replace('\\', "/").into());
         ui.set_can_go_up(!current.as_os_str().is_empty());
+    }
+}
+
+/// Human-readable state of the Explorer context-menu registration.
+fn context_menu_state_text() -> &'static str {
+    if platform::shell_ext::is_context_menu_registered() {
+        "Registered"
+    } else {
+        "Not registered"
+    }
+}
+
+/// Locates the shell extension DLL that ships next to the app executable.
+fn context_menu_dll_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))?;
+    let dll = executable
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("archive_rclick_core.dll");
+    if dll.is_file() {
+        Ok(dll)
+    } else {
+        Err(format!(
+            "The shell extension DLL was not found next to the app ({}).\nBuild or package ArchiveRclick and try again.",
+            dll.display()
+        ))
     }
 }
 

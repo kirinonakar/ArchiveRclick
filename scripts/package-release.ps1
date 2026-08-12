@@ -20,12 +20,34 @@ try {
     Remove-Item Env:ARCHIVERCLICK_ALLOW_UNSUPPORTED_LIBARCHIVE -ErrorAction SilentlyContinue
     Remove-Item Env:ARCHIVERCLICK_LIBARCHIVE -ErrorAction SilentlyContinue
 
-    $target = "x86_64-pc-windows-msvc"
-    cargo build --release --locked --target $target
+    # The library target is named archive_rclick_core while the executable
+    # keeps the package name archive-rclick, so their .pdb files (which Cargo
+    # names after each crate) no longer collide on MSVC.
+    cargo build --release --locked
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 
     if (Test-Path -LiteralPath $output) {
-        Remove-Item -LiteralPath $output -Recurse -Force
+        # A file from the previous package can be locked by a running app or
+        # by Explorer (when the right-click menu is registered from this
+        # folder). Loaded DLLs can be renamed but not deleted, so rename any
+        # locked file out of the way and remove the rest; the renamed
+        # leftovers disappear on the next packaging run.
+        $script:keptFiles = @()
+        Get-ChildItem -LiteralPath $output -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $filePath = $_.FullName
+            $fileName = $_.Name
+            try {
+                Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop
+            } catch {
+                $suffix = "old-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+                Rename-Item -LiteralPath $filePath -NewName "$fileName.$suffix" -Force -ErrorAction SilentlyContinue
+                $script:keptFiles = @($script:keptFiles) + $fileName
+            }
+        }
+        Remove-Item -LiteralPath $output -Recurse -Force -ErrorAction SilentlyContinue
+        if ($keptFiles.Count -gt 0) {
+            Write-Host "Kept locked file(s) from the previous package: $($keptFiles -join ', '). Restart Explorer or close the running app, then package again to remove them."
+        }
     }
     New-Item -ItemType Directory -Force -Path $output | Out-Null
 
@@ -46,14 +68,14 @@ try {
         Copy-Item -LiteralPath $source -Destination (Join-Path $output $entry.Key)
     }
 
-    $releaseDirectory = Join-Path $repository "target\$target\release"
+    $releaseDirectory = Join-Path $repository "target\release"
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $output
-    Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick.dll") -Destination $output
+    Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick_core.dll") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\THIRD-PARTY-NOTICES.md") -Destination $output
     Copy-Item -LiteralPath $manifestPath -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\licenses") -Destination $output -Recurse
 
-    $actualDlls = @(Get-ChildItem -LiteralPath $output -Filter '*.dll' -File | Where-Object { $_.Name -ne 'archive_rclick.dll' } | ForEach-Object Name | Sort-Object)
+    $actualDlls = @(Get-ChildItem -LiteralPath $output -Filter '*.dll' -File | Where-Object { $_.Name -ne 'archive_rclick_core.dll' } | ForEach-Object Name | Sort-Object)
     $expectedDlls = @($expected.Keys | Sort-Object)
     if (Compare-Object $expectedDlls $actualDlls) {
         throw "Packaged DLL set does not match runtime allowlist"
