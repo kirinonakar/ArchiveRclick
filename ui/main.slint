@@ -1,0 +1,584 @@
+import {
+    Button,
+    CheckBox,
+    LineEdit,
+    ListView,
+    Palette
+} from "std-widgets.slint";
+import { CreateOverlay, ExtractOverlay } from "dialogs.slint";
+import { ConflictOverlay, ProgressOverlay } from "progress.slint";
+
+export struct ArchiveRow {
+    selected: bool,
+    is-folder: bool,
+    name: string,
+    size: string,
+    packed: string,
+    modified: string,
+    path: string,
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> label;
+    in property <int> column-index;
+    callback sort(int);
+
+    background: pointer.has-hover ? Palette.control-background : Palette.alternate-background;
+    border-width: 1px;
+    border-color: Palette.border;
+    accessible-role: button;
+    accessible-label: "Sort by " + root.label;
+
+    Text {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text: root.label + "  ↕";
+        color: Palette.foreground;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    pointer := TouchArea {
+        clicked => { root.sort(root.column-index); }
+    }
+}
+
+component ArchiveTableHeader inherits Rectangle {
+    callback sort(int);
+
+    private property <length> content-width: self.width - 36px;
+    height: 32px;
+    background: Palette.alternate-background;
+
+    Rectangle {
+        x: 0px;
+        width: 36px;
+        height: parent.height;
+        background: Palette.alternate-background;
+        border-width: 1px;
+        border-color: Palette.border;
+    }
+
+    HeaderCell {
+        x: 36px;
+        width: root.content-width * 0.28;
+        height: parent.height;
+        label: "Name";
+        column-index: 0;
+        sort(column) => { root.sort(column); }
+    }
+
+    HeaderCell {
+        x: 36px + root.content-width * 0.28;
+        width: root.content-width * 0.12;
+        height: parent.height;
+        label: "Size";
+        column-index: 1;
+        sort(column) => { root.sort(column); }
+    }
+
+    HeaderCell {
+        x: 36px + root.content-width * 0.40;
+        width: root.content-width * 0.12;
+        height: parent.height;
+        label: "Packed";
+        column-index: 2;
+        sort(column) => { root.sort(column); }
+    }
+
+    HeaderCell {
+        x: 36px + root.content-width * 0.52;
+        width: root.content-width * 0.18;
+        height: parent.height;
+        label: "Modified";
+        column-index: 3;
+        sort(column) => { root.sort(column); }
+    }
+
+    HeaderCell {
+        x: 36px + root.content-width * 0.70;
+        width: root.content-width * 0.30;
+        height: parent.height;
+        label: "Path";
+        column-index: 4;
+        sort(column) => { root.sort(column); }
+    }
+}
+
+component ArchiveListRow inherits Rectangle {
+    in property <ArchiveRow> entry;
+    in property <int> row-index;
+    callback toggle(int);
+    callback activate(int);
+
+    private property <length> content-width: self.width - 36px;
+    height: 29px;
+    background: root.entry.selected ? Palette.selection-background : row-pointer.has-hover ? Palette.control-background : Palette.background;
+    border-width: 1px;
+    border-color: Palette.border;
+    accessible-role: list-item;
+    accessible-label: root.entry.name;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.entry.selected;
+    accessible-item-index: root.row-index;
+
+    CheckBox {
+        x: 6px;
+        y: 2px;
+        width: 24px;
+        height: parent.height - 4px;
+        checked: root.entry.selected;
+        text: "";
+        toggled => { root.toggle(root.row-index); }
+    }
+
+    Text {
+        x: 42px;
+        width: 14px;
+        height: parent.height;
+        text: root.entry.is-folder ? "▸" : "";
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: 60px;
+        width: root.content-width * 0.28 - 24px;
+        height: parent.height;
+        text: root.entry.name;
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        font-weight: root.entry.is-folder ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 36px + root.content-width * 0.28 + 6px;
+        width: root.content-width * 0.12 - 12px;
+        height: parent.height;
+        text: root.entry.size;
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 36px + root.content-width * 0.40 + 6px;
+        width: root.content-width * 0.12 - 12px;
+        height: parent.height;
+        text: root.entry.packed;
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 36px + root.content-width * 0.52 + 8px;
+        width: root.content-width * 0.18 - 16px;
+        height: parent.height;
+        text: root.entry.modified;
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 36px + root.content-width * 0.70 + 8px;
+        width: root.content-width * 0.30 - 16px;
+        height: parent.height;
+        text: root.entry.path;
+        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    row-pointer := TouchArea {
+        x: 36px;
+        width: parent.width - 36px;
+        mouse-cursor: root.entry.is-folder ? pointer : default;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+}
+
+export component AppWindow inherits Window {
+    in-out property <[ArchiveRow]> archive-rows;
+    in-out property <string> archive-title;
+    in-out property <string> current-folder;
+    in-out property <string> status-text;
+    in-out property <string> summary-text;
+    in-out property <string> libarchive-version;
+    in-out property <bool> has-archive;
+    in-out property <bool> busy;
+    in-out property <bool> can-go-up;
+
+    in-out property <bool> progress-visible;
+    in-out property <string> progress-title;
+    in-out property <string> progress-file;
+    in-out property <string> progress-detail;
+    in-out property <float> progress-value;
+
+    in-out property <bool> conflict-visible;
+    in-out property <string> conflict-path;
+
+    in-out property <bool> create-visible;
+    in-out property <string> create-source-summary;
+    in-out property <string> create-destination;
+    in-out property <[string]> create-formats;
+    in-out property <bool> create-has-sources;
+
+    in-out property <bool> password-visible;
+    in-out property <string> password-operation;
+    in-out property <string> password-value;
+
+    callback open-requested();
+    callback up-requested();
+    callback toggle-selection(int);
+    callback activate-row(int);
+    callback sort-requested(int);
+    callback show-extract-requested();
+    callback extract-requested(int, int, string, bool);
+    callback prepare-create-requested();
+    callback choose-create-files-requested();
+    callback choose-create-folder-requested();
+    callback create-requested(int, int, string);
+    callback test-requested();
+    callback cancel-requested();
+    callback conflict-response(int);
+    callback password-response(string, bool);
+    callback dropped(data-transfer);
+
+    private property <bool> extract-visible: false;
+
+    title: root.archive-title == "" ? "ArchiveRclick" : root.archive-title + " — ArchiveRclick";
+    preferred-width: 1040px;
+    preferred-height: 680px;
+    min-width: 720px;
+    min-height: 480px;
+    background: Palette.background;
+    forward-focus: shortcuts;
+
+    shortcuts := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-click: false;
+
+        KeyBinding {
+            keys: @keys(Control + O);
+            enabled: !root.busy;
+            activated => { root.open-requested(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Alt + LeftArrow);
+            enabled: root.can-go-up && !root.busy;
+            activated => { root.up-requested(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => {
+                if (root.conflict-visible) {
+                    root.conflict-response(4);
+                } else if (root.progress-visible || root.busy) {
+                    root.cancel-requested();
+                } else if (root.create-visible) {
+                    root.create-visible = false;
+                } else if (root.extract-visible) {
+                    root.extract-visible = false;
+                }
+            }
+        }
+
+        drop-target := DropArea {
+            width: parent.width;
+            height: parent.height;
+
+            can-drop(event) => {
+                return root.busy ? DragAction.none : DragAction.copy;
+            }
+
+            dropped(event) => {
+                if (root.busy) {
+                    return DragAction.none;
+                }
+                root.dropped(event.data);
+                return DragAction.copy;
+            }
+
+            VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                spacing: 0px;
+
+                Rectangle {
+                    height: 44px;
+                    background: Palette.alternate-background;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 7px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 6px;
+
+                        Button {
+                            text: "Open";
+                            enabled: !root.busy;
+                            clicked => { root.open-requested(); }
+                        }
+
+                        Button {
+                            text: "Extract";
+                            enabled: root.has-archive && !root.busy;
+                            clicked => {
+                                root.show-extract-requested();
+                                root.extract-visible = true;
+                            }
+                        }
+
+                        Button {
+                            text: "Compress";
+                            enabled: !root.busy;
+                            clicked => { root.prepare-create-requested(); }
+                        }
+
+                        Button {
+                            text: "Test";
+                            enabled: root.has-archive && !root.busy;
+                            clicked => { root.test-requested(); }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Text {
+                            text: root.busy ? "Working…" : root.status-text;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 40px;
+                    background: Palette.background;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 9px;
+                        padding-top: 5px;
+                        padding-bottom: 5px;
+                        spacing: 7px;
+
+                        Button {
+                            text: "Up";
+                            enabled: root.can-go-up && !root.busy;
+                            clicked => { root.up-requested(); }
+                        }
+
+                        Text {
+                            text: root.has-archive ? (root.current-folder == "" ? "/" : root.current-folder) : "No archive open";
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+
+                if root.has-archive : Rectangle {
+                    vertical-stretch: 1;
+                    background: Palette.background;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        ArchiveTableHeader {
+                            sort(column) => { root.sort-requested(column); }
+                        }
+
+                        ListView {
+                            vertical-stretch: 1;
+                            accessible-role: list;
+                            accessible-label: "Archive contents";
+                            accessible-item-count: root.archive-rows.length;
+
+                            for row[index] in root.archive-rows : ArchiveListRow {
+                                entry: row;
+                                row-index: index;
+                                toggle(row-index) => { root.toggle-selection(row-index); }
+                                activate(row-index) => { root.activate-row(row-index); }
+                            }
+                        }
+                    }
+                }
+
+                if !root.has-archive : Rectangle {
+                    vertical-stretch: 1;
+                    background: Palette.background;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        padding: 24px;
+
+                        Text {
+                            text: drop-target.has-drag ? "Release to open" : "Open an archive to inspect its contents";
+                            color: Palette.foreground;
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Use Open, Ctrl+O, a command-line path, or drag an archive here.";
+                            color: Palette.foreground;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        Button {
+                            text: "Open archive…";
+                            primary: true;
+                            enabled: !root.busy;
+                            clicked => { root.open-requested(); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 30px;
+                    background: Palette.alternate-background;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 9px;
+                        padding-right: 9px;
+                        spacing: 10px;
+
+                        Text {
+                            text: root.summary-text;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: root.libarchive-version;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.extract-visible : ExtractOverlay {
+        archive-name: root.archive-title;
+        accepted(destination-mode, conflict-policy, password, selected-only) => {
+            root.extract-visible = false;
+            root.extract-requested(destination-mode, conflict-policy, password, selected-only);
+        }
+        cancelled => { root.extract-visible = false; }
+    }
+
+    if root.create-visible : CreateOverlay {
+        source-summary: root.create-source-summary;
+        destination: root.create-destination;
+        available-formats: root.create-formats;
+        has-sources: root.create-has-sources;
+        choose-files => { root.choose-create-files-requested(); }
+        choose-folder => { root.choose-create-folder-requested(); }
+        accepted(format-index, level, password) => {
+            root.create-visible = false;
+            root.create-requested(format-index, level, password);
+        }
+        cancelled => { root.create-visible = false; }
+    }
+
+    if root.progress-visible : ProgressOverlay {
+        operation-title: root.progress-title;
+        current-file: root.progress-file;
+        detail: root.progress-detail;
+        value: root.progress-value;
+        cancelled => { root.cancel-requested(); }
+    }
+
+    if root.conflict-visible : ConflictOverlay {
+        conflict-path: root.conflict-path;
+        responded(response) => { root.conflict-response(response); }
+    }
+
+    if root.password-visible : Rectangle {
+        background: #00000094;
+        accessible-role: region;
+        accessible-label: "Archive password";
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 480px;
+            height: 240px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 6px;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+
+                Text {
+                    text: "Password required";
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: root.password-operation;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
+                }
+
+                password-entry := LineEdit {
+                    input-type: InputType.password;
+                    text <=> root.password-value;
+                    placeholder-text: "Archive password";
+                    enabled: true;
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.password-response("", false); }
+                    }
+                    Button {
+                        text: "Continue";
+                        primary: true;
+                        enabled: password-entry.text != "";
+                        clicked => { root.password-response(password-entry.text, true); }
+                    }
+                }
+            }
+        }
+    }
+}

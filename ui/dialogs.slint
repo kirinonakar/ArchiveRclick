@@ -1,0 +1,254 @@
+import {
+    Button,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    Palette,
+    SpinBox
+} from "std-widgets.slint";
+
+export component ExtractOverlay inherits Rectangle {
+    in property <string> archive-name;
+
+    callback accepted(int, int, string, bool);
+    callback cancelled();
+
+    background: #00000080;
+    accessible-role: region;
+    accessible-label: "Extract archive";
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 500px;
+        height: 398px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "Extract";
+                font-size: 20px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.archive-name;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Text {
+                text: "Destination";
+                color: Palette.foreground;
+            }
+
+            destination := ComboBox {
+                model: [
+                    "Choose a directory…",
+                    "Current directory",
+                    "Archive-name directory"
+                ];
+                current-index: 2;
+            }
+
+            Text {
+                text: "Existing files";
+                color: Palette.foreground;
+            }
+
+            conflict-policy := ComboBox {
+                model: ["Ask for each conflict", "Overwrite", "Skip"];
+                current-index: 0;
+            }
+
+            Text {
+                text: "Password (if required)";
+                color: Palette.foreground;
+            }
+
+            password := LineEdit {
+                input-type: InputType.password;
+                placeholder-text: "Leave empty when not needed";
+            }
+
+            selected-only := CheckBox {
+                text: "Extract selected entries only";
+                checked: false;
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+
+                Button {
+                    text: "Extract";
+                    primary: true;
+                    clicked => {
+                        root.accepted(
+                            destination.current-index,
+                            conflict-policy.current-index,
+                            password.text,
+                            selected-only.checked
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component CreateOverlay inherits Rectangle {
+    in property <string> source-summary;
+    in property <string> destination;
+    in property <[string]> available-formats;
+    in property <bool> has-sources;
+
+    callback accepted(int, int, string);
+    callback cancelled();
+    callback choose-files();
+    callback choose-folder();
+
+    background: #00000080;
+    accessible-role: region;
+    accessible-label: "Create archive";
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 500px;
+        height: 450px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "Create archive";
+                font-size: 20px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.source-summary;
+                color: Palette.foreground;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Button {
+                    text: "Choose files…";
+                    clicked => { root.choose-files(); }
+                }
+
+                Button {
+                    text: "Choose folder…";
+                    clicked => { root.choose-folder(); }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Text {
+                text: "Destination";
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.destination;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                VerticalLayout {
+                    spacing: 5px;
+                    horizontal-stretch: 2;
+
+                    Text {
+                        text: "Format";
+                        color: Palette.foreground;
+                    }
+
+                    format := ComboBox {
+                        model: root.available-formats;
+                        current-index: 0;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "Level";
+                        color: Palette.foreground;
+                    }
+
+                    level := SpinBox {
+                        minimum: 0;
+                        maximum: 9;
+                        value: 6;
+                        enabled: format.current-value != "TAR";
+                    }
+                }
+            }
+
+            Text {
+                text: "Password (supported formats only)";
+                color: Palette.foreground;
+            }
+
+            password := LineEdit {
+                input-type: InputType.password;
+                enabled: format.current-value == "ZIP";
+                placeholder-text: format.current-value == "ZIP" ? "Optional (AES-256 ZIP)" : "ZIP only";
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+
+                Button {
+                    text: "Create";
+                    primary: true;
+                    enabled: root.has-sources && root.available-formats.length > 0;
+                    clicked => {
+                        root.accepted(format.current-index, level.value, password.text);
+                    }
+                }
+            }
+        }
+    }
+}

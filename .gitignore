@@ -1,0 +1,9 @@
+/target/
+/target-codex-check/
+/target-security-review/
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+ArchiveRclick.log

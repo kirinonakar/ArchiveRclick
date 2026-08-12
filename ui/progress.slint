@@ -1,0 +1,146 @@
+import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
+
+export component ProgressOverlay inherits Rectangle {
+    in property <string> operation-title;
+    in property <string> current-file;
+    in property <string> detail;
+    in property <float> value;
+
+    callback cancelled();
+
+    background: #00000080;
+    accessible-role: region;
+    accessible-label: root.operation-title;
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 500px;
+        height: 222px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: root.operation-title;
+                font-size: 19px;
+                font-weight: 600;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.current-file;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            ProgressIndicator {
+                progress: root.value;
+                indeterminate: root.value < 0;
+                accessible-label: "Operation progress";
+                accessible-value: root.value < 0 ? "Working" : "" + Math.round(root.value * 100) + "%";
+            }
+
+            Text {
+                text: root.detail;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+            }
+        }
+    }
+}
+
+export component ConflictOverlay inherits Rectangle {
+    in property <string> conflict-path;
+
+    callback responded(int);
+
+    background: #00000094;
+    accessible-role: region;
+    accessible-label: "Existing file conflict";
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 650px;
+        height: 228px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "A file already exists";
+                font-size: 19px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: root.conflict-path;
+                color: Palette.foreground;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: "Choose how ArchiveRclick should continue.";
+                color: Palette.foreground;
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Button {
+                    text: "Overwrite";
+                    primary: true;
+                    clicked => { root.responded(0); }
+                }
+
+                Button {
+                    text: "Skip";
+                    clicked => { root.responded(1); }
+                }
+
+                Button {
+                    text: "Overwrite all";
+                    clicked => { root.responded(2); }
+                }
+
+                Button {
+                    text: "Skip all";
+                    clicked => { root.responded(3); }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.responded(4); }
+                }
+            }
+        }
+    }
+}
