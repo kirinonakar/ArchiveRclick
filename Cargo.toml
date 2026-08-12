@@ -14,6 +14,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "backend-winit",
     "renderer-femtovg",
     "accessibility",
+    "unstable-winit-030",
 ] }
 thiserror = "2.0.18"
 
@@ -28,7 +29,9 @@ windows = { version = "0.61.3", features = [
 ] }
 
 [build-dependencies]
+sha2 = "=0.10.9"
 slint-build = "=1.17.1"
+embed-resource = "=3.0.9"
 
 [profile.release]
 codegen-units = 1

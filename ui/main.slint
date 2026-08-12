@@ -252,9 +252,10 @@ export component AppWindow inherits Window {
     callback password-response(string, bool);
     callback dropped(data-transfer);
 
-    private property <bool> extract-visible: false;
+    in-out property <bool> extract-visible: false;
 
     title: root.archive-title == "" ? "ArchiveRclick" : root.archive-title + " — ArchiveRclick";
+    icon: @image-url("../app.png");
     preferred-width: 1040px;
     preferred-height: 680px;
     min-width: 720px;
@@ -299,11 +300,11 @@ export component AppWindow inherits Window {
             height: parent.height;
 
             can-drop(event) => {
-                return root.busy ? DragAction.none : DragAction.copy;
+                return root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible ? DragAction.none : DragAction.copy;
             }
 
             dropped(event) => {
-                if (root.busy) {
+                if (root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible) {
                     return DragAction.none;
                 }
                 root.dropped(event.data);

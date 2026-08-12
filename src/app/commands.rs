@@ -48,11 +48,21 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 return Ok(());
             }
             "--help" | "-h" | "/?" => {
-                let help = "ArchiveRclick [archive]\n\n--register    Register as an available archive handler\n--unregister  Remove that registration";
+                let help = "ArchiveRclick [archive]\n\n--register       Register as an available archive handler\n--unregister     Remove that registration\n--check-runtime  Verify the bundled archive engine and exit";
                 if cfg!(test) {
                     println!("{help}");
                 } else {
                     platform::show_info("ArchiveRclick command line", help);
+                }
+                return Ok(());
+            }
+            "--check-runtime" => {
+                let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
+                if engine.writable_formats().is_empty() {
+                    return Err(
+                        "The loaded libarchive DLL does not expose archive creation support"
+                            .to_owned(),
+                    );
                 }
                 return Ok(());
             }
@@ -92,43 +102,21 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         writable_formats,
     );
 
-    ui.show()
-        .map_err(|error| format!("Could not show the UI: {error}"))?;
     let weak = ui.as_weak();
     let state_for_drop = Rc::clone(&state);
     let engine_for_drop = Arc::clone(&engine);
-    let drop_target = platform::install_file_drop_handler(Box::new(move |paths| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        if ui.get_busy()
-            || ui.get_password_visible()
-            || ui.get_conflict_visible()
-            || ui.get_create_visible()
-        {
-            ui.set_status_text("Finish or cancel the current action before dropping items".into());
-            return;
-        }
-        let paths = paths
-            .into_iter()
-            .filter(|path| path.is_file() || path.is_dir())
-            .collect::<Vec<_>>();
-        if paths.len() > 1 || paths.first().is_some_and(|path| path.is_dir()) {
-            set_create_sources(&ui, &state_for_drop, paths);
-            return;
-        }
-        let Some(path) = paths.into_iter().next() else {
-            ui.set_status_text("The drop did not contain a file or folder".into());
-            return;
-        };
-        start_listing(
-            &ui,
-            Rc::clone(&state_for_drop),
-            Arc::clone(&engine_for_drop),
-            path,
-            None,
-        );
-    }))?;
+    platform::install_file_drop_handler(
+        ui.window(),
+        Box::new(move |paths| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            handle_file_drop(&ui, &state_for_drop, &engine_for_drop, paths);
+        }),
+    );
+
+    ui.show()
+        .map_err(|error| format!("Could not show the UI: {error}"))?;
 
     if let Some(path) = startup_argument.map(PathBuf::from) {
         if path.is_file() {
@@ -138,11 +126,37 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         }
     }
 
-    let result = ui
-        .run()
-        .map_err(|error| format!("UI event loop failed: {error}"));
-    drop(drop_target);
-    result
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths: Vec<PathBuf>) {
+    if ui.get_busy()
+        || ui.get_password_visible()
+        || ui.get_conflict_visible()
+        || ui.get_create_visible()
+        || ui.get_extract_visible()
+    {
+        ui.set_status_text("Finish or cancel the current action before dropping items".into());
+        return;
+    }
+    if paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !path.is_absolute() || (!path.is_file() && !path.is_dir()))
+    {
+        ui.set_status_text("The drop did not contain valid files or folders".into());
+        return;
+    }
+    if paths.len() > 1 || paths.first().is_some_and(|path| path.is_dir()) {
+        set_create_sources(ui, state, paths);
+        return;
+    }
+    let Some(path) = paths.into_iter().next() else {
+        ui.set_status_text("The drop did not contain a file or folder".into());
+        return;
+    };
+    start_listing(ui, Rc::clone(state), Arc::clone(engine), path, None);
 }
 
 fn wire_callbacks(

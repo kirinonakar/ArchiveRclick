@@ -57,6 +57,9 @@ mod platform_impl {
     // hardening accumulated in 3.8.8.  Older parsers are only available via
     // an explicit development escape hatch; archive files are untrusted input.
     const MIN_LIBARCHIVE_VERSION: c_int = 3_008_009;
+    // The 4.0 development ABI changes public mode/time types.  Bindings in
+    // this module intentionally target the stable libarchive 3.x ABI only.
+    const MAX_SUPPORTED_LIBARCHIVE_VERSION: c_int = 3_999_000;
 
     // libarchive 3.x defines __LA_MODE_T as unsigned short on Windows.
     const AE_IFMT: u16 = 0o170000;
@@ -67,9 +70,13 @@ mod platform_impl {
     const IO_BUFFER_SIZE: usize = 64 * 1024;
     const OPEN_BLOCK_SIZE: usize = 64 * 1024;
     const MAX_ARCHIVE_PATH_UNITS: usize = 1024 * 1024;
+    const MAX_ARCHIVE_PATH_UTF8_BYTES: usize = 4 * 1024 * 1024;
     const MAX_LIST_ENTRIES: u64 = 1_000_000;
+    const MAX_LIST_SCAN_DECODED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
     const MAX_LIST_PATH_BYTES: u64 = 256 * 1024 * 1024;
     const MAX_LIST_DECLARED_BYTES: u64 = 512 * 1024 * 1024 * 1024 * 1024;
+    const MAX_EXTRACT_SCAN_ENTRIES: u64 = 1_000_000;
+    const MAX_EXTRACT_SCAN_DECODED_BYTES: u64 = 512 * 1024 * 1024 * 1024;
     const MAX_TEST_ENTRIES: u64 = 1_000_000;
     const MAX_TEST_OUTPUT_BYTES: u64 = 512 * 1024 * 1024 * 1024;
     const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -109,7 +116,6 @@ mod platform_impl {
         unsafe extern "C" fn(*mut RawArchive, *const u16, usize) -> c_int;
     type ArchiveReadNextHeader = unsafe extern "C" fn(*mut RawArchive, *mut *mut RawEntry) -> c_int;
     type ArchiveReadData = unsafe extern "C" fn(*mut RawArchive, *mut c_void, usize) -> isize;
-    type ArchiveReadDataSkip = unsafe extern "C" fn(*mut RawArchive) -> c_int;
     type ArchiveReadClose = unsafe extern "C" fn(*mut RawArchive) -> c_int;
     type ArchiveReadFree = unsafe extern "C" fn(*mut RawArchive) -> c_int;
     type ArchiveReadHasEncryptedEntries = unsafe extern "C" fn(*mut RawArchive) -> c_int;
@@ -211,12 +217,11 @@ mod platform_impl {
         read_new: ArchiveReadNew,
         read_filters: Vec<ArchiveReadSupport>,
         read_formats: Vec<ArchiveReadSupport>,
-        read_support_format_raw: ArchiveReadSupport,
+        read_support_format_raw: Option<ArchiveReadSupport>,
         read_add_passphrase: Option<ArchiveReadAddPassphrase>,
         read_open_filename_w: ArchiveReadOpenFilenameW,
         read_next_header: ArchiveReadNextHeader,
         read_data: ArchiveReadData,
-        read_data_skip: ArchiveReadDataSkip,
         read_close: ArchiveReadClose,
         read_free: ArchiveReadFree,
         read_has_encrypted_entries: Option<ArchiveReadHasEncryptedEntries>,
@@ -264,6 +269,17 @@ mod platform_impl {
         entry_set_mtime: ArchiveEntrySetMtime,
     }
 
+    fn ensure_supported_libarchive_abi(version_number: c_int) -> ArchiveResult<()> {
+        if version_number >= MAX_SUPPORTED_LIBARCHIVE_VERSION {
+            Err(ArchiveError::LibraryUnavailable(format!(
+                "libarchive {version_number} uses an unsupported future ABI; install a \
+                 stable libarchive 3.x release below {MAX_SUPPORTED_LIBARCHIVE_VERSION}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     impl Api {
         fn from_library(
             library: DynamicLibrary,
@@ -274,6 +290,7 @@ mod platform_impl {
                 required_symbol!(library, "archive_version_number", ArchiveVersionNumber);
             // SAFETY: this process-global accessor has no preconditions.
             let version_number = unsafe { version_number_fn() };
+            ensure_supported_libarchive_abi(version_number)?;
             if version_number < MIN_LIBARCHIVE_VERSION && !allow_unsupported {
                 return Err(ArchiveError::LibraryUnavailable(format!(
                     "libarchive {version_number} is below the required security baseline \
@@ -398,73 +415,127 @@ mod platform_impl {
             // absent: mtree `contents=` entries are allowed to read unrelated
             // filesystem paths, which is not acceptable for an untrusted
             // archive viewer/extractor.
-            let read_formats = vec![
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_7zip",
-                    ArchiveReadSupport
+            let format_candidates: [(&str, ArchiveReadSupport); 13] = [
+                (
+                    "7zip",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_7zip",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_ar",
-                    ArchiveReadSupport
+                (
+                    "ar",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_ar",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_cab",
-                    ArchiveReadSupport
+                (
+                    "cab",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_cab",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_cpio",
-                    ArchiveReadSupport
+                (
+                    "cpio",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_cpio",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_empty",
-                    ArchiveReadSupport
+                (
+                    "empty",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_empty",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_iso9660",
-                    ArchiveReadSupport
+                (
+                    "iso9660",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_iso9660",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_lha",
-                    ArchiveReadSupport
+                (
+                    "lha",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_lha",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_rar",
-                    ArchiveReadSupport
+                (
+                    "rar",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_rar",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_rar5",
-                    ArchiveReadSupport
+                (
+                    "rar5",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_rar5",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_tar",
-                    ArchiveReadSupport
+                (
+                    "tar",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_tar",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_warc",
-                    ArchiveReadSupport
+                (
+                    "warc",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_warc",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_xar",
-                    ArchiveReadSupport
+                (
+                    "xar",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_xar",
+                        ArchiveReadSupport
+                    ),
                 ),
-                required_symbol!(
-                    library,
-                    "archive_read_support_format_zip",
-                    ArchiveReadSupport
+                (
+                    "zip",
+                    required_symbol!(
+                        library,
+                        "archive_read_support_format_zip",
+                        ArchiveReadSupport
+                    ),
                 ),
             ];
+            let read_formats = probe_supported_formats(read_new, read_free, &format_candidates)?;
+            if read_formats.is_empty() {
+                return Err(ArchiveError::LibraryUnavailable(
+                    "libarchive has no supported safe input formats".to_owned(),
+                ));
+            }
+            let raw_format = required_symbol!(
+                library,
+                "archive_read_support_format_raw",
+                ArchiveReadSupport
+            );
+            let read_support_format_raw =
+                probe_supported_formats(read_new, read_free, &[("raw", raw_format)])?
+                    .into_iter()
+                    .next();
 
             let write = WriteApi::load(&library);
             Ok(Self {
@@ -478,11 +549,7 @@ mod platform_impl {
                 read_new,
                 read_filters,
                 read_formats,
-                read_support_format_raw: required_symbol!(
-                    library,
-                    "archive_read_support_format_raw",
-                    ArchiveReadSupport
-                ),
+                read_support_format_raw,
                 read_add_passphrase: optional_symbol!(
                     library,
                     "archive_read_add_passphrase",
@@ -499,11 +566,6 @@ mod platform_impl {
                     ArchiveReadNextHeader
                 ),
                 read_data: required_symbol!(library, "archive_read_data", ArchiveReadData),
-                read_data_skip: required_symbol!(
-                    library,
-                    "archive_read_data_skip",
-                    ArchiveReadDataSkip
-                ),
                 read_close: required_symbol!(library, "archive_read_close", ArchiveReadClose),
                 read_free,
                 read_has_encrypted_entries: optional_symbol!(
@@ -691,14 +753,48 @@ mod platform_impl {
 
     impl LibArchiveEngine {
         pub fn load() -> ArchiveResult<Self> {
-            let api = Arc::new(load_api()?);
+            Ok(Self::from_api(load_api()?))
+        }
+
+        /// Loads exactly the libarchive DLL at `path`.
+        ///
+        /// Unlike [`Self::load`], this constructor never examines environment
+        /// variables, application-local conventional names, or system DLLs.
+        /// The explicit DLL must satisfy the normal supported-version policy.
+        pub fn load_from_path(path: &Path) -> ArchiveResult<Self> {
+            let path = canonical_library_file(path)?;
+            let library =
+                DynamicLibrary::load(&path, false).map_err(ArchiveError::LibraryUnavailable)?;
+            Ok(Self::from_api(Api::from_library(library, false, false)?))
+        }
+
+        fn from_api(api: Api) -> Self {
+            let api = Arc::new(api);
             let version: Arc<str> = api.version().into();
-            Ok(Self { api, version })
+            Self { api, version }
         }
     }
 
     pub fn load() -> ArchiveResult<LibArchiveEngine> {
         LibArchiveEngine::load()
+    }
+
+    fn canonical_library_file(path: &Path) -> ArchiveResult<PathBuf> {
+        if !path.is_absolute() {
+            return Err(ArchiveError::InvalidInput(
+                "libarchive DLL path must be absolute".to_owned(),
+            ));
+        }
+        let canonical = fs::canonicalize(path).map_err(|error| ArchiveError::io(path, error))?;
+        let metadata =
+            fs::metadata(&canonical).map_err(|error| ArchiveError::io(&canonical, error))?;
+        if !metadata.is_file() {
+            return Err(ArchiveError::InvalidInput(format!(
+                "libarchive DLL path is not a file: {}",
+                canonical.display()
+            )));
+        }
+        Ok(canonical)
     }
 
     fn load_api() -> ArchiveResult<Api> {
@@ -722,9 +818,23 @@ mod platform_impl {
         let conventional = ["archive.dll", "libarchive.dll", "libarchive-13.dll"];
         let mut failures = Vec::new();
 
+        let mut application_directories = Vec::with_capacity(2);
         if let Ok(executable) = env::current_exe()
             && let Some(directory) = executable.parent()
         {
+            application_directories.push(directory.to_path_buf());
+            let is_cargo_subdirectory = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.eq_ignore_ascii_case("deps") || name.eq_ignore_ascii_case("examples")
+                });
+            if is_cargo_subdirectory && let Some(profile_directory) = directory.parent() {
+                application_directories.push(profile_directory.to_path_buf());
+            }
+        }
+
+        for directory in application_directories {
             for name in conventional {
                 let path = directory.join(name);
                 match DynamicLibrary::load(&path, false) {
@@ -803,6 +913,31 @@ mod platform_impl {
         Ok(enabled)
     }
 
+    fn probe_supported_formats(
+        read_new: ArchiveReadNew,
+        read_free: ArchiveReadFree,
+        candidates: &[(&str, ArchiveReadSupport)],
+    ) -> ArchiveResult<Vec<ArchiveReadSupport>> {
+        let mut enabled = Vec::with_capacity(candidates.len());
+        for &(_name, support) in candidates {
+            // SAFETY: each candidate is tested on its own fresh reader so a
+            // partially supported format cannot poison operational readers.
+            let raw = NonNull::new(unsafe { read_new() }).ok_or_else(|| {
+                ArchiveError::LibraryUnavailable(
+                    "archive_read_new returned null while probing formats".to_owned(),
+                )
+            })?;
+            // SAFETY: `raw` is a live reader in NEW state and is always freed
+            // immediately after the support call.
+            let status = unsafe { support(raw.as_ptr()) };
+            let _ = unsafe { read_free(raw.as_ptr()) };
+            if status == ARCHIVE_OK {
+                enabled.push(support);
+            }
+        }
+        Ok(enabled)
+    }
+
     struct Reader<'a> {
         api: &'a Api,
         raw: NonNull<RawArchive>,
@@ -816,6 +951,58 @@ mod platform_impl {
         modified_unix_seconds: Option<i64>,
         kind: ArchiveEntryKind,
         encrypted: bool,
+    }
+
+    struct ScanBudget {
+        entries_visited: u64,
+        decoded_bytes: u64,
+        max_entries: u64,
+        max_decoded_bytes: u64,
+        operation: &'static str,
+    }
+
+    impl ScanBudget {
+        fn new(max_entries: u64, max_decoded_bytes: u64, operation: &'static str) -> Self {
+            Self {
+                entries_visited: 0,
+                decoded_bytes: 0,
+                max_entries,
+                max_decoded_bytes,
+                operation,
+            }
+        }
+
+        fn visit_entry(&mut self) -> ArchiveResult<()> {
+            self.entries_visited = self.entries_visited.checked_add(1).ok_or_else(|| {
+                ArchiveError::LimitExceeded(format!("{} entry scan overflow", self.operation))
+            })?;
+            if self.entries_visited > self.max_entries {
+                return Err(ArchiveError::LimitExceeded(format!(
+                    "{} entry scan exceeds {}",
+                    self.operation, self.max_entries
+                )));
+            }
+            Ok(())
+        }
+
+        fn account_decoded(&mut self, amount: usize) -> ArchiveResult<()> {
+            self.decoded_bytes =
+                self.decoded_bytes
+                    .checked_add(amount as u64)
+                    .ok_or_else(|| {
+                        ArchiveError::LimitExceeded(format!(
+                            "{} decoded-data scan overflow",
+                            self.operation
+                        ))
+                    })?;
+            if self.decoded_bytes > self.max_decoded_bytes {
+                return Err(ArchiveError::LimitExceeded(format!(
+                    "{} decoded-data scan exceeds {} bytes",
+                    self.operation, self.max_decoded_bytes
+                )));
+            }
+            Ok(())
+        }
     }
 
     impl<'a> Reader<'a> {
@@ -845,9 +1032,15 @@ mod platform_impl {
                 )?;
             }
             if is_standalone_filter(path)? {
+                let support_raw = api.read_support_format_raw.ok_or_else(|| {
+                    ArchiveError::UnsupportedOption(
+                        "this libarchive build cannot read standalone compressed streams"
+                            .to_owned(),
+                    )
+                })?;
                 reader.require_ok(
                     // SAFETY: reader owns a live read handle in NEW state.
-                    unsafe { (api.read_support_format_raw)(raw.as_ptr()) },
+                    unsafe { support_raw(raw.as_ptr()) },
                     "enabling raw compressed streams",
                 )?;
             }
@@ -894,14 +1087,26 @@ mod platform_impl {
 
         fn copy_entry(&self, entry: *mut RawEntry) -> ArchiveResult<RawEntryInfo> {
             // SAFETY: entry is borrowed from the live reader until next_header.
-            let path = unsafe {
-                copy_wide_string((self.api.entry_pathname_w)(entry))?
-                    .map(PathBuf::from)
-                    .or_else(|| {
-                        self.api
-                            .entry_pathname_utf8
-                            .and_then(|getter| copy_c_string(getter(entry)).map(PathBuf::from))
-                    })
+            let wide_path = unsafe { copy_wide_string((self.api.entry_pathname_w)(entry))? };
+            let path = match wide_path {
+                Some(path) => Some(PathBuf::from(path)),
+                None => match self.api.entry_pathname_utf8 {
+                    Some(getter) => {
+                        // SAFETY: getter borrows a NUL-terminated string from
+                        // this live entry; the bounded copy prevents an
+                        // attacker-controlled pathname from causing an
+                        // unbounded scan/allocation in the UTF-8 fallback.
+                        unsafe {
+                            copy_c_string_bounded(
+                                getter(entry),
+                                MAX_ARCHIVE_PATH_UTF8_BYTES,
+                                "archive UTF-8 pathname",
+                            )?
+                        }
+                        .map(PathBuf::from)
+                    }
+                    None => None,
+                },
             }
             .ok_or_else(|| ArchiveError::LibArchive {
                 operation: "decoding archive pathname",
@@ -968,10 +1173,26 @@ mod platform_impl {
             }
         }
 
-        fn skip(&mut self) -> ArchiveResult<()> {
-            // SAFETY: handle is positioned at current entry data.
-            let status = unsafe { (self.api.read_data_skip)(self.raw.as_ptr()) };
-            self.require_ok(status, "skipping archive entry")
+        fn drain_current_entry(
+            &mut self,
+            buffer: &mut [u8],
+            cancel: &CancellationToken,
+            scan: &mut ScanBudget,
+            mut on_chunk: impl FnMut(u64, u64),
+        ) -> ArchiveResult<u64> {
+            let mut entry_bytes = 0u64;
+            loop {
+                check_cancel(cancel)?;
+                let amount = self.read(buffer)?;
+                if amount == 0 {
+                    return Ok(entry_bytes);
+                }
+                scan.account_decoded(amount)?;
+                entry_bytes = entry_bytes.checked_add(amount as u64).ok_or_else(|| {
+                    ArchiveError::LimitExceeded("entry scan byte count overflow".to_owned())
+                })?;
+                on_chunk(entry_bytes, self.consumed_bytes());
+            }
         }
 
         fn consumed_bytes(&self) -> u64 {
@@ -1402,6 +1623,12 @@ mod platform_impl {
             let mut entries = Vec::new();
             let mut total_uncompressed_size = 0u64;
             let mut total_path_bytes = 0u64;
+            let mut scan = ScanBudget::new(
+                MAX_LIST_ENTRIES,
+                MAX_LIST_SCAN_DECODED_BYTES,
+                "archive listing",
+            );
+            let mut buffer = vec![0u8; IO_BUFFER_SIZE];
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Listing);
             snapshot.total_bytes = Some(total_input);
 
@@ -1410,7 +1637,7 @@ mod platform_impl {
                 reader.next_entry()?
             } {
                 let index = entries.len() as u64;
-                enforce_limit(index + 1, MAX_LIST_ENTRIES, "archive listing entry count")?;
+                scan.visit_entry()?;
                 let path_bytes = u64::try_from(entry.display_path.encode_utf16().count())
                     .unwrap_or(u64::MAX)
                     .saturating_mul(2);
@@ -1430,8 +1657,16 @@ mod platform_impl {
                 }
                 snapshot.current_file.clone_from(&entry.display_path);
                 snapshot.entries_processed = index + 1;
-                reader.skip()?;
-                snapshot.bytes_processed = reader.consumed_bytes();
+                reader.drain_current_entry(
+                    &mut buffer,
+                    cancel,
+                    &mut scan,
+                    |_, consumed_input| {
+                        snapshot.bytes_processed = consumed_input.min(total_input);
+                        throttled.report(snapshot.clone(), false);
+                    },
+                )?;
+                snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
                 throttled.report(snapshot.clone(), false);
                 entries.push(ArchiveEntry {
                     index,
@@ -1493,6 +1728,11 @@ mod platform_impl {
             let mut selected_entries = 0u64;
             let mut progress_entries = 0u64;
             let mut progress_bytes = 0u64;
+            let mut scan = ScanBudget::new(
+                MAX_EXTRACT_SCAN_ENTRIES,
+                MAX_EXTRACT_SCAN_DECODED_BYTES,
+                "selective extraction",
+            );
             let mut policy = RuntimeConflictPolicy::from(options.conflict_policy);
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
             snapshot.total_entries = options.total_entries_hint;
@@ -1503,9 +1743,13 @@ mod platform_impl {
                 check_cancel(cancel)?;
                 reader.next_entry()?
             } {
+                scan.visit_entry()?;
                 let relative = safe_relative_path(&entry.path)?;
                 if !options.selection.includes(&relative) {
-                    reader.skip()?;
+                    snapshot.current_file.clone_from(&entry.display_path);
+                    reader.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {
+                        throttled.report(snapshot.clone(), false)
+                    })?;
                     continue;
                 }
                 selected_entries = selected_entries.checked_add(1).ok_or_else(|| {
@@ -1539,7 +1783,18 @@ mod platform_impl {
                 match entry.kind {
                     ArchiveEntryKind::Directory => {
                         let action = prepare_directory(&root, &target, &mut policy, conflicts)?;
-                        reader.skip()?;
+                        let drained = reader.drain_current_entry(
+                            &mut buffer,
+                            cancel,
+                            &mut scan,
+                            |entry_bytes, _| {
+                                snapshot.bytes_processed =
+                                    progress_bytes.saturating_add(entry_bytes);
+                                snapshot.entries_processed = progress_entries;
+                                throttled.report(snapshot.clone(), false);
+                            },
+                        )?;
+                        completed_progress_bytes = completed_progress_bytes.max(drained);
                         match action {
                             ConflictAction::Overwrite => summary.entries_processed += 1,
                             ConflictAction::Skip => summary.entries_skipped += 1,
@@ -1548,7 +1803,18 @@ mod platform_impl {
                     ArchiveEntryKind::File => {
                         match resolve_existing(&target, &mut policy, conflicts)? {
                             ConflictAction::Skip => {
-                                reader.skip()?;
+                                let drained = reader.drain_current_entry(
+                                    &mut buffer,
+                                    cancel,
+                                    &mut scan,
+                                    |entry_bytes, _| {
+                                        snapshot.bytes_processed =
+                                            progress_bytes.saturating_add(entry_bytes);
+                                        snapshot.entries_processed = progress_entries;
+                                        throttled.report(snapshot.clone(), false);
+                                    },
+                                )?;
+                                completed_progress_bytes = completed_progress_bytes.max(drained);
                                 summary.entries_skipped += 1;
                             }
                             ConflictAction::Overwrite => {
@@ -1564,6 +1830,7 @@ mod platform_impl {
                                     if amount == 0 {
                                         break;
                                     }
+                                    scan.account_decoded(amount)?;
                                     file_bytes =
                                         file_bytes.checked_add(amount as u64).ok_or_else(|| {
                                             ArchiveError::LimitExceeded(
@@ -2335,6 +2602,30 @@ mod platform_impl {
         Ok(Some(OsString::from_wide(units)))
     }
 
+    unsafe fn copy_c_string_bounded(
+        pointer: *const c_char,
+        max_bytes: usize,
+        subject: &str,
+    ) -> ArchiveResult<Option<String>> {
+        if pointer.is_null() {
+            return Ok(None);
+        }
+        let mut length = 0usize;
+        // SAFETY: libarchive promises a NUL-terminated string. The explicit
+        // maximum bounds the attacker-influenced scan and resulting allocation.
+        while length <= max_bytes && unsafe { *pointer.add(length) } != 0 {
+            length += 1;
+        }
+        if length > max_bytes {
+            return Err(ArchiveError::LimitExceeded(format!(
+                "{subject} exceeds {max_bytes} bytes"
+            )));
+        }
+        // SAFETY: the bounded scan established `length` initialized bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
+        Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+    }
+
     fn copy_c_string(pointer: *const c_char) -> Option<String> {
         if pointer.is_null() {
             None
@@ -2361,12 +2652,20 @@ mod platform_impl {
     fn looks_like_password_error(message: &str) -> bool {
         let message = message.to_ascii_lowercase();
         [
-            "passphrase",
-            "password",
-            "encrypted",
-            "encryption",
-            "decrypt",
-            "incorrect data check",
+            "passphrase required",
+            "passphrase is required",
+            "password required",
+            "password is required",
+            "no passphrase",
+            "no password",
+            "incorrect passphrase",
+            "incorrect password",
+            "wrong passphrase",
+            "wrong password",
+            "invalid passphrase",
+            "invalid password",
+            "bad passphrase",
+            "bad password",
         ]
         .iter()
         .any(|needle| message.contains(needle))
@@ -2375,15 +2674,79 @@ mod platform_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            LibArchiveEngine, MAX_LIST_ENTRIES, MAX_LIST_PATH_BYTES, MAX_TEST_OUTPUT_BYTES,
-            checked_add_with_limit, enforce_limit, looks_like_password_error, system_time_seconds,
+            ARCHIVE_OK, ARCHIVE_WARN, ArchiveError, ArchiveReadSupport, LibArchiveEngine,
+            MAX_LIST_ENTRIES, MAX_LIST_PATH_BYTES, MAX_SUPPORTED_LIBARCHIVE_VERSION,
+            MAX_TEST_OUTPUT_BYTES, RawArchive, ScanBudget, canonical_library_file,
+            checked_add_with_limit, copy_c_string_bounded, enforce_limit,
+            ensure_supported_libarchive_abi, looks_like_password_error, probe_supported_formats,
+            system_time_seconds,
         };
-        use std::time::{Duration, UNIX_EPOCH};
+        use std::{
+            ffi::CString,
+            path::Path,
+            time::{Duration, UNIX_EPOCH},
+        };
 
         #[test]
         fn engine_is_send_and_sync() {
             fn assert_send_sync<T: Send + Sync>() {}
             assert_send_sync::<LibArchiveEngine>();
+        }
+
+        #[test]
+        fn explicit_loader_rejects_relative_path_without_fallback() {
+            assert!(matches!(
+                canonical_library_file(Path::new("archive.dll")),
+                Err(ArchiveError::InvalidInput(_))
+            ));
+        }
+
+        #[test]
+        fn explicit_loader_accepts_bundled_absolute_dll() {
+            let executable = std::env::current_exe().expect("resolve test executable");
+            let dll = executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("test executable has profile directory")
+                .join("archive.dll");
+            if !dll.is_file() {
+                eprintln!("bundled runtime was not staged at {}", dll.display());
+                return;
+            }
+            let engine = LibArchiveEngine::load_from_path(&dll)
+                .expect("explicit bundled libarchive path loads");
+            assert!(engine.version.starts_with("libarchive 3."));
+        }
+
+        unsafe extern "C" fn fake_read_new() -> *mut RawArchive {
+            std::ptr::NonNull::<RawArchive>::dangling().as_ptr()
+        }
+
+        unsafe extern "C" fn fake_read_free(_: *mut RawArchive) -> i32 {
+            ARCHIVE_OK
+        }
+
+        unsafe extern "C" fn supported_format(_: *mut RawArchive) -> i32 {
+            ARCHIVE_OK
+        }
+
+        unsafe extern "C" fn unsupported_format(_: *mut RawArchive) -> i32 {
+            ARCHIVE_WARN
+        }
+
+        #[test]
+        fn format_probe_keeps_only_successful_formats() {
+            let candidates = [
+                ("supported", supported_format as ArchiveReadSupport),
+                ("unsupported", unsupported_format as ArchiveReadSupport),
+            ];
+            let formats = probe_supported_formats(fake_read_new, fake_read_free, &candidates)
+                .expect("one format is supported");
+            assert_eq!(formats.len(), 1);
+            assert!(std::ptr::fn_addr_eq(
+                formats[0],
+                supported_format as ArchiveReadSupport
+            ));
         }
 
         #[test]
@@ -2407,9 +2770,49 @@ mod platform_impl {
         }
 
         #[test]
-        fn recognizes_password_errors_without_echoing_a_password() {
+        fn scan_budget_counts_every_entry_and_decoded_chunk() {
+            let mut scan = ScanBudget::new(2, 5, "test");
+            assert!(scan.visit_entry().is_ok());
+            assert!(scan.visit_entry().is_ok());
+            assert!(scan.account_decoded(2).is_ok());
+            assert!(scan.account_decoded(3).is_ok());
+            assert_eq!(scan.entries_visited, 2);
+            assert_eq!(scan.decoded_bytes, 5);
+            assert!(scan.visit_entry().is_err());
+
+            let mut bytes = ScanBudget::new(2, 5, "test");
+            assert!(bytes.account_decoded(6).is_err());
+        }
+
+        #[test]
+        fn utf8_pathname_copy_is_bounded() {
+            let value = CString::new("four").unwrap();
+            // SAFETY: `value` is live and NUL-terminated for both calls.
+            assert_eq!(
+                unsafe { copy_c_string_bounded(value.as_ptr(), 4, "path") }.unwrap(),
+                Some("four".to_owned())
+            );
+            // SAFETY: same valid string, with an intentionally smaller cap.
+            assert!(unsafe { copy_c_string_bounded(value.as_ptr(), 3, "path") }.is_err());
+        }
+
+        #[test]
+        fn rejects_future_libarchive_abi() {
+            assert!(ensure_supported_libarchive_abi(MAX_SUPPORTED_LIBARCHIVE_VERSION - 1).is_ok());
+            assert!(ensure_supported_libarchive_abi(MAX_SUPPORTED_LIBARCHIVE_VERSION).is_err());
+        }
+
+        #[test]
+        fn recognizes_only_explicit_password_errors() {
             assert!(looks_like_password_error("Incorrect passphrase"));
-            assert!(looks_like_password_error("Encrypted file is unsupported"));
+            assert!(looks_like_password_error(
+                "Passphrase required for this entry"
+            ));
+            assert!(!looks_like_password_error("Encrypted file is unsupported"));
+            assert!(!looks_like_password_error(
+                "Decryption failed: malformed data"
+            ));
+            assert!(!looks_like_password_error("Incorrect data check"));
             assert!(!looks_like_password_error("truncated archive"));
         }
 
@@ -2443,6 +2846,10 @@ mod platform_impl {
 
     impl LibArchiveEngine {
         pub fn load() -> ArchiveResult<Self> {
+            Err(unavailable())
+        }
+
+        pub fn load_from_path(_path: &Path) -> ArchiveResult<Self> {
             Err(unavailable())
         }
     }

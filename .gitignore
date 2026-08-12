@@ -1,9 +1,12 @@
 /target/
 /target-codex-check/
 /target-security-review/
+/target-vcpkg/
+/dist/
 *.pdb
 *.ilk
 *.exp
 *.lib
 *.dll
+!/runtime/x64/*.dll
 ArchiveRclick.log

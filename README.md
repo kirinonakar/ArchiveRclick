@@ -9,9 +9,9 @@ selected entries, test it, or create a new archive.
 ## Requirements
 
 - Rust 1.92 or newer with the MSVC Windows target.
-- A 64-bit libarchive 3.8.9 or newer DLL. Put `archive.dll`, `libarchive.dll`, or
-  `libarchive-13.dll` beside `archive-rclick.exe`, or set
-  `ARCHIVERCLICK_LIBARCHIVE` to its absolute path.
+- A 64-bit Windows 10/11 system. The supported libarchive 3.8.9 runtime and its
+  codec dependencies are bundled under `runtime/x64` and copied beside the
+  executable automatically by `cargo build`.
 
 Use a libarchive build that includes zlib, liblzma, and zstd if ZIP, TAR.GZ,
 TAR.XZ, and TAR.ZST creation are required. The application detects read formats
@@ -22,6 +22,12 @@ from archive contents rather than filename extensions.
 ```powershell
 cargo build --release
 ```
+
+The resulting `target\release` directory contains `archive-rclick.exe`, the
+seven required native runtime DLLs, and `THIRD-PARTY-NOTICES.md`. Keep these
+files together when copying or packaging the application. Developers may set
+`ARCHIVERCLICK_LIBARCHIVE` to an absolute path to test another supported
+libarchive 3.x build.
 
 Open an archive from the UI or pass it on the command line:
 
@@ -63,7 +69,7 @@ already has concurrent write access to the chosen destination can still create
 a very narrow reparse-point swap race between the last check and that rename.
 Fully removing that race requires NT handle-relative create/rename operations.
 
-Runtime round-trip tests require a supported libarchive DLL and fail clearly if
-none is available. CI and release packaging should supply libarchive 3.8.9 or
-newer—ideally the exact DLL intended for distribution—through the application
-directory or `ARCHIVERCLICK_LIBARCHIVE`.
+Runtime round-trip tests exercise the same bundled libarchive 3.8.9 DLL that is
+copied into Cargo's target profile directory. `runtime/SHA256SUMS` records the
+exact native payload; `scripts/package-release.ps1` creates a clean portable
+release folder and verifies every bundled hash.

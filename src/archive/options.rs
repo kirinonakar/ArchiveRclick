@@ -167,8 +167,10 @@ mod tests {
     #[test]
     fn extract_options_debug_redacts_password() {
         let secret = "extract-password-that-must-not-appear";
-        let mut options = ExtractOptions::default();
-        options.password = Some(secret.to_owned());
+        let options = ExtractOptions {
+            password: Some(secret.to_owned()),
+            ..ExtractOptions::default()
+        };
 
         let rendered = format!("{options:?}");
         assert!(!rendered.contains(secret));
@@ -178,8 +180,10 @@ mod tests {
     #[test]
     fn create_options_debug_redacts_password() {
         let secret = "create-password-that-must-not-appear";
-        let mut options = CreateOptions::default();
-        options.password = Some(secret.to_owned());
+        let options = CreateOptions {
+            password: Some(secret.to_owned()),
+            ..CreateOptions::default()
+        };
 
         let rendered = format!("{options:?}");
         assert!(!rendered.contains(secret));
