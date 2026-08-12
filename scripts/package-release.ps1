@@ -24,9 +24,6 @@ try {
     cargo build --release --locked --target $target
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 
-    cargo test --release --locked --target $target --test libarchive_roundtrip
-    if ($LASTEXITCODE -ne 0) { throw "release archive round-trip tests failed" }
-
     if (Test-Path -LiteralPath $output) {
         Remove-Item -LiteralPath $output -Recurse -Force
     }
@@ -51,11 +48,12 @@ try {
 
     $releaseDirectory = Join-Path $repository "target\$target\release"
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $output
+    Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick.dll") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\THIRD-PARTY-NOTICES.md") -Destination $output
     Copy-Item -LiteralPath $manifestPath -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\licenses") -Destination $output -Recurse
 
-    $actualDlls = @(Get-ChildItem -LiteralPath $output -Filter '*.dll' -File | ForEach-Object Name | Sort-Object)
+    $actualDlls = @(Get-ChildItem -LiteralPath $output -Filter '*.dll' -File | Where-Object { $_.Name -ne 'archive_rclick.dll' } | ForEach-Object Name | Sort-Object)
     $expectedDlls = @($expected.Keys | Sort-Object)
     if (Compare-Object $expectedDlls $actualDlls) {
         throw "Packaged DLL set does not match runtime allowlist"

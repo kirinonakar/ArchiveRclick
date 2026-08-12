@@ -1,4 +1,4 @@
-mod commands;
+pub(crate) mod commands;
 mod state;
 
 pub use commands::run;

@@ -198,10 +198,13 @@ fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
     let destination = match args.get(1) {
         Some(destination) => PathBuf::from(destination),
         // Default: a subfolder named after the archive file, next to it.
-        None => archive
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(archive_directory_name(&archive)),
+        // If that folder already exists, pick the next free name (_2, _3 ...).
+        None => unique_path(
+            &archive
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(archive_directory_name(&archive)),
+        ),
     };
     if cfg!(test) {
         cli_extract_headless(&archive, &destination)
@@ -284,13 +287,9 @@ fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
             None => return Err(missing_path_message(&requested)),
         }
     }
-    let destination = cli_archive_destination(&sources, format);
-    if destination.exists() {
-        return Err(format!(
-            "Destination already exists: {}",
-            destination.display()
-        ));
-    }
+    // When a file with the same name already exists, pick the next free name
+    // (보고서.zip -> 보고서_2.zip -> 보고서_3.zip ...).
+    let destination = unique_path(&cli_archive_destination(&sources, format));
     if cfg!(test) {
         cli_create_headless(&sources, &destination, format)
     } else {
@@ -472,7 +471,7 @@ fn loose_name_matches(pattern: &str, candidate: &str) -> bool {
 /// Places the new archive next to the sources, naming it after the folder.
 /// A single folder becomes `<folder>.<ext>` beside it; a single file uses the
 /// file's own stem; several items use their common parent folder's name.
-fn cli_archive_destination(sources: &[PathBuf], format: CreateFormat) -> PathBuf {
+pub(crate) fn cli_archive_destination(sources: &[PathBuf], format: CreateFormat) -> PathBuf {
     let parent = common_parent_folder(sources);
     let stem = if sources.len() == 1 {
         let single = &sources[0];
@@ -512,6 +511,33 @@ fn common_parent_folder(paths: &[PathBuf]) -> PathBuf {
         common = ancestor.to_path_buf();
     }
     common
+}
+
+/// Returns `path` when nothing exists there yet; otherwise appends `_2`, `_3`,
+/// ... to the file stem (or folder name) until an unused name is found, e.g.
+/// `보고서.zip` -> `보고서_2.zip`, `보고서\` -> `보고서_2\`.
+pub(crate) fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned());
+    for index in 2.. {
+        let candidate = match &extension {
+            Some(extension) => parent.join(format!("{stem}_{index}.{extension}")),
+            None => parent.join(format!("{stem}_{index}")),
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("the loop always finds a free name")
 }
 
 struct CliConflictResolver;
@@ -1437,7 +1463,7 @@ fn hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder, parse_dropped_path,
-        run_with_startup_argument,
+        run_with_startup_argument, unique_path,
     };
     use crate::archive::CreateFormat;
     use std::path::{Path, PathBuf};
@@ -1501,5 +1527,29 @@ mod tests {
             common_parent_folder(&sources),
             PathBuf::from("data/photos")
         );
+    }
+
+    #[test]
+    fn unique_path_appends_suffix_when_name_taken() {
+        let dir = std::env::temp_dir().join(format!("archive-rclick-unique-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let first = dir.join("보고서.zip");
+        std::fs::write(&first, b"x").expect("write first");
+        assert_eq!(unique_path(&first), dir.join("보고서_2.zip"));
+
+        let second = dir.join("보고서_2.zip");
+        std::fs::write(&second, b"x").expect("write second");
+        assert_eq!(unique_path(&first), dir.join("보고서_3.zip"));
+
+        let unused = dir.join("새파일.zip");
+        assert_eq!(unique_path(&unused), unused);
+
+        // Folder targets get the same suffix treatment.
+        std::fs::create_dir_all(dir.join("보고서")).expect("create folder");
+        assert_eq!(unique_path(&dir.join("보고서")), dir.join("보고서_2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

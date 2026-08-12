@@ -4,6 +4,7 @@ pub mod associations;
 pub mod drop_target;
 pub mod settings;
 pub mod shell;
+pub mod shell_ext;
 pub mod windows;
 
 pub use associations::{register_file_associations, unregister_file_associations};

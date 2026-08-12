@@ -7,6 +7,9 @@ description = "A fast, lightweight Windows archive manager built with Rust, Slin
 publish = false
 build = "build.rs"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 slint = { version = "=1.17.1", default-features = false, features = [
     "std",
@@ -22,12 +25,17 @@ thiserror = "2.0.18"
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows-core = "0.61"
 
 [build-dependencies]
 sha2 = "=0.10.9"
