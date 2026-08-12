@@ -5,7 +5,7 @@ import {
     ListView,
     Palette
 } from "std-widgets.slint";
-import { CreateOverlay, ExtractOverlay } from "dialogs.slint";
+import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
 import { ConflictOverlay, ProgressOverlay } from "progress.slint";
 
 export struct ArchiveRow {
@@ -235,6 +235,11 @@ export component AppWindow inherits Window {
     in-out property <string> password-operation;
     in-out property <string> password-value;
 
+    in-out property <string> font-family;
+    in-out property <[string]> font-options;
+    in-out property <int> font-selection;
+    in-out property <bool> settings-visible;
+
     callback open-requested();
     callback up-requested();
     callback toggle-selection(int);
@@ -252,10 +257,17 @@ export component AppWindow inherits Window {
     callback password-response(string, bool);
     callback dropped(data-transfer);
 
+    callback settings-requested();
+    callback settings-applied(int);
+    callback settings-cancelled();
+
     in-out property <bool> extract-visible: false;
 
     title: root.archive-title == "" ? "ArchiveRclick" : root.archive-title + " — ArchiveRclick";
     icon: @image-url("../app.png");
+    // The active interface font is resolved at startup (auto: Noto Sans JP
+    // when installed, otherwise Yu Gothic) and can be changed in Settings.
+    default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
     preferred-width: 1040px;
     preferred-height: 680px;
     min-width: 720px;
@@ -287,6 +299,8 @@ export component AppWindow inherits Window {
                     root.conflict-response(4);
                 } else if (root.progress-visible || root.busy) {
                     root.cancel-requested();
+                } else if (root.settings-visible) {
+                    root.settings-visible = false;
                 } else if (root.create-visible) {
                     root.create-visible = false;
                 } else if (root.extract-visible) {
@@ -300,11 +314,11 @@ export component AppWindow inherits Window {
             height: parent.height;
 
             can-drop(event) => {
-                return root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible ? DragAction.none : DragAction.copy;
+                return root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible ? DragAction.none : DragAction.copy;
             }
 
             dropped(event) => {
-                if (root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible) {
+                if (root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible) {
                     return DragAction.none;
                 }
                 root.dropped(event.data);
@@ -354,6 +368,12 @@ export component AppWindow inherits Window {
                             text: "Test";
                             enabled: root.has-archive && !root.busy;
                             clicked => { root.test-requested(); }
+                        }
+
+                        Button {
+                            text: "Settings";
+                            enabled: !root.busy;
+                            clicked => { root.settings-requested(); }
                         }
 
                         Rectangle { horizontal-stretch: 1; }
@@ -522,6 +542,16 @@ export component AppWindow inherits Window {
     if root.conflict-visible : ConflictOverlay {
         conflict-path: root.conflict-path;
         responded(response) => { root.conflict-response(response); }
+    }
+
+    if root.settings-visible : SettingsOverlay {
+        font-options: root.font-options;
+        font-selection: root.font-selection;
+        accepted(selection) => {
+            root.settings-visible = false;
+            root.settings-applied(selection);
+        }
+        cancelled => { root.settings-visible = false; }
     }
 
     if root.password-visible : Rectangle {

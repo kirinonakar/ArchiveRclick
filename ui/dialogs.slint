@@ -252,3 +252,73 @@ export component CreateOverlay inherits Rectangle {
         }
     }
 }
+
+export component SettingsOverlay inherits Rectangle {
+    in property <[string]> font-options;
+    in property <int> font-selection;
+
+    callback accepted(int);
+    callback cancelled();
+
+    background: #00000080;
+    accessible-role: region;
+    accessible-label: "Settings";
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 500px;
+        height: 260px;
+        background: Palette.background;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "Settings";
+                font-size: 20px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Text {
+                text: "Interface font";
+                color: Palette.foreground;
+            }
+
+            font := ComboBox {
+                model: root.font-options;
+                current-index: root.font-selection;
+            }
+
+            Text {
+                text: "Auto picks Noto Sans JP when installed, otherwise Yu Gothic.";
+                color: Palette.foreground;
+                wrap: word-wrap;
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancelled(); }
+                }
+
+                Button {
+                    text: "OK";
+                    primary: true;
+                    clicked => { root.accepted(font.current-index); }
+                }
+            }
+        }
+    }
+}

@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
@@ -21,9 +22,40 @@ use super::AppState;
 
 type Engine = Arc<dyn ArchiveEngine>;
 
+// Font choices offered in Settings. The "auto" entry resolves at startup to
+// Noto Sans JP when it is installed, otherwise to Yu Gothic.
+const FONT_OPTIONS: &[(&str, &str)] = &[
+    ("Auto (Noto Sans JP → Yu Gothic)", "auto"),
+    ("Noto Sans JP", "Noto Sans JP"),
+    ("Yu Gothic", "Yu Gothic"),
+    ("Yu Gothic UI", "Yu Gothic UI"),
+    ("Meiryo", "Meiryo"),
+    ("Malgun Gothic", "Malgun Gothic"),
+    ("Segoe UI", "Segoe UI"),
+];
+
 pub fn run() -> Result<(), String> {
-    let startup_argument = std::env::args_os().nth(1);
-    run_with_startup_argument(startup_argument)
+    let mut args = std::env::args_os().skip(1);
+    let command = args.next();
+    let subcommand = command
+        .as_deref()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_owned());
+    match subcommand.as_deref() {
+        Some("extract") => {
+            let rest: Vec<OsString> = args.collect();
+            run_cli_extract(&rest)
+        }
+        Some("zip") => {
+            let rest: Vec<OsString> = args.collect();
+            run_cli_create(&rest, CreateFormat::Zip)
+        }
+        Some("7z") => {
+            let rest: Vec<OsString> = args.collect();
+            run_cli_create(&rest, CreateFormat::SevenZip)
+        }
+        _ => run_with_startup_argument(command),
+    }
 }
 
 fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Result<(), String> {
@@ -48,7 +80,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 return Ok(());
             }
             "--help" | "-h" | "/?" => {
-                let help = "ArchiveRclick [archive]\n\n--register       Register as an available archive handler\n--unregister     Remove that registration\n--check-runtime  Verify the bundled archive engine and exit";
+                let help = "ArchiveRclick [archive|command]\n\nCommands:\n  extract <archive> [destination]  Extract into a subfolder named after the archive\n  zip <path>...                    Create a ZIP archive named after the source folder\n  7z <path>...                     Create a 7z archive named after the source folder\n\nOptions:\n  --register       Register as an available archive handler\n  --unregister     Remove that registration\n  --check-runtime  Verify the bundled archive engine and exit";
                 if cfg!(test) {
                     println!("{help}");
                 } else {
@@ -83,6 +115,22 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
     ui.set_progress_value(-1.0);
     ui.set_create_source_summary("Choose files or a folder to archive".into());
     ui.set_create_destination("Choose after selecting Create…".into());
+    let font_preference = platform::load_font_preference();
+    let font_family = platform::resolve_font_family(&font_preference);
+    ui.set_font_family(font_family.into());
+    ui.set_font_options(ModelRc::from(
+        FONT_OPTIONS
+            .iter()
+            .map(|(label, _)| slint::SharedString::from(*label))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    ));
+    ui.set_font_selection(
+        FONT_OPTIONS
+            .iter()
+            .position(|(_, key)| *key == font_preference.as_str())
+            .unwrap_or(0) as i32,
+    );
     let writable_formats = engine.writable_formats();
     if writable_formats.is_empty() {
         return Err(
@@ -130,12 +178,157 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
 
+
+// ---------------------------------------------------------------------------
+// Command-line subcommands (also used by the Explorer context-menu entries).
+// ---------------------------------------------------------------------------
+
+fn run_cli_extract(args: &[OsString]) -> Result<(), String> {
+    let Some(archive_arg) = args.first() else {
+        return Err("Usage: ArchiveRclick extract <archive> [destination]".to_owned());
+    };
+    let archive = PathBuf::from(archive_arg);
+    if !archive.is_file() {
+        return Err(format!("Not an archive file: {}", archive.display()));
+    }
+    let destination = match args.get(1) {
+        Some(destination) => PathBuf::from(destination),
+        // Default: a subfolder named after the archive file, next to it.
+        None => archive
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(archive_directory_name(&archive)),
+    };
+    let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
+    let options = ExtractOptions {
+        selection: ExtractSelection::All,
+        // Headless operation cannot prompt, so existing files are overwritten.
+        conflict_policy: InitialConflictPolicy::OverwriteAll,
+        ..ExtractOptions::default()
+    };
+    let cancel = CancellationToken::new();
+    let progress = |_snapshot: ProgressSnapshot| {};
+    let summary = engine
+        .extract(
+            &archive,
+            &destination,
+            &options,
+            &progress,
+            &CliConflictResolver,
+            &cancel,
+        )
+        .map_err(|error| error.to_string())?;
+    let message = format!(
+        "Extracted {} entries to {}",
+        summary.entries_processed,
+        destination.display()
+    );
+    println!("{message}");
+    platform::show_info("ArchiveRclick", &message);
+    Ok(())
+}
+
+fn run_cli_create(args: &[OsString], format: CreateFormat) -> Result<(), String> {
+    let verb = match format {
+        CreateFormat::Zip => "zip",
+        CreateFormat::SevenZip => "7z",
+        _ => unreachable!("only zip and 7z are exposed as CLI subcommands"),
+    };
+    if args.is_empty() {
+        return Err(format!("Usage: ArchiveRclick {verb} <file-or-folder>..."));
+    }
+    let sources: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
+    for source in &sources {
+        if !source.exists() {
+            return Err(format!("No such file or folder: {}", source.display()));
+        }
+    }
+    let destination = cli_archive_destination(&sources, format);
+    if destination.exists() {
+        return Err(format!(
+            "Destination already exists: {}",
+            destination.display()
+        ));
+    }
+    let engine = LibArchiveEngine::load().map_err(|error| error.to_string())?;
+    let options = CreateOptions {
+        format,
+        ..CreateOptions::default()
+    };
+    let cancel = CancellationToken::new();
+    let progress = |_snapshot: ProgressSnapshot| {};
+    let summary = engine
+        .create(&destination, &sources, &options, &progress, &cancel)
+        .map_err(|error| error.to_string())?;
+    let message = format!(
+        "Created {} ({} entries)",
+        destination.display(),
+        summary.entries_processed
+    );
+    println!("{message}");
+    platform::show_info("ArchiveRclick", &message);
+    Ok(())
+}
+
+/// Places the new archive next to the sources, naming it after the folder.
+/// A single folder becomes `<folder>.<ext>` beside it; a single file uses the
+/// file's own stem; several items use their common parent folder's name.
+fn cli_archive_destination(sources: &[PathBuf], format: CreateFormat) -> PathBuf {
+    let parent = common_parent_folder(sources);
+    let stem = if sources.len() == 1 {
+        let single = &sources[0];
+        if single.is_dir() {
+            single
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "archive".to_owned())
+        } else {
+            single
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "archive".to_owned())
+        }
+    } else {
+        parent
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive".to_owned())
+    };
+    parent.join(format!("{stem}.{}", format.default_extension()))
+}
+
+fn common_parent_folder(paths: &[PathBuf]) -> PathBuf {
+    let mut common = paths[0]
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    for path in &paths[1..] {
+        let mut ancestor = path.parent().unwrap_or_else(|| Path::new("."));
+        while !common.starts_with(ancestor) {
+            match ancestor.parent() {
+                Some(parent) => ancestor = parent,
+                None => return PathBuf::from("."),
+            }
+        }
+        common = ancestor.to_path_buf();
+    }
+    common
+}
+
+struct CliConflictResolver;
+
+impl ConflictResolver for CliConflictResolver {
+    fn resolve(&self, _destination: &Path) -> ConflictChoice {
+        ConflictChoice::OverwriteAll
+    }
+}
 fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths: Vec<PathBuf>) {
     if ui.get_busy()
         || ui.get_password_visible()
         || ui.get_conflict_visible()
         || ui.get_create_visible()
         || ui.get_extract_visible()
+        || ui.get_settings_visible()
     {
         ui.set_status_text("Finish or cancel the current action before dropping items".into());
         return;
@@ -231,6 +424,44 @@ fn wire_callbacks(
     }
 
     ui.on_show_extract_requested(|| {});
+
+    {
+        let weak = ui.as_weak();
+        ui.on_settings_requested(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_visible(true);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_settings_applied(move |selection| {
+            let preference = FONT_OPTIONS
+                .get(selection.max(0) as usize)
+                .map(|(_, key)| *key)
+                .unwrap_or("auto");
+            if let Err(error) = platform::save_font_preference(preference) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(format!("Could not save settings: {error}").into());
+                }
+                return;
+            }
+            let family = platform::resolve_font_family(preference);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_font_family(family.into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_settings_cancelled(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_visible(false);
+            }
+        });
+    }
 
     {
         let weak = ui.as_weak();
@@ -1005,7 +1236,11 @@ fn hex(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_directory_name, parse_dropped_path, run_with_startup_argument};
+    use super::{
+        archive_directory_name, cli_archive_destination, common_parent_folder, parse_dropped_path,
+        run_with_startup_argument,
+    };
+    use crate::archive::CreateFormat;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1028,5 +1263,44 @@ mod tests {
     #[test]
     fn help_command_does_not_load_libarchive() {
         assert!(run_with_startup_argument(Some("--help".into())).is_ok());
+    }
+
+    #[test]
+    fn cli_archive_destination_names_archive_after_folder() {
+        // Single folder -> sibling archive named after the folder.
+        assert_eq!(
+            cli_archive_destination(&[PathBuf::from("data/photos")], CreateFormat::Zip),
+            PathBuf::from("data/photos.zip")
+        );
+        // Single file -> same folder, named after the file's stem.
+        assert_eq!(
+            cli_archive_destination(&[PathBuf::from("data/notes.txt")], CreateFormat::SevenZip),
+            PathBuf::from("data/notes.7z")
+        );
+    }
+
+    #[test]
+    fn cli_archive_destination_names_multi_selection_after_parent() {
+        // Multiple items -> named after their common parent folder.
+        let sources = vec![
+            PathBuf::from("data/photos/a.jpg"),
+            PathBuf::from("data/photos/b.jpg"),
+        ];
+        assert_eq!(
+            cli_archive_destination(&sources, CreateFormat::Zip),
+            PathBuf::from("data/photos/photos.zip")
+        );
+    }
+
+    #[test]
+    fn common_parent_folder_handles_mixed_depths() {
+        let sources = vec![
+            PathBuf::from("data/photos/a.jpg"),
+            PathBuf::from("data/photos/2025/b.jpg"),
+        ];
+        assert_eq!(
+            common_parent_folder(&sources),
+            PathBuf::from("data/photos")
+        );
     }
 }
