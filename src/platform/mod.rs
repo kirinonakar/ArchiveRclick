@@ -36,6 +36,6 @@ pub use settings::{
 pub use shell::reveal_in_explorer;
 pub use titlebar::apply_window_theme;
 pub use windows::{
-    center_window, pick_archive, pick_files, pick_folder, run_elevated, save_archive, show_error,
-    show_info,
+    center_window, center_window_with_logical_size, pick_archive, pick_files, pick_folder,
+    run_elevated, save_archive, show_error, show_info,
 };

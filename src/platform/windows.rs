@@ -6,6 +6,7 @@ mod imp {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::PathBuf;
 
+    use slint::winit_030::WinitWindowAccessor;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
         CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -15,12 +16,15 @@ mod imp {
         FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
         IFileOpenDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH, ShellExecuteW,
     };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_SHOWNORMAL,
     };
     use windows::Win32::{
         Foundation::{ERROR_CANCELLED, POINT},
-        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
+        Graphics::Gdi::{
+            GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+        },
     };
     use windows::core::{Error, HRESULT, HSTRING, PWSTR};
 
@@ -232,9 +236,23 @@ mod imp {
     }
 
     /// Places a newly created window in the work area of the monitor holding
-    /// the pointer. Slint reports the current window size in physical pixels,
-    /// which is exactly what SetWindowPos uses.
+    /// the pointer. The optional logical size is used when Slint has not
+    /// created the native window yet and therefore reports a zero size.
     pub fn center_window(window: &slint::Window) {
+        center_window_impl(window, None);
+    }
+
+    /// Centers a window before its native handle exists. `logical_size` is
+    /// converted with the target monitor's DPI so the position is correct on
+    /// high-DPI displays as well.
+    pub fn center_window_with_logical_size(
+        window: &slint::Window,
+        logical_size: slint::LogicalSize,
+    ) {
+        center_window_impl(window, Some(logical_size));
+    }
+
+    fn center_window_impl(window: &slint::Window, fallback_size: Option<slint::LogicalSize>) {
         let mut cursor = POINT::default();
         // SAFETY: cursor is a valid writable point supplied by the caller.
         let _ = unsafe { GetCursorPos(&mut cursor) };
@@ -252,13 +270,58 @@ mod imp {
         if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
             return;
         }
-        let size = window.size();
-        let width = i32::try_from(size.width).unwrap_or(i32::MAX);
-        let height = i32::try_from(size.height).unwrap_or(i32::MAX);
+
+        let (width, height) =
+            <slint::Window as WinitWindowAccessor>::with_winit_window(window, |winit_window| {
+                let size = winit_window.outer_size();
+                (size.width, size.height)
+            })
+            .unwrap_or_else(|| {
+                let size = window.size();
+                if size.width > 0 && size.height > 0 {
+                    (size.width, size.height)
+                } else {
+                    let scale_factor = monitor_scale_factor(monitor)
+                        .unwrap_or_else(|| f64::from(window.scale_factor()).max(0.01));
+                    (
+                        logical_to_physical(
+                            fallback_size.map_or(0.0, |size| size.width),
+                            scale_factor,
+                        ),
+                        logical_to_physical(
+                            fallback_size.map_or(0.0, |size| size.height),
+                            scale_factor,
+                        ),
+                    )
+                }
+            });
+        if width == 0 || height == 0 {
+            return;
+        }
+        let width = i32::try_from(width).unwrap_or(i32::MAX);
+        let height = i32::try_from(height).unwrap_or(i32::MAX);
         let work = info.rcWork;
         let x = work.left + (work.right - work.left - width).max(0) / 2;
         let y = work.top + (work.bottom - work.top - height).max(0) / 2;
         window.set_position(slint::PhysicalPosition::new(x, y));
+    }
+
+    fn monitor_scale_factor(monitor: HMONITOR) -> Option<f64> {
+        let mut dpi_x = 0;
+        let mut dpi_y = 0;
+        // SAFETY: the monitor handle came from MonitorFromPoint and both DPI
+        // outputs point to writable local values.
+        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.ok()?;
+        (dpi_x > 0).then(|| f64::from(dpi_x) / 96.0)
+    }
+
+    fn logical_to_physical(value: f32, scale_factor: f64) -> u32 {
+        if !value.is_finite() || value <= 0.0 {
+            return 0;
+        }
+        (f64::from(value) * scale_factor)
+            .round()
+            .clamp(1.0, f64::from(u32::MAX)) as u32
     }
 
     /// Starts a second copy of the app with the Windows UAC runas verb.
@@ -307,7 +370,7 @@ mod imp {
         Ok(wide)
     }
 
-    fn quote_windows_arg(value: &OsStr) -> String {
+    pub(crate) fn quote_windows_arg(value: &OsStr) -> String {
         let value = value.to_string_lossy();
         let mut quoted = String::with_capacity(value.len() + 2);
         quoted.push('"');
@@ -367,6 +430,12 @@ mod imp {
 
     pub fn center_window(_window: &slint::Window) {}
 
+    pub fn center_window_with_logical_size(
+        _window: &slint::Window,
+        _logical_size: slint::LogicalSize,
+    ) {
+    }
+
     pub fn run_elevated(_args: &[OsString]) -> Result<bool, String> {
         Err(unsupported("Elevation"))
     }
@@ -374,6 +443,7 @@ mod imp {
 
 pub use super::shell::reveal_in_explorer;
 pub use imp::{
-    center_window, pick_archive, pick_files, pick_folder, run_elevated, save_archive, show_error,
-    show_info,
+    center_window, center_window_with_logical_size, pick_archive, pick_files, pick_folder,
+    run_elevated, save_archive, show_error, show_info,
 };
+pub(crate) use imp::quote_windows_arg;

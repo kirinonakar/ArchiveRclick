@@ -23,6 +23,17 @@ impl ConflictResolver for Overwrite {
     }
 }
 
+struct CancelAfterResolve {
+    cancel: CancellationToken,
+}
+
+impl ConflictResolver for CancelAfterResolve {
+    fn resolve(&self, _destination: &Path) -> ConflictChoice {
+        self.cancel.cancel();
+        ConflictChoice::Overwrite
+    }
+}
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -93,6 +104,61 @@ fn cancelled_zip_creation_removes_temporary_file() {
     assert!(!archive.exists());
     let leftovers = fs::read_dir(&work.0)
         .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.contains("archiverclick"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files remain: {leftovers:?}"
+    );
+}
+
+#[test]
+fn cancelled_zip_extraction_removes_temporary_file() {
+    let work = TestDirectory::new("cancelled-zip-extract");
+    let input = work.0.join("payload");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("hello.txt"), b"cancel me\n").unwrap();
+
+    let engine = load_runtime();
+    let archive = work.0.join("payload.zip");
+    let cancel = CancellationToken::new();
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                format: CreateFormat::Zip,
+                ..CreateOptions::default()
+            },
+            &quiet_progress,
+            &cancel,
+        )
+        .unwrap();
+
+    let output = work.0.join("out");
+    fs::create_dir_all(output.join("payload")).unwrap();
+    fs::write(output.join("payload").join("hello.txt"), b"old\n").unwrap();
+    let resolver = CancelAfterResolve {
+        cancel: cancel.clone(),
+    };
+    let result = engine.extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &quiet_progress,
+        &resolver,
+        &cancel,
+    );
+
+    assert!(matches!(result, Err(ArchiveError::Cancelled)));
+    assert_eq!(
+        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        b"old\n"
+    );
+    let leftovers = fs::read_dir(&output.join("payload"))
+        .unwrap_or_else(|_| fs::read_dir(&output).unwrap())
         .flatten()
         .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
         .filter(|name| name.contains("archiverclick"))

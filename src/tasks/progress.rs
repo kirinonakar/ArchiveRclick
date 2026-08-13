@@ -57,13 +57,41 @@ impl ProgressSnapshot {
     }
 
     pub fn fraction(&self) -> f32 {
-        if let Some(total) = self.total_bytes.filter(|total| *total > 0) {
+        // A finished operation is complete even when it had no entries or
+        // bytes.  Without this special case an empty archive would end at
+        // 0%, which is misleading in the progress UI.
+        if self.phase == ProgressPhase::Finished {
+            1.0
+        } else if let Some(total) = self.total_bytes.filter(|total| *total > 0) {
             (self.bytes_processed as f64 / total as f64).clamp(0.0, 1.0) as f32
         } else if let Some(total) = self.total_entries.filter(|total| *total > 0) {
             (self.entries_processed as f64 / total as f64).clamp(0.0, 1.0) as f32
         } else {
             0.0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProgressPhase, ProgressSnapshot};
+
+    #[test]
+    fn finished_empty_operation_is_one_hundred_percent() {
+        let snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
+
+        assert_eq!(snapshot.fraction(), 1.0);
+    }
+
+    #[test]
+    fn byte_progress_takes_precedence_over_entry_progress() {
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
+        snapshot.total_entries = Some(10);
+        snapshot.entries_processed = 9;
+        snapshot.total_bytes = Some(1_000);
+        snapshot.bytes_processed = 250;
+
+        assert!((snapshot.fraction() - 0.25).abs() < f32::EPSILON);
     }
 }
 

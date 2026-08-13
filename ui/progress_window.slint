@@ -1,4 +1,5 @@
 import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
+import { ProgressStats } from "progress.slint";
 
 // Small progress-only window shown while Explorer right-click operations run.
 // Unlike the main window it has no archive browser UI; the app closes it by
@@ -7,6 +8,10 @@ export component ProgressWindow inherits Window {
     in-out property <string> font-family;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
+    in-out property <string> progress-percent;
+    in-out property <string> progress-elapsed;
+    in-out property <string> progress-remaining;
+    in-out property <string> progress-total;
     in-out property <string> progress-detail;
     in-out property <float> progress-value;
 
@@ -16,9 +21,9 @@ export component ProgressWindow inherits Window {
     icon: @image-url("../app.png");
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
     preferred-width: 700px;
-    preferred-height: 230px;
+    preferred-height: 270px;
     min-width: 620px;
-    min-height: 200px;
+    min-height: 240px;
     background: Palette.background;
 
     VerticalLayout {
@@ -44,6 +49,13 @@ export component ProgressWindow inherits Window {
             indeterminate: root.progress-value < 0;
             accessible-label: "Operation progress";
             accessible-value: root.progress-value < 0 ? "Working" : "" + Math.round(root.progress-value * 100) + "%";
+        }
+
+        ProgressStats {
+            percent-text: root.progress-percent;
+            elapsed-text: root.progress-elapsed;
+            remaining-text: root.progress-remaining;
+            total-text: root.progress-total;
         }
 
         Text {

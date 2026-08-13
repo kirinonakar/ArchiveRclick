@@ -1,8 +1,69 @@
 import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
 
+// The progress bar gives a quick visual indication; this row keeps the exact
+// values readable while an Explorer operation is running.
+export component ProgressStats inherits Rectangle {
+    in property <string> percent-text;
+    in property <string> elapsed-text;
+    in property <string> remaining-text;
+    in property <string> total-text;
+
+    height: 34px;
+    background: Palette.alternate-background;
+    border-radius: 6px;
+    accessible-role: region;
+    accessible-label: "Operation timing";
+
+    HorizontalLayout {
+        padding: 7px;
+        spacing: 8px;
+
+        Text {
+            text: root.percent-text;
+            color: Palette.foreground;
+            font-weight: 600;
+            horizontal-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.elapsed-text;
+            color: Palette.foreground;
+            horizontal-stretch: 2;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.remaining-text;
+            color: Palette.foreground;
+            horizontal-stretch: 2;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.total-text;
+            color: Palette.foreground;
+            horizontal-stretch: 2;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
 export component ProgressOverlay inherits Rectangle {
     in property <string> operation-title;
     in property <string> current-file;
+    in property <string> progress-percent;
+    in property <string> progress-elapsed;
+    in property <string> progress-remaining;
+    in property <string> progress-total;
     in property <string> detail;
     in property <float> value;
 
@@ -16,7 +77,7 @@ export component ProgressOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 680px;
-        height: 238px;
+        height: 276px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -45,6 +106,13 @@ export component ProgressOverlay inherits Rectangle {
                 indeterminate: root.value < 0;
                 accessible-label: "Operation progress";
                 accessible-value: root.value < 0 ? "Working" : "" + Math.round(root.value * 100) + "%";
+            }
+
+            ProgressStats {
+                percent-text: root.progress-percent;
+                elapsed-text: root.progress-elapsed;
+                remaining-text: root.progress-remaining;
+                total-text: root.progress-total;
             }
 
             Text {

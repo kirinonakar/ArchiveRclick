@@ -278,6 +278,10 @@ export component AppWindow inherits Window {
     in-out property <bool> progress-visible;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
+    in-out property <string> progress-percent;
+    in-out property <string> progress-elapsed;
+    in-out property <string> progress-remaining;
+    in-out property <string> progress-total;
     in-out property <string> progress-detail;
     in-out property <float> progress-value;
 
@@ -744,6 +748,10 @@ export component AppWindow inherits Window {
     if root.progress-visible : ProgressOverlay {
         operation-title: root.progress-title;
         current-file: root.progress-file;
+        progress-percent: root.progress-percent;
+        progress-elapsed: root.progress-elapsed;
+        progress-remaining: root.progress-remaining;
+        progress-total: root.progress-total;
         detail: root.progress-detail;
         value: root.progress-value;
         cancelled => { root.cancel-requested(); }

@@ -76,7 +76,12 @@ impl ArchiveError {
                     "access denied",
                     "permission denied",
                     "eacces",
+                    "eperm",
+                    "operation not permitted",
                     "0x80070005",
+                    "error 5",
+                    "error 13",
+                    "errno 13",
                 ]
                 .iter()
                 .any(|marker| message.contains(marker))
@@ -87,3 +92,39 @@ impl ArchiveError {
 }
 
 pub type ArchiveResult<T> = Result<T, ArchiveError>;
+
+#[cfg(test)]
+mod tests {
+    use super::ArchiveError;
+
+    #[test]
+    fn detects_windows_permission_errors() {
+        assert!(ArchiveError::io(
+            "C:\\Windows",
+            std::io::Error::from_raw_os_error(5),
+        )
+        .requires_elevation());
+        assert!(ArchiveError::io(
+            "C:\\Windows",
+            std::io::Error::from_raw_os_error(1314),
+        )
+        .requires_elevation());
+        assert!(!ArchiveError::io(
+            "C:\\missing",
+            std::io::Error::from_raw_os_error(2),
+        )
+        .requires_elevation());
+    }
+
+    #[test]
+    fn detects_permission_text_from_archive_backends() {
+        let libarchive = ArchiveError::LibArchive {
+            operation: "opening archive",
+            message: "error 13".to_owned(),
+        };
+        assert!(libarchive.requires_elevation());
+
+        let seven_zip = ArchiveError::SevenZip("0x80070005: access denied".to_owned());
+        assert!(seven_zip.requires_elevation());
+    }
+}

@@ -67,6 +67,7 @@ use windows::core::Result as WinResult;
 use crate::{
     app::commands::{cli_archive_destination, unique_path},
     archive::CreateFormat,
+    platform::windows::quote_windows_arg,
 };
 
 const CLSID_SHELL_EXT: GUID = GUID {
@@ -495,10 +496,10 @@ fn shorten_menu_name(name: &str) -> String {
     }
     let suffix = archive_suffix(name).unwrap_or_default();
     let suffix_len = suffix.chars().count();
-    if suffix_len + 1 >= MAX_MENU_NAME_CHARS {
-        let mut shortened: String = name.chars().take(MAX_MENU_NAME_CHARS - 1).collect();
-        shortened.push('…');
-        return shortened;
+    if suffix_len >= MAX_MENU_NAME_CHARS {
+        // An unusually long extension is still more useful than the stem;
+        // keep the complete extension even when it is the whole label.
+        return suffix.to_owned();
     }
     let prefix_len = MAX_MENU_NAME_CHARS - suffix_len - 1;
     let prefix: String = name.chars().take(prefix_len).collect();
@@ -867,11 +868,15 @@ fn archive_stem(path: &Path) -> String {
 }
 
 fn build_args(subcommand: &str, paths: &[OsString]) -> String {
-    let mut args = String::from(subcommand);
+    // Explorer can return a root folder with a trailing backslash (for
+    // example, `C:\`).  Hand-quoting paths leaves that backslash to escape the
+    // closing quote in CommandLineToArgvW, which corrupts the argument and can
+    // make the child process fail before it reaches its permission handling.
+    // Use the same Windows quoting rules as the UAC relaunch path.
+    let mut args = quote_windows_arg(std::ffi::OsStr::new(subcommand));
     for path in paths {
-        args.push_str(" \"");
-        args.push_str(&path.to_string_lossy());
-        args.push('"');
+        args.push(' ');
+        args.push_str(&quote_windows_arg(path));
     }
     args
 }
@@ -1383,7 +1388,17 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::shorten_menu_name;
+    use std::ffi::OsString;
+
+    use super::{build_args, shorten_menu_name};
+
+    #[test]
+    fn command_line_quoting_keeps_a_root_folder_argument_intact() {
+        assert_eq!(
+            build_args("zip", &[OsString::from(r"C:\")]),
+            r#""zip" "C:\\""#
+        );
+    }
 
     #[test]
     fn short_names_are_kept_whole() {
@@ -1409,5 +1424,24 @@ mod tests {
         assert!(shortened.ends_with(".zip"));
         let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
         assert_eq!(shortened, expected);
+    }
+
+    #[test]
+    fn long_7z_names_keep_the_extension_and_original_case() {
+        let long = "very-long-file-name-that-goes-on-and-on-and-on.7Z";
+        let shortened = shorten_menu_name(long);
+        assert_eq!(shortened.chars().count(), 30);
+        assert!(shortened.ends_with(".7Z"));
+        let expected: String = long.chars().take(26).collect::<String>() + "…" + ".7Z";
+        assert_eq!(shortened, expected);
+    }
+
+    #[test]
+    fn extension_near_the_display_limit_is_still_visible() {
+        let extension = format!(".{}", "x".repeat(29));
+        let long = format!("archive{extension}");
+        let shortened = shorten_menu_name(&long);
+        assert_eq!(shortened, extension);
+        assert!(shortened.ends_with(&extension));
     }
 }

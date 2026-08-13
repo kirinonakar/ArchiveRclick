@@ -205,11 +205,8 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
-    if let Some(geometry) = platform::load_window_geometry() {
-        ui.window().set_size(slint::LogicalSize::new(
-            geometry.width as f32,
-            geometry.height as f32,
-        ));
+    let saved_geometry = platform::load_window_geometry();
+    if let Some(geometry) = saved_geometry {
         ui.window()
             .set_position(slint::PhysicalPosition::new(geometry.x, geometry.y));
     }
@@ -221,7 +218,7 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     ui.set_status_text("Ready".into());
     ui.set_summary_text("No archive open".into());
     ui.set_libarchive_version(engine.version().into());
-    ui.set_progress_value(-1.0);
+    set_initial_progress(&ui);
     ui.set_create_source_summary("Choose files or a folder to archive".into());
     ui.set_create_destination("Choose after selecting Create…".into());
     let font_preference = platform::load_font_preference();
@@ -305,13 +302,13 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
         if let Some(ui) = weak_for_close.upgrade()
             && should_save_window_geometry(ui.window())
         {
-            let (width, height) = logical_window_size(ui.window());
+            let size = ui.window().size();
             let position = ui.window().position();
             let _ = platform::save_window_geometry(&platform::WindowGeometry {
                 x: position.x,
                 y: position.y,
-                width,
-                height,
+                width: size.width,
+                height: size.height,
             });
         }
         slint::CloseRequestResponse::HideWindow
@@ -319,23 +316,16 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
 
     ui.show()
         .map_err(|error| format!("Could not show the UI: {error}"))?;
+    // Apply the physical size after the native window has been created.  The
+    // winit backend has no real monitor scale factor before `show()` and
+    // temporarily stores pre-show sizes as logical values, which would scale
+    // a physical size twice on a high-DPI monitor.
+    if let Some(geometry) = saved_geometry {
+        ui.window()
+            .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+    }
     platform::apply_window_theme(ui.window(), ui.get_theme_selection());
     Ok((ui, state, engine, writable_formats))
-}
-
-/// Converts Slint's physical window size to DPI-independent logical pixels
-/// before it is persisted.  This keeps the same user-visible size when the
-/// next launch happens on a monitor with a different scale factor.
-fn logical_window_size(window: &slint::Window) -> (u32, u32) {
-    let scale_factor = f64::from(window.scale_factor()).max(0.01);
-    let size = window.size();
-    let width = (f64::from(size.width) / scale_factor)
-        .round()
-        .clamp(1.0, f64::from(u32::MAX)) as u32;
-    let height = (f64::from(size.height) / scale_factor)
-        .round()
-        .clamp(1.0, f64::from(u32::MAX)) as u32;
-    (width, height)
 }
 
 /// Returns false for maximized/fullscreen bounds even when the backend has
@@ -372,23 +362,71 @@ fn should_save_window_geometry(window: &slint::Window) -> bool {
 // ---------------------------------------------------------------------------
 
 fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String> {
-    if args.is_empty() {
+    let requested_archives = parse_elevated_extract(args, elevated_retry)?;
+    if requested_archives.is_empty() {
         return Err("Usage: ArchiveRclick extract <archive>...".to_owned());
     }
-    let mut archives: Vec<PathBuf> = Vec::with_capacity(args.len());
-    for argument in args {
+    let mut archives: Vec<PathBuf> = Vec::with_capacity(requested_archives.len());
+    let mut destination_overrides = Vec::with_capacity(requested_archives.len());
+    for (argument, destination_override) in requested_archives {
         let requested = PathBuf::from(argument);
         match resolve_existing_path(&requested) {
-            Some(path) if path.is_file() => archives.push(path),
+            Some(path) if path.is_file() => {
+                archives.push(path);
+                destination_overrides.push(destination_override);
+            }
             Some(path) => return Err(format!("Not an archive file: {}", path.display())),
             None => return Err(missing_path_message(&requested)),
         }
     }
     let engine: Engine = load_engine()?;
     let (ui, state) = open_progress_window()?;
-    start_extract_batch_window(&ui, &state, Arc::clone(&engine), archives, elevated_retry);
+    start_extract_batch_window(
+        &ui,
+        &state,
+        Arc::clone(&engine),
+        archives,
+        destination_overrides,
+        elevated_retry,
+    );
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Parses the output markers used by an elevated extraction retry. Each
+/// `--output <directory> <archive>` pair keeps the retry pointed at the exact
+/// directory used by the failed attempt. Normal CLI invocations remain a list
+/// of archive paths with no overrides.
+fn parse_elevated_extract(
+    args: &[OsString],
+    elevated_retry: bool,
+) -> Result<Vec<(OsString, Option<PathBuf>)>, String> {
+    if !elevated_retry {
+        return Ok(args.iter().cloned().map(|path| (path, None)).collect());
+    }
+
+    let mut pending_output: Option<PathBuf> = None;
+    let mut archives = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index].as_os_str() == OsStr::new("--output") {
+            if pending_output.is_some() {
+                return Err("The elevated extraction retry has an output without an archive".to_owned());
+            }
+            let Some(output) = args.get(index + 1) else {
+                return Err("The elevated extraction retry is missing an output path".to_owned());
+            };
+            pending_output = Some(PathBuf::from(output));
+            index += 2;
+        } else {
+            archives.push((args[index].clone(), pending_output.take()));
+            index += 1;
+        }
+    }
+    if pending_output.is_some() {
+        return Err("The elevated extraction retry is missing an archive path".to_owned());
+    }
+    Ok(archives)
 }
 
 fn run_gui_create(
@@ -401,11 +439,12 @@ fn run_gui_create(
         CreateFormat::SevenZip => "7z",
         _ => unreachable!("only zip and 7z reach the context-menu create flow"),
     };
-    if args.is_empty() {
+    let (destination_override, source_args) = parse_elevated_output(args, elevated_retry)?;
+    if source_args.is_empty() {
         return Err(format!("Usage: ArchiveRclick {verb} <file-or-folder>..."));
     }
-    let mut sources: Vec<PathBuf> = Vec::with_capacity(args.len());
-    for argument in args {
+    let mut sources: Vec<PathBuf> = Vec::with_capacity(source_args.len());
+    for argument in &source_args {
         let requested = PathBuf::from(argument);
         match resolve_existing_path(&requested) {
             Some(source) => sources.push(source),
@@ -414,7 +453,8 @@ fn run_gui_create(
     }
     // When a file with the same name already exists, pick the next free name
     // (보고서.zip -> 보고서_2.zip -> 보고서_3.zip ...).
-    let destination = unique_path(&cli_archive_destination(&sources, format));
+    let destination = destination_override
+        .unwrap_or_else(|| unique_path(&cli_archive_destination(&sources, format)));
     let engine: Engine = load_engine()?;
     let options = CreateOptions {
         format,
@@ -433,6 +473,31 @@ fn run_gui_create(
     );
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Parses the destination marker used only by an elevated retry.  Normal CLI
+/// invocations keep the original `zip <source>...` shape, while a retry gets
+/// the exact destination selected before the first attempt.  Keeping that
+/// destination avoids silently retrying into `_2` after a failed attempt has
+/// already created part of the output folder/archive.
+fn parse_elevated_output(
+    args: &[OsString],
+    elevated_retry: bool,
+) -> Result<(Option<PathBuf>, Vec<OsString>), String> {
+    if !elevated_retry || args.first().map(OsString::as_os_str)
+        != Some(OsStr::new("--output"))
+    {
+        return Ok((None, args.to_vec()));
+    }
+    let destination = args
+        .get(1)
+        .cloned()
+        .map(PathBuf::from)
+        .ok_or_else(|| "The elevated retry is missing its output path".to_owned())?;
+    if args.len() < 3 {
+        return Err("The elevated retry is missing its input path".to_owned());
+    }
+    Ok((Some(destination), args[2..].to_vec()))
 }
 
 fn missing_path_message(path: &Path) -> String {
@@ -1384,6 +1449,9 @@ struct ProgressWindowState {
     cancellation: Arc<Mutex<Option<CancellationToken>>>,
 }
 
+const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 700.0;
+const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 230.0;
+
 /// Builds and shows the small progress window; its Cancel button cancels the
 /// running operation.
 fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), String> {
@@ -1406,9 +1474,17 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     ui.set_font_family(font_family.into());
     ui.set_progress_title("Working…".into());
     ui.set_progress_file("".into());
-    ui.set_progress_detail(initial_progress_detail().into());
-    ui.set_progress_value(-1.0);
-    platform::center_window(ui.window());
+    set_initial_progress_window(&ui);
+    // The native window is created when the event loop starts, so its size is
+    // still zero here. Supply the preferred logical size so the initial
+    // position can be calculated before the first frame is shown.
+    platform::center_window_with_logical_size(
+        ui.window(),
+        slint::LogicalSize::new(
+            PROGRESS_WINDOW_LOGICAL_WIDTH,
+            PROGRESS_WINDOW_LOGICAL_HEIGHT,
+        ),
+    );
     ui.show()
         .map_err(|error| format!("Could not show the progress window: {error}"))?;
     Ok((ui, state))
@@ -1421,14 +1497,14 @@ fn close_progress_window(ui: &ProgressWindow) {
 }
 
 fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
+    let text = progress_ui_text(snapshot);
     ui.set_progress_file(snapshot.current_file.clone().into());
-    ui.set_progress_detail(progress_detail(snapshot).into());
-    let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
-        snapshot.fraction()
-    } else {
-        -1.0
-    };
-    ui.set_progress_value(fraction);
+    ui.set_progress_percent(text.percent.into());
+    ui.set_progress_elapsed(text.elapsed.into());
+    ui.set_progress_remaining(text.remaining.into());
+    ui.set_progress_total(text.total.into());
+    ui.set_progress_detail(text.detail.into());
+    ui.set_progress_value(text.value);
 }
 
 fn update_progress_window(weak: &slint::Weak<ProgressWindow>, snapshot: ProgressSnapshot) {
@@ -1452,14 +1528,51 @@ fn request_context_elevation(
     retry_already_attempted: bool,
     subcommand: &str,
     paths: &[PathBuf],
+    destination: Option<&Path>,
 ) -> bool {
     if retry_already_attempted || paths.is_empty() {
         return false;
     }
-    let mut args = Vec::with_capacity(paths.len() + 2);
+    let mut args = Vec::with_capacity(paths.len() + 4);
     args.push(OsString::from("--elevated-retry"));
     args.push(OsString::from(subcommand));
+    if let Some(destination) = destination {
+        args.push(OsString::from("--output"));
+        args.push(destination.as_os_str().to_owned());
+    }
     args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    match platform::run_elevated(&args) {
+        Ok(launched) => launched,
+        Err(error) => {
+            platform::show_error("Request administrator access", &error);
+            false
+        }
+    }
+}
+
+fn request_context_extract_elevation(
+    retry_already_attempted: bool,
+    failures: &[(PathBuf, PathBuf, ArchiveError)],
+) -> bool {
+    if retry_already_attempted {
+        return false;
+    }
+    let failures = failures
+        .iter()
+        .filter(|(_, _, error)| error.requires_elevation())
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return false;
+    }
+
+    let mut args = Vec::with_capacity(failures.len() * 3 + 2);
+    args.push(OsString::from("--elevated-retry"));
+    args.push(OsString::from("extract"));
+    for (archive, destination, _) in failures {
+        args.push(OsString::from("--output"));
+        args.push(destination.as_os_str().to_owned());
+        args.push(archive.as_os_str().to_owned());
+    }
     match platform::run_elevated(&args) {
         Ok(launched) => launched,
         Err(error) => {
@@ -1474,6 +1587,7 @@ fn start_extract_batch_window(
     state: &Rc<ProgressWindowState>,
     engine: Engine,
     archives: Vec<PathBuf>,
+    destination_overrides: Vec<Option<PathBuf>>,
     elevated_retry: bool,
 ) {
     let total = archives.len();
@@ -1485,13 +1599,12 @@ fn start_extract_batch_window(
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
     ui.set_progress_title("Extracting archives".into());
     ui.set_progress_file(first.into());
-    ui.set_progress_detail(initial_progress_detail().into());
-    ui.set_progress_value(-1.0);
+    set_initial_progress_window(ui);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
     std::thread::spawn(move || {
         let mut processed = 0usize;
-        let mut failures: Vec<(PathBuf, ArchiveError)> = Vec::new();
+        let mut failures: Vec<(PathBuf, PathBuf, ArchiveError)> = Vec::new();
         for (index, archive) in archives.iter().enumerate() {
             if cancel.is_cancelled() {
                 break;
@@ -1501,11 +1614,13 @@ fn start_extract_batch_window(
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_progress_title(title.into());
                 ui.set_progress_file(archive_display.into());
-                ui.set_progress_detail(initial_progress_detail().into());
-                ui.set_progress_value(-1.0);
+                set_initial_progress_window(&ui);
             });
             let parent = archive.parent().unwrap_or_else(|| Path::new("."));
-            let destination = unique_path(&parent.join(archive_directory_name(archive)));
+            let destination = destination_overrides
+                .get(index)
+                .and_then(|path| path.clone())
+                .unwrap_or_else(|| unique_path(&parent.join(archive_directory_name(archive))));
             let options = ExtractOptions {
                 selection: ExtractSelection::All,
                 conflict_policy: InitialConflictPolicy::OverwriteAll,
@@ -1524,31 +1639,25 @@ fn start_extract_batch_window(
             ) {
                 Ok(_) => processed += 1,
                 Err(ArchiveError::Cancelled) => break,
-                Err(error) => failures.push((archive.clone(), error)),
+                Err(error) => failures.push((archive.clone(), destination, error)),
             }
         }
         let _ = weak.upgrade_in_event_loop(move |ui| {
-            let elevation_paths = failures
-                .iter()
-                .filter(|(_, error)| error.requires_elevation())
-                .map(|(path, _)| path.clone())
-                .collect::<Vec<_>>();
             if !cancel.is_cancelled()
-                && !elevation_paths.is_empty()
-                && request_context_elevation(elevated_retry, "extract", &elevation_paths)
+                && request_context_extract_elevation(elevated_retry, &failures)
             {
                 close_progress_window(&ui);
                 return;
             }
             if !cancel.is_cancelled() && !failures.is_empty() {
                 if processed == 0 {
-                    let (path, error) = failures.remove(0);
+                    let (path, _, error) = failures.remove(0);
                     let message = format!("{}: {error}", path.display());
                     platform::show_error("Extract archives", &message);
                 } else {
                     let details = failures
                         .iter()
-                        .map(|(path, error)| format!("{}: {error}", path.display()))
+                        .map(|(path, _, error)| format!("{}: {error}", path.display()))
                         .collect::<Vec<_>>()
                         .join("\n");
                     platform::show_error(
@@ -1580,8 +1689,7 @@ fn start_create_window(
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
     ui.set_progress_title("Creating archive".into());
     ui.set_progress_file(destination.display().to_string().into());
-    ui.set_progress_detail(initial_progress_detail().into());
-    ui.set_progress_value(-1.0);
+    set_initial_progress_window(ui);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
     let elevation_sources = sources.clone();
@@ -1603,6 +1711,7 @@ fn start_create_window(
                             elevated_retry,
                             subcommand,
                             &elevation_sources,
+                            Some(&destination),
                         );
                     if !relaunched {
                         platform::show_error("Create archive", &error.to_string());
@@ -1707,8 +1816,7 @@ fn begin_operation(
     ui.set_progress_visible(true);
     ui.set_progress_title(title.into());
     ui.set_progress_file(current_file.into());
-    ui.set_progress_detail(initial_progress_detail().into());
-    ui.set_progress_value(-1.0);
+    set_initial_progress(ui);
     cancel
 }
 
@@ -1719,14 +1827,14 @@ fn finish_operation(ui: &AppWindow) {
 }
 
 fn apply_progress_to(ui: &AppWindow, snapshot: &ProgressSnapshot) {
+    let text = progress_ui_text(snapshot);
     ui.set_progress_file(snapshot.current_file.clone().into());
-    ui.set_progress_detail(progress_detail(snapshot).into());
-    let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
-        snapshot.fraction()
-    } else {
-        -1.0
-    };
-    ui.set_progress_value(fraction);
+    ui.set_progress_percent(text.percent.into());
+    ui.set_progress_elapsed(text.elapsed.into());
+    ui.set_progress_remaining(text.remaining.into());
+    ui.set_progress_total(text.total.into());
+    ui.set_progress_detail(text.detail.into());
+    ui.set_progress_value(text.value);
 }
 
 fn update_progress(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
@@ -1890,25 +1998,66 @@ fn show_ui_error(weak: &slint::Weak<AppWindow>, title: &str, message: String) {
     platform::show_error(title, &message);
 }
 
-fn initial_progress_detail() -> String {
-    let snapshot = ProgressSnapshot::new(crate::tasks::ProgressPhase::Opening);
-    progress_detail(&snapshot)
+struct ProgressUiText {
+    percent: String,
+    elapsed: String,
+    remaining: String,
+    total: String,
+    detail: String,
+    value: f32,
 }
 
-fn progress_detail(snapshot: &ProgressSnapshot) -> String {
-    let percent = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
-        format!("{:.0}%", snapshot.fraction() * 100.0)
+fn initial_progress_text() -> ProgressUiText {
+    let snapshot = ProgressSnapshot::new(crate::tasks::ProgressPhase::Opening);
+    progress_ui_text(&snapshot)
+}
+
+fn set_initial_progress(ui: &AppWindow) {
+    let text = initial_progress_text();
+    ui.set_progress_percent(text.percent.into());
+    ui.set_progress_elapsed(text.elapsed.into());
+    ui.set_progress_remaining(text.remaining.into());
+    ui.set_progress_total(text.total.into());
+    ui.set_progress_detail(text.detail.into());
+    ui.set_progress_value(text.value);
+}
+
+fn set_initial_progress_window(ui: &ProgressWindow) {
+    let text = initial_progress_text();
+    ui.set_progress_percent(text.percent.into());
+    ui.set_progress_elapsed(text.elapsed.into());
+    ui.set_progress_remaining(text.remaining.into());
+    ui.set_progress_total(text.total.into());
+    ui.set_progress_detail(text.detail.into());
+    ui.set_progress_value(text.value);
+}
+
+fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
+    let value = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
+        snapshot.fraction()
     } else {
-        "—%".to_owned()
+        -1.0
     };
-    format!(
-        "{percent}  •  Elapsed {}  •  Remaining {}  •  Total {}  •  {} entries  •  {} processed",
-        format_duration(Some(snapshot.elapsed)),
-        format_duration(snapshot.estimated_remaining),
-        format_duration(snapshot.estimated_total),
-        snapshot.entries_processed,
-        compact_bytes(snapshot.bytes_processed),
-    )
+    let percent = if value < 0.0 {
+        "—%".to_owned()
+    } else {
+        format!("{:.0}%", value * 100.0)
+    };
+    ProgressUiText {
+        percent,
+        elapsed: format!("Elapsed {}", format_duration(Some(snapshot.elapsed))),
+        remaining: format!(
+            "Remaining {}",
+            format_duration(snapshot.estimated_remaining)
+        ),
+        total: format!("Total {}", format_duration(snapshot.estimated_total)),
+        detail: format!(
+            "{} entries  •  {} processed",
+            snapshot.entries_processed,
+            compact_bytes(snapshot.bytes_processed)
+        ),
+        value,
+    }
 }
 
 fn format_duration(duration: Option<Duration>) -> String {
@@ -1979,10 +2128,10 @@ fn hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder, parse_dropped_path,
-        run_with_startup_argument, unique_path,
+        parse_elevated_extract, parse_elevated_output, run_with_startup_argument, unique_path,
     };
     use crate::archive::CreateFormat;
-    use std::path::{Path, PathBuf};
+    use std::{ffi::OsString, path::{Path, PathBuf}};
 
     #[test]
     fn strips_compound_archive_extensions() {
@@ -2017,6 +2166,48 @@ mod tests {
         assert_eq!(
             cli_archive_destination(&[PathBuf::from("data/notes.txt")], CreateFormat::SevenZip),
             PathBuf::from("data/notes.7z")
+        );
+    }
+
+    #[test]
+    fn elevated_create_retry_preserves_the_original_destination() {
+        let args = vec![
+            OsString::from("--output"),
+            OsString::from(r"C:\Windows\Archive.zip"),
+            OsString::from(r"C:\Windows\Input folder"),
+        ];
+        let (destination, sources) = parse_elevated_output(&args, true).expect("valid retry");
+        assert_eq!(destination, Some(PathBuf::from(r"C:\Windows\Archive.zip")));
+        assert_eq!(sources, vec![OsString::from(r"C:\Windows\Input folder")]);
+
+        let (destination, sources) = parse_elevated_output(&args[2..], false).expect("normal CLI");
+        assert_eq!(destination, None);
+        assert_eq!(sources, vec![OsString::from(r"C:\Windows\Input folder")]);
+    }
+
+    #[test]
+    fn elevated_extract_retry_preserves_each_output_directory() {
+        let args = vec![
+            OsString::from("--output"),
+            OsString::from(r"C:\Windows\one"),
+            OsString::from(r"C:\Temp\one.zip"),
+            OsString::from("--output"),
+            OsString::from(r"C:\Windows\two"),
+            OsString::from(r"C:\Temp\two.zip"),
+        ];
+        let parsed = parse_elevated_extract(&args, true).expect("valid retry");
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    OsString::from(r"C:\Temp\one.zip"),
+                    Some(PathBuf::from(r"C:\Windows\one")),
+                ),
+                (
+                    OsString::from(r"C:\Temp\two.zip"),
+                    Some(PathBuf::from(r"C:\Windows\two")),
+                ),
+            ]
         );
     }
 

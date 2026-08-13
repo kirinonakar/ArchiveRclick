@@ -1143,6 +1143,22 @@ mod platform_impl {
         file: Arc<Mutex<Option<File>>>,
         size: u64,
         mtime_unix: Option<i64>,
+        armed: bool,
+    }
+
+    impl PendingFile {
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for PendingFile {
+        fn drop(&mut self) {
+            close_pending_file(self);
+            if self.armed {
+                let _ = fs::remove_file(&self.temp_path);
+            }
+        }
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1387,6 +1403,7 @@ mod platform_impl {
             file: shared,
             size: item.size.unwrap_or(0),
             mtime_unix: item.mtime_unix,
+            armed: true,
         });
         context.progress.report(context.snapshot.clone(), false);
         S_OK
@@ -1419,7 +1436,7 @@ mod platform_impl {
             }
             return E_ABORT;
         }
-        let Some(pending) = context.pending.pop_front() else {
+        let Some(mut pending) = context.pending.pop_front() else {
             // Directories and skipped entries have no output stream.
             if context.test_mode {
                 context.summary.entries_processed += 1;
@@ -1442,13 +1459,12 @@ mod platform_impl {
             }
         }
         if let Err(error) = install_temporary(&context.root, &pending.temp_path, &pending.target) {
-            close_pending_file(&pending);
-            let _ = fs::remove_file(&pending.temp_path);
             if context.error.is_none() {
                 context.error = Some(error);
             }
             return E_ABORT;
         }
+        pending.disarm();
         context.summary.entries_processed += 1;
         context.summary.bytes_processed =
             context.summary.bytes_processed.saturating_add(pending.size);
@@ -2207,8 +2223,10 @@ mod platform_impl {
             let mut snapshot = context.snapshot.clone();
             drop(context);
 
-            cleanup_pending_temp_files(&callback);
             open_archive.in_archive.close_now();
+            // Release 7-Zip's archive/stream references before removing the
+            // files left in the pending queue by cancellation or failure.
+            cleanup_pending_temp_files(&callback);
 
             if let Some(error) = error {
                 return Err(error);
@@ -2306,91 +2324,98 @@ mod platform_impl {
                     return Err(error);
                 }
             };
-            let result = match apply_create_properties(&out_archive, options) {
-                Ok(()) => {
-                    let shared_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(Some(
-                        temp_file.take().expect("temporary file is live"),
-                    )));
-                    let stream = Box::new(OutStream {
-                        vtbl: &OUT_STREAM_VTBL,
-                        refs: AtomicU32::new(1),
-                        file: Arc::clone(&shared_file),
-                    });
-                    let stream_ptr = Box::into_raw(stream).cast::<c_void>();
-                    let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
-                    snapshot.total_entries = Some(items.len() as u64);
-                    snapshot.total_bytes = Some(total_bytes);
-                    let context = Arc::new(Mutex::new(UpdateContext {
-                        items,
-                        password: options.password.clone(),
-                        cancel: cancel.clone(),
-                        progress: Arc::clone(&throttled),
-                        snapshot,
-                        summary: OperationSummary::default(),
-                        error: None,
-                    }));
-                    let callback = UpdateCallback {
-                        vtbl: &UPDATE_VTBL,
-                        crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD2_VTBL,
-                        refs: AtomicU32::new(1),
-                        context: Arc::clone(&context),
-                    };
-                    let hr = out_archive.update_items(
-                        stream_ptr,
-                        item_count,
-                        (&callback as *const UpdateCallback)
-                            .cast_mut()
-                            .cast::<c_void>(),
-                    );
-                    let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
-                    let error = context.error.take();
-                    let summary = context.summary.clone();
-                    let mut snapshot = context.snapshot.clone();
-                    drop(context);
-                    // 7-Zip released the stream; close the file ourselves
-                    // through the Arc we kept.
-                    let mut guard = shared_file
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    if let Some(file) = guard.take() {
-                        drop(file);
-                    }
-                    drop(guard);
-                    if let Some(error) = error {
-                        return finish_create_error(&temporary_path, error);
-                    }
-                    if cancel.is_cancelled() {
-                        return finish_create_error(&temporary_path, ArchiveError::Cancelled);
-                    }
-                    if hr != S_OK {
-                        return finish_create_error(
-                            &temporary_path,
-                            ArchiveError::SevenZip(format!(
+            let result: ArchiveResult<OperationSummary> = (|| {
+                match apply_create_properties(&out_archive, options) {
+                    Ok(()) => {
+                        let shared_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(Some(
+                            temp_file.take().expect("temporary file is live"),
+                        )));
+                        let stream = Box::new(OutStream {
+                            vtbl: &OUT_STREAM_VTBL,
+                            refs: AtomicU32::new(1),
+                            file: Arc::clone(&shared_file),
+                        });
+                        let stream_ptr = Box::into_raw(stream).cast::<c_void>();
+                        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
+                        snapshot.total_entries = Some(items.len() as u64);
+                        snapshot.total_bytes = Some(total_bytes);
+                        let context = Arc::new(Mutex::new(UpdateContext {
+                            items,
+                            password: options.password.clone(),
+                            cancel: cancel.clone(),
+                            progress: Arc::clone(&throttled),
+                            snapshot,
+                            summary: OperationSummary::default(),
+                            error: None,
+                        }));
+                        let callback = UpdateCallback {
+                            vtbl: &UPDATE_VTBL,
+                            crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD2_VTBL,
+                            refs: AtomicU32::new(1),
+                            context: Arc::clone(&context),
+                        };
+                        let hr = out_archive.update_items(
+                            stream_ptr,
+                            item_count,
+                            (&callback as *const UpdateCallback)
+                                .cast_mut()
+                                .cast::<c_void>(),
+                        );
+                        let mut context =
+                            context.lock().unwrap_or_else(|poison| poison.into_inner());
+                        let error = context.error.take();
+                        let summary = context.summary.clone();
+                        let mut snapshot = context.snapshot.clone();
+                        drop(context);
+                        // 7-Zip released the stream; close the file ourselves
+                        // through the Arc we kept.
+                        let mut guard = shared_file
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        if let Some(file) = guard.take() {
+                            drop(file);
+                        }
+                        drop(guard);
+                        if let Some(error) = error {
+                            return create_error(error);
+                        }
+                        if cancel.is_cancelled() {
+                            return create_error(ArchiveError::Cancelled);
+                        }
+                        if hr != S_OK {
+                            return create_error(ArchiveError::SevenZip(format!(
                                 "7z creation failed with HRESULT {:#010x}",
                                 hr as u32
-                            )),
-                        );
+                            )));
+                        }
+                        if let Err(error) =
+                            install_temporary(&parent, &temporary_path, &final_destination)
+                        {
+                            return create_error(error);
+                        }
+                        snapshot.phase = ProgressPhase::Finished;
+                        snapshot.current_file.clear();
+                        snapshot.entries_processed = summary.entries_processed;
+                        snapshot.bytes_processed = summary.bytes_processed;
+                        throttled.report(snapshot, true);
+                        Ok(summary)
                     }
-                    if let Err(error) =
-                        install_temporary(&parent, &temporary_path, &final_destination)
-                    {
-                        return finish_create_error(&temporary_path, error);
+                    Err(error) => {
+                        // Close the still-owned file before the archive is
+                        // released. The temporary path is removed below, after
+                        // `out_archive` has released any stream references.
+                        drop(temp_file.take());
+                        create_error(error)
                     }
-                    snapshot.phase = ProgressPhase::Finished;
-                    snapshot.current_file.clear();
-                    snapshot.entries_processed = summary.entries_processed;
-                    snapshot.bytes_processed = summary.bytes_processed;
-                    throttled.report(snapshot, true);
-                    Ok(summary)
                 }
-                Err(error) => {
-                    // `finish_create_error` removes the path immediately;
-                    // close the still-owned file first on Windows.
-                    drop(temp_file.take());
-                    finish_create_error(&temporary_path, error)
-                }
-            };
+            })();
             drop(out_archive);
+            if result.is_err() {
+                // 7-Zip may retain the output stream until the archive object
+                // is released. Remove the path only after that release so a
+                // cancelled operation cannot strand its temporary file.
+                let _ = fs::remove_file(&temporary_path);
+            }
             result
         }
 
@@ -2855,9 +2880,9 @@ mod platform_impl {
         if let Some(threads) = options.threads.sevenzip_threads() {
             push("mt", PropVariant::u32_value(threads));
         }
-        if let Some(password) = options.password.as_deref() {
-            push("p", PropVariant::bstr(password));
-        }
+        // Passwords are requested through ICryptoGetTextPassword2 on the
+        // update callback. The 7z handler does not accept a `p` property in
+        // ISetProperties and returns E_INVALIDARG for it.
         // The closure borrows the arrays; end that borrow before reading them.
         drop(push);
         let hr =
@@ -2956,8 +2981,7 @@ mod platform_impl {
         }
     }
 
-    fn finish_create_error(temp: &Path, error: ArchiveError) -> ArchiveResult<OperationSummary> {
-        let _ = fs::remove_file(temp);
+    fn create_error(error: ArchiveError) -> ArchiveResult<OperationSummary> {
         Err(error)
     }
 
@@ -2968,10 +2992,7 @@ mod platform_impl {
             .context
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        while let Some(pending) = context.pending.pop_front() {
-            close_pending_file(&pending);
-            let _ = fs::remove_file(&pending.temp_path);
-        }
+        while let Some(_pending) = context.pending.pop_front() {}
     }
 
     fn close_pending_file(pending: &PendingFile) {
