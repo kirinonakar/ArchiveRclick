@@ -70,6 +70,19 @@ impl ProgressSink for RecordingProgress {
     }
 }
 
+struct DelayedRecordingProgress(Arc<Mutex<Vec<ProgressSnapshot>>>);
+
+impl ProgressSink for DelayedRecordingProgress {
+    fn report(&self, snapshot: ProgressSnapshot) {
+        let delay = snapshot.phase == ProgressPhase::Opening
+            || (snapshot.phase == ProgressPhase::Compressing && snapshot.bytes_processed == 0);
+        self.0.lock().unwrap().push(snapshot);
+        if delay {
+            std::thread::sleep(std::time::Duration::from_millis(125));
+        }
+    }
+}
+
 fn load_engine() -> SevenZipEngine {
     let executable = std::env::current_exe().expect("locate test executable");
     let profile = executable
@@ -117,6 +130,7 @@ fn bundled_7z_create_extract_round_trip() {
     let input = work.0.join("payload");
     fs::create_dir_all(&input).unwrap();
     fs::write(input.join("hello.txt"), b"hello from 7z\n").unwrap();
+    fs::write(input.join("Thumbs.db"), b"thumbnail cache").unwrap();
 
     let engine = load_engine();
     let archive = work.0.join("payload.7z");
@@ -146,9 +160,10 @@ fn bundled_7z_create_extract_round_trip() {
         )
         .expect("extract 7z archive");
     assert_eq!(
-        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        fs::read(output.join("hello.txt")).unwrap(),
         b"hello from 7z\n"
     );
+    assert!(!output.join("Thumbs.db").exists());
 }
 
 #[test]
@@ -158,6 +173,7 @@ fn bundled_zip_create_extract_round_trip() {
     fs::create_dir_all(input.join("nested")).unwrap();
     fs::write(input.join("hello.txt"), b"hello from ZIP\n").unwrap();
     fs::write(input.join("nested").join("data.bin"), [0_u8, 1, 2, 3, 4]).unwrap();
+    fs::write(input.join("nested").join("Thumbs.db"), b"thumbnail cache").unwrap();
 
     let engine = load_composite();
     let archive = work.0.join("payload.zip");
@@ -192,12 +208,78 @@ fn bundled_zip_create_extract_round_trip() {
         )
         .expect("extract ZIP archive through 7z.dll");
     assert_eq!(
-        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        fs::read(output.join("hello.txt")).unwrap(),
         b"hello from ZIP\n"
     );
     assert_eq!(
-        fs::read(output.join("payload").join("nested").join("data.bin")).unwrap(),
+        fs::read(output.join("nested").join("data.bin")).unwrap(),
         [0_u8, 1, 2, 3, 4]
+    );
+    assert!(!output.join("nested").join("Thumbs.db").exists());
+}
+
+#[test]
+fn bundled_7z_header_encryption_hides_file_names() {
+    let work = Work::new();
+    let input = work.0.join("secret-folder");
+    fs::create_dir_all(input.join("nested")).unwrap();
+    fs::write(input.join("secret.txt"), b"hidden 7z name\n").unwrap();
+
+    let engine = load_engine();
+    let archive = work.0.join("header-encrypted.7z");
+    let cancel = CancellationToken::new();
+    let password = "header-password";
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                format: CreateFormat::SevenZip,
+                password: Some(password.to_owned()),
+                encrypt_headers: true,
+                ..CreateOptions::default()
+            },
+            &quiet,
+            &cancel,
+        )
+        .expect("create header-encrypted 7z archive");
+
+    assert!(matches!(
+        engine.list(&archive, None, 0, &quiet, &cancel),
+        Err(ArchiveError::PasswordRequired)
+    ));
+
+    let listing = engine
+        .list(&archive, Some(password), 0, &quiet, &cancel)
+        .expect("list header-encrypted 7z archive with password");
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|entry| entry.display_path == "secret.txt")
+    );
+    assert!(listing
+        .entries
+        .iter()
+        .all(|entry| !entry.display_path.contains("secret-folder")));
+
+    let output = work.0.join("out");
+    engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions {
+                password: Some(password.to_owned()),
+                ..ExtractOptions::default()
+            },
+            &quiet,
+            &Overwrite,
+            &cancel,
+        )
+        .expect("extract header-encrypted 7z archive");
+    assert_eq!(
+        fs::read(output.join("secret.txt")).unwrap(),
+        b"hidden 7z name\n"
     );
 }
 
@@ -300,11 +382,86 @@ fn bundled_zip_many_files_extracts_with_parallel_workers() {
     }
     assert!(previous_bytes > 0, "parallel extraction emitted no progress");
     assert_eq!(summary.entries_processed, 512);
-    assert_eq!(fs::read_dir(output.join("payload")).unwrap().count(), 512);
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 512);
     assert_eq!(
-        fs::read(output.join("payload").join("file-0511.bin")).unwrap(),
+        fs::read(output.join("file-0511.bin")).unwrap(),
         [0xFF_u8; 4096]
     );
+}
+
+#[test]
+fn compression_progress_uses_source_bytes_for_zip_and_7z() {
+    let work = Work::new();
+    let input = work.0.join("compression-progress");
+    fs::create_dir_all(&input).unwrap();
+    for file_index in 0..2u8 {
+        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        let mut state = u32::from(file_index) + 1;
+        for byte in &mut bytes {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+        fs::write(input.join(format!("file-{file_index}.bin")), bytes).unwrap();
+    }
+
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    for format in [CreateFormat::Zip, CreateFormat::SevenZip] {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let progress = DelayedRecordingProgress(Arc::clone(&recorded));
+        let archive = work.0.join(format!("debug.{}", format.default_extension()));
+        let summary = engine
+            .create(
+                &archive,
+                std::slice::from_ref(&input),
+                &CreateOptions {
+                    format,
+                    ..CreateOptions::default()
+                },
+                &progress,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(summary.bytes_processed, 32 * 1024 * 1024);
+        let snapshots = recorded.lock().unwrap();
+        let mut previous_bytes = 0;
+        let mut saw_partial = false;
+        for snapshot in snapshots
+            .iter()
+            .filter(|snapshot| snapshot.phase == ProgressPhase::Compressing)
+        {
+            let total = snapshot.total_bytes.expect("compression total bytes");
+            assert!(
+                snapshot.bytes_processed <= total,
+                "compression progress exceeded its input total: {} > {total}",
+                snapshot.bytes_processed
+            );
+            assert!(
+                snapshot.bytes_processed >= previous_bytes,
+                "compression progress moved backwards: {previous_bytes} -> {}",
+                snapshot.bytes_processed
+            );
+            previous_bytes = snapshot.bytes_processed;
+            saw_partial |= snapshot.bytes_processed < total;
+            if let Some(current_total) = snapshot.current_file_total_bytes {
+                assert!(
+                    snapshot.current_file_bytes_processed <= current_total,
+                    "current file progress exceeded its total: {} > {current_total}",
+                    snapshot.current_file_bytes_processed
+                );
+                if snapshot.bytes_processed == total {
+                    assert_eq!(
+                        snapshot.current_file_bytes_processed, current_total,
+                        "overall compression reached 100% before the current file finished"
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_partial,
+            "compression did not emit an intermediate source-byte snapshot for {format:?}"
+        );
+    }
 }
 
 fn write_legacy_zip(path: &Path, name: &[u8], contents: &[u8]) {
@@ -424,8 +581,8 @@ fn cancelled_7z_extraction_removes_temporary_file() {
         .unwrap();
 
     let output = work.0.join("out");
-    fs::create_dir_all(output.join("payload")).unwrap();
-    fs::write(output.join("payload").join("hello.txt"), b"old\n").unwrap();
+    fs::create_dir_all(&output).unwrap();
+    fs::write(output.join("hello.txt"), b"old\n").unwrap();
     let resolver = CancelAfterResolve {
         cancel: cancel.clone(),
     };
@@ -440,7 +597,7 @@ fn cancelled_7z_extraction_removes_temporary_file() {
 
     assert!(matches!(result, Err(ArchiveError::Cancelled)));
     assert_eq!(
-        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        fs::read(output.join("hello.txt")).unwrap(),
         b"old\n"
     );
     assert_no_archive_temporary_files(&output);

@@ -2542,9 +2542,17 @@ mod platform_impl {
                     source.display()
                 ))
             })?;
+            if selected_metadata.is_file() && is_thumbs_db_name(root_name) {
+                continue;
+            }
+            let archive_name = if files.len() == 1 && selected_metadata.is_dir() {
+                String::new()
+            } else {
+                root_name.to_owned()
+            };
             collect_source(
                 &source,
-                root_name.to_owned(),
+                archive_name,
                 destination,
                 cancel,
                 &mut names,
@@ -2579,11 +2587,13 @@ mod platform_impl {
                 source.display()
             )));
         }
-        let key = archive_name.to_lowercase();
-        if !names.insert(key) {
-            return Err(ArchiveError::InvalidInput(format!(
-                "duplicate archive pathname {archive_name}"
-            )));
+        if !archive_name.is_empty() {
+            let key = archive_name.to_lowercase();
+            if !names.insert(key) {
+                return Err(ArchiveError::InvalidInput(format!(
+                    "duplicate archive pathname {archive_name}"
+                )));
+            }
         }
         let modified_unix_seconds = metadata.modified().ok().and_then(system_time_seconds);
         if metadata.is_file() {
@@ -2612,13 +2622,15 @@ mod platform_impl {
                 source.display()
             )));
         }
-        items.push(SourceItem {
-            source: source.to_path_buf(),
-            archive_name: archive_name.clone(),
-            kind: SourceKind::Directory,
-            size: 0,
-            modified_unix_seconds,
-        });
+        if !archive_name.is_empty() {
+            items.push(SourceItem {
+                source: source.to_path_buf(),
+                archive_name: archive_name.clone(),
+                kind: SourceKind::Directory,
+                size: 0,
+                modified_unix_seconds,
+            });
+        }
         let mut children = fs::read_dir(source)
             .map_err(|error| ArchiveError::io(source, error))?
             .collect::<Result<Vec<_>, _>>()
@@ -2640,9 +2652,17 @@ mod platform_impl {
                     "invalid input name {child_name:?}"
                 )));
             }
+            if !child.path().is_dir() && is_thumbs_db_name(child_name) {
+                continue;
+            }
+            let child_archive_name = if archive_name.is_empty() {
+                child_name.to_owned()
+            } else {
+                format!("{archive_name}/{child_name}")
+            };
             collect_source(
                 &child.path(),
-                format!("{archive_name}/{child_name}"),
+                child_archive_name,
                 destination,
                 cancel,
                 names,
@@ -2651,6 +2671,10 @@ mod platform_impl {
             )?;
         }
         Ok(())
+    }
+
+    fn is_thumbs_db_name(name: &str) -> bool {
+        name.eq_ignore_ascii_case("Thumbs.db")
     }
 
     fn validate_compression_level(options: &CreateOptions) -> ArchiveResult<()> {

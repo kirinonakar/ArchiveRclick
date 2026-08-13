@@ -135,7 +135,7 @@ export component CreateOverlay inherits Rectangle {
     private property <int> thread-index: root.thread-selection;
     private property <string> password-error: "";
 
-    callback accepted(int, int, int, string, string);
+    callback accepted(int, int, int, string, string, bool);
     callback cancelled();
     callback choose-files();
     callback choose-folder();
@@ -148,7 +148,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 460px;
-        height: 420px;
+        height: 460px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -221,6 +221,11 @@ export component CreateOverlay inherits Rectangle {
                     format := ComboBox {
                         model: root.available-formats;
                         current-index: 0;
+                        changed current-index => {
+                            if (self.current-value != "7z") {
+                                header-encryption.checked = false;
+                            }
+                        }
                     }
                 }
 
@@ -279,6 +284,16 @@ export component CreateOverlay inherits Rectangle {
                 }
             }
 
+            header-encryption := CheckBox {
+                visible: format.current-value == "7z";
+                enabled: password.text != "";
+                text: root.language-index == 1
+                    ? "파일명 암호화 (Header Encryption)"
+                    : root.language-index == 2
+                        ? "ファイル名を暗号化（Header Encryption）"
+                        : "Encrypt file names (Header Encryption)";
+            }
+
             Text {
                 visible: root.password-error != "";
                 text: root.password-error;
@@ -318,7 +333,8 @@ export component CreateOverlay inherits Rectangle {
                                 level.value,
                                 root.thread-index,
                                 password.text,
-                                password-confirmation.text
+                                password-confirmation.text,
+                                header-encryption.checked && format.current-value == "7z" && password.text != ""
                             );
                         }
                     }

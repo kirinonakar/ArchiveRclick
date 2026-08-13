@@ -138,8 +138,8 @@ fn cancelled_zip_extraction_removes_temporary_file() {
         .unwrap();
 
     let output = work.0.join("out");
-    fs::create_dir_all(output.join("payload")).unwrap();
-    fs::write(output.join("payload").join("hello.txt"), b"old\n").unwrap();
+    fs::create_dir_all(&output).unwrap();
+    fs::write(output.join("hello.txt"), b"old\n").unwrap();
     let resolver = CancelAfterResolve {
         cancel: cancel.clone(),
     };
@@ -154,11 +154,11 @@ fn cancelled_zip_extraction_removes_temporary_file() {
 
     assert!(matches!(result, Err(ArchiveError::Cancelled)));
     assert_eq!(
-        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        fs::read(output.join("hello.txt")).unwrap(),
         b"old\n"
     );
-    let leftovers = fs::read_dir(&output.join("payload"))
-        .unwrap_or_else(|_| fs::read_dir(&output).unwrap())
+    let leftovers = fs::read_dir(&output)
+        .unwrap()
         .flatten()
         .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
         .filter(|name| name.contains("archiverclick"))
@@ -187,6 +187,7 @@ fn prioritized_creation_formats_round_trip() {
         (0_u8..=255).collect::<Vec<_>>(),
     )
     .unwrap();
+    fs::write(input.join(r"nested\Thumbs.db"), b"thumbnail cache").unwrap();
 
     let engine = load_runtime();
     let writable = engine.writable_formats();
@@ -225,10 +226,14 @@ fn prioritized_creation_formats_round_trip() {
             listing
                 .entries
                 .iter()
-                .any(|entry| entry.display_path.replace('\\', "/") == "payload/hello.txt"),
-            "{} listing omitted payload/hello.txt",
+                .any(|entry| entry.display_path.replace('\\', "/") == "hello.txt"),
+            "{} listing omitted hello.txt",
             format.label()
         );
+        assert!(listing
+            .entries
+            .iter()
+            .all(|entry| !entry.display_path.to_ascii_lowercase().ends_with("thumbs.db")));
         engine
             .test(&archive, None, &quiet_progress, &cancel)
             .unwrap_or_else(|error| panic!("testing {} failed: {error}", format.label()));
@@ -245,11 +250,11 @@ fn prioritized_creation_formats_round_trip() {
             )
             .unwrap_or_else(|error| panic!("extracting {} failed: {error}", format.label()));
         assert_eq!(
-            fs::read(output.join(r"payload\hello.txt")).unwrap(),
+            fs::read(output.join(r"hello.txt")).unwrap(),
             b"hello from ArchiveRclick\n"
         );
         assert_eq!(
-            fs::read(output.join(r"payload\nested\bytes.bin")).unwrap(),
+            fs::read(output.join(r"nested\bytes.bin")).unwrap(),
             (0_u8..=255).collect::<Vec<_>>()
         );
     }

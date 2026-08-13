@@ -30,7 +30,7 @@ mod platform_impl {
         ptr,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicU32, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         },
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -691,6 +691,8 @@ mod platform_impl {
         vtbl: &'static InStreamVtbl,
         refs: AtomicU32,
         file: Mutex<BufReader<File>>,
+        position: AtomicU64,
+        progress: Option<Arc<UpdateInputProgress>>,
     }
 
     unsafe extern "system" fn in_stream_query_interface(
@@ -739,10 +741,21 @@ mod platform_impl {
             .file
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        match file.read(buffer) {
+        let result = file.read(buffer);
+        drop(file);
+        match result {
             Ok(amount) => {
                 if !processed.is_null() {
                     unsafe { *processed = amount as u32 };
+                }
+                if amount != 0 {
+                    let position = stream
+                        .position
+                        .fetch_add(amount as u64, Ordering::AcqRel)
+                        .saturating_add(amount as u64);
+                    if let Some(progress) = &stream.progress {
+                        progress.report(position);
+                    }
                 }
                 S_OK
             }
@@ -773,6 +786,7 @@ mod platform_impl {
                 Err(_) => return E_FAIL,
             }
         };
+        stream.position.store(position, Ordering::Release);
         if !new_position.is_null() {
             unsafe { *new_position = position };
         }
@@ -1796,6 +1810,39 @@ mod platform_impl {
         error: Option<ArchiveError>,
     }
 
+    struct UpdateInputProgress {
+        context: Arc<Mutex<UpdateContext>>,
+        sink: Arc<dyn ProgressSink>,
+        base_bytes: u64,
+        total_bytes: u64,
+    }
+
+    impl UpdateInputProgress {
+        fn report(&self, position: u64) {
+            let position = position.min(self.total_bytes);
+            let snapshot = {
+                let mut context = self
+                    .context
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                // A stream can outlive the callback's current item while
+                // 7-Zip is finishing a previous item. Do not let a stale
+                // stream overwrite the next file's progress.
+                if context.current_file_base_bytes != self.base_bytes {
+                    return;
+                }
+                context.snapshot.current_file_bytes_processed =
+                    context.snapshot.current_file_bytes_processed.max(position);
+                context.snapshot.bytes_processed = context
+                    .snapshot
+                    .bytes_processed
+                    .max(self.base_bytes.saturating_add(position));
+                context.snapshot.clone()
+            };
+            self.sink.report(snapshot);
+        }
+    }
+
     #[repr(C)]
     struct UpdateCallback {
         vtbl: *const UpdateVtbl,
@@ -1855,32 +1902,18 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn update_set_completed(this: *mut c_void, complete: *const u64) -> i32 {
+    unsafe extern "system" fn update_set_completed(
+        this: *mut c_void,
+        _complete: *const u64,
+    ) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
         if callback.cancel.is_cancelled() {
             return E_ABORT;
         }
-        if complete.is_null() {
-            return S_OK;
-        }
-        let snapshot = {
-            let mut context = callback
-                .context
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let (bytes_processed, current_file_bytes) = split_callback_progress(
-                unsafe { *complete },
-                context.current_file_base_bytes,
-                context.snapshot.current_file_total_bytes,
-            );
-            // A handler may restart its counter for each input item. Keep the
-            // overall value monotonic and derive the file value separately.
-            context.snapshot.bytes_processed =
-                context.snapshot.bytes_processed.max(bytes_processed);
-            context.snapshot.current_file_bytes_processed = current_file_bytes;
-            context.snapshot.clone()
-        };
-        callback.progress.report(snapshot);
+        // The update callback counter is handler-specific: ZIP can report
+        // packed/output-side bytes, while 7z can change its counter between
+        // items. The input stream reports the stable uncompressed source-byte
+        // domain used by the overall progress denominator.
         S_OK
     }
 
@@ -1961,7 +1994,7 @@ mod platform_impl {
         let Some(item) = callback.items.get(index as usize).cloned() else {
             return E_INVALIDARG;
         };
-        {
+        let (base_bytes, total_bytes) = {
             let mut context = callback
                 .context
                 .lock()
@@ -1970,7 +2003,8 @@ mod platform_impl {
             context.snapshot.current_file_total_bytes = Some(item.size);
             context.snapshot.current_file_bytes_processed = 0;
             context.current_file_base_bytes = context.snapshot.bytes_processed;
-        }
+            (context.current_file_base_bytes, item.size)
+        };
         if item.kind == SourceKind::Directory {
             return S_OK;
         }
@@ -1998,6 +2032,13 @@ mod platform_impl {
                 stream_buffer_size(item.size),
                 file,
             )),
+            position: AtomicU64::new(0),
+            progress: Some(Arc::new(UpdateInputProgress {
+                context: Arc::clone(&callback.context),
+                sink: Arc::clone(&callback.progress),
+                base_bytes,
+                total_bytes,
+            })),
         });
         // Ownership of the stream moves to 7-Zip; it releases it after the
         // item has been read.
@@ -2948,6 +2989,21 @@ mod platform_impl {
                     options.format
                 )));
             }
+            if options.encrypt_headers && options.format != CreateFormat::SevenZip {
+                return Err(ArchiveError::UnsupportedOption(
+                    "header encryption is supported only for 7z archives".to_owned(),
+                ));
+            }
+            if options.encrypt_headers
+                && !options
+                    .password
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+            {
+                return Err(ArchiveError::InvalidInput(
+                    "header encryption requires a non-empty password".to_owned(),
+                ));
+            }
             let parent = destination
                 .parent()
                 .filter(|path| !path.as_os_str().is_empty())
@@ -3746,6 +3802,8 @@ mod platform_impl {
             vtbl: &IN_STREAM_VTBL,
             refs: AtomicU32::new(2),
             file: Mutex::new(BufReader::with_capacity(STREAM_BUFFER_SIZE, file)),
+            position: AtomicU64::new(0),
+            progress: None,
         });
         let callback = OpenCallback {
             vtbl: &OPEN_VTBL,
@@ -3979,6 +4037,9 @@ mod platform_impl {
                     "LZMA2"
                 }),
             );
+            if options.encrypt_headers {
+                push("he", PropVariant::bstr("on"));
+            }
         }
         if options.format == CreateFormat::Zip {
             // Force the standard UTF-8 filename flag in ZIP headers.
@@ -4198,6 +4259,10 @@ mod platform_impl {
     // ------------------------------------------------------------------
     // Source collection for creation
     // ------------------------------------------------------------------
+    fn is_thumbs_db_name(name: &str) -> bool {
+        name.eq_ignore_ascii_case("Thumbs.db")
+    }
+
     fn collect_sources(
         files: &[PathBuf],
         destination: &Path,
@@ -4227,10 +4292,14 @@ mod platform_impl {
             if is_reparse(&metadata) {
                 continue;
             }
+            if !metadata.is_dir() && is_thumbs_db_name(&base_name) {
+                continue;
+            }
             if metadata.is_dir() {
+                let prefix = if files.len() == 1 { "" } else { &base_name };
                 walk_directory(
                     &canonical,
-                    &base_name,
+                    prefix,
                     destination,
                     &mut items,
                     &mut total_bytes,
@@ -4285,22 +4354,31 @@ mod platform_impl {
                 children.push((name, path, metadata));
             }
             children.sort_by(|left, right| left.0.cmp(&right.0));
-            items.push(SourceItem {
-                source: directory.clone(),
-                // The archive handler adds the directory separator based on
-                // KPID_IS_DIR. Keeping it out of the callback property also
-                // matches the path form used for child entries.
-                archive_name: archive_prefix.clone(),
-                kind: SourceKind::Directory,
-                size: 0,
-                modified_unix_seconds: None,
-            });
+            if !archive_prefix.is_empty() {
+                items.push(SourceItem {
+                    source: directory.clone(),
+                    // The archive handler adds the directory separator based
+                    // on KPID_IS_DIR. Keeping it out of the callback property
+                    // also matches the path form used for child entries.
+                    archive_name: archive_prefix.clone(),
+                    kind: SourceKind::Directory,
+                    size: 0,
+                    modified_unix_seconds: None,
+                });
+            }
             for (name, path, metadata) in children {
                 check_cancel(cancel)?;
                 if same_windows_path(&path, destination) {
                     continue;
                 }
-                let child_archive_name = format!("{archive_prefix}/{name}");
+                if !metadata.is_dir() && is_thumbs_db_name(&name) {
+                    continue;
+                }
+                let child_archive_name = if archive_prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{archive_prefix}/{name}")
+                };
                 if metadata.is_dir() {
                     pending.push((child_archive_name, path));
                 } else {

@@ -162,18 +162,15 @@ component ArchiveTableHeader inherits Rectangle {
     private property <float> name-boundary: 0.28;
     private property <float> size-boundary: 0.40;
     private property <float> packed-boundary: 0.52;
-    private property <float> modified-boundary: 0.70;
     private property <length> min-name-width: 96px;
     private property <length> min-size-width: 60px;
     private property <length> min-packed-width: 60px;
     private property <length> min-modified-width: 100px;
-    private property <length> min-path-width: 90px;
 
     out property <length> name-column-width: root.content-width * root.name-boundary;
     out property <length> size-column-width: root.content-width * (root.size-boundary - root.name-boundary);
     out property <length> packed-column-width: root.content-width * (root.packed-boundary - root.size-boundary);
-    out property <length> modified-column-width: root.content-width * (root.modified-boundary - root.packed-boundary);
-    out property <length> path-column-width: root.content-width * (1.0 - root.modified-boundary);
+    out property <length> modified-column-width: root.content-width * (1.0 - root.packed-boundary);
 
     height: 30px;
     background: Palette.alternate-background;
@@ -240,7 +237,7 @@ component ArchiveTableHeader inherits Rectangle {
                 root.packed-boundary = clamp(
                     root.size-boundary + width / root.content-width,
                     root.size-boundary + root.min-packed-width / root.content-width,
-                    root.modified-boundary - root.min-modified-width / root.content-width
+                    1.0 - root.min-modified-width / root.content-width
                 );
             }
         }
@@ -252,24 +249,6 @@ component ArchiveTableHeader inherits Rectangle {
         height: parent.height;
         label: "Modified";
         column-index: 3;
-        sort(column) => { root.sort(column); }
-        resize(column, width) => {
-            if (column == 3) {
-                root.modified-boundary = clamp(
-                    root.packed-boundary + width / root.content-width,
-                    root.packed-boundary + root.min-modified-width / root.content-width,
-                    1.0 - root.min-path-width / root.content-width
-                );
-            }
-        }
-    }
-
-    HeaderCell {
-        x: 36px + root.modified-column-width + root.packed-column-width + root.size-column-width + root.name-column-width;
-        column-width: root.path-column-width;
-        height: parent.height;
-        label: "Path";
-        column-index: 4;
         resizable: false;
         sort(column) => { root.sort(column); }
     }
@@ -283,7 +262,6 @@ component ArchiveListRow inherits Rectangle {
     in property <length> size-column-width;
     in property <length> packed-column-width;
     in property <length> modified-column-width;
-    in property <length> path-column-width;
     in property <bool> context-menu-enabled: true;
     callback toggle(int);
     callback activate(int);
@@ -292,7 +270,7 @@ component ArchiveListRow inherits Rectangle {
     height: 28px;
     background: root.entry.selected ? Palette.selection-background
         : row-pointer.has-hover || name-cell.has-hover || size-cell.has-hover
-            || packed-cell.has-hover || modified-cell.has-hover || path-cell.has-hover
+            || packed-cell.has-hover || modified-cell.has-hover
                 ? Palette.control-background : transparent;
     border-radius: 6px;
     accessible-role: list-item;
@@ -365,18 +343,6 @@ component ArchiveListRow inherits Rectangle {
         width: root.modified-column-width;
         height: parent.height;
         value: root.entry.modified;
-        selected: root.entry.selected;
-        text-left-padding: 8px;
-        text-right-padding: 8px;
-        clicked => { root.toggle(root.row-index); }
-        double-clicked => { root.activate(root.row-index); }
-    }
-
-    path-cell := ArchiveTextCell {
-        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + root.modified-column-width;
-        width: root.path-column-width;
-        height: parent.height;
-        value: root.entry.path;
         selected: root.entry.selected;
         text-left-padding: 8px;
         text-right-padding: 8px;
@@ -506,7 +472,7 @@ export component AppWindow inherits Window {
     callback prepare-create-requested();
     callback choose-create-files-requested();
     callback choose-create-folder-requested();
-    callback create-requested(int, int, int, string, string);
+    callback create-requested(int, int, int, string, string, bool);
     callback test-requested();
     callback cancel-requested();
     callback conflict-response(int);
@@ -810,7 +776,6 @@ export component AppWindow inherits Window {
                                         size-column-width: archive-header.size-column-width;
                                         packed-column-width: archive-header.packed-column-width;
                                         modified-column-width: archive-header.modified-column-width;
-                                        path-column-width: archive-header.path-column-width;
                                         context-menu-enabled: !root.busy;
                                         toggle(row-index) => { root.toggle-selection(row-index); }
                                         activate(row-index) => { root.activate-row(row-index); }
@@ -924,9 +889,9 @@ export component AppWindow inherits Window {
         thread-selection: root.create-thread-selection;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
-        accepted(format-index, level, thread-index, password, password-confirmation) => {
+        accepted(format-index, level, thread-index, password, password-confirmation, encrypt-headers) => {
             root.create-visible = false;
-            root.create-requested(format-index, level, thread-index, password, password-confirmation);
+            root.create-requested(format-index, level, thread-index, password, password-confirmation, encrypt-headers);
         }
         cancelled => { root.create-visible = false; }
     }

@@ -232,6 +232,9 @@ pub struct CreateOptions {
     pub format: CreateFormat,
     pub compression_level: u8,
     pub password: Option<String>,
+    /// Encrypt 7z headers so filenames and directory names require the
+    /// archive password to be listed.
+    pub encrypt_headers: bool,
     pub threads: ThreadCount,
 }
 
@@ -242,6 +245,7 @@ impl fmt::Debug for CreateOptions {
             .field("format", &self.format)
             .field("compression_level", &self.compression_level)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("encrypt_headers", &self.encrypt_headers)
             .field("threads", &self.threads)
             .finish()
     }
@@ -253,6 +257,7 @@ impl Default for CreateOptions {
             format: CreateFormat::Zip,
             compression_level: 6,
             password: None,
+            encrypt_headers: false,
             threads: ThreadCount::Auto,
         }
     }

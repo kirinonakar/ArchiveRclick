@@ -1061,7 +1061,12 @@ fn wire_callbacks(
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
         ui.on_create_requested(
-            move |format_index, level, thread_index, password, password_confirmation| {
+            move |format_index,
+                  level,
+                  thread_index,
+                  password,
+                  password_confirmation,
+                  encrypt_headers| {
                 let sources = state.pending_create_sources.borrow().clone();
                 if sources.is_empty() {
                     show_ui_error(
@@ -1098,6 +1103,7 @@ fn wire_callbacks(
                     format,
                     compression_level: level.clamp(0, 9) as u8,
                     password: (!password.is_empty()).then(|| password.to_string()),
+                    encrypt_headers,
                     threads: ThreadCount::from_ui_index(thread_index),
                 };
                 let _ = platform::save_thread_preference(options.threads.registry_key());
