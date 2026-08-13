@@ -100,6 +100,7 @@ fn prioritized_creation_formats_round_trip() {
             format,
             compression_level: 6,
             password: None,
+            ..CreateOptions::default()
         };
         let cancel = CancellationToken::new();
         engine
@@ -166,6 +167,7 @@ fn encrypted_zip_requires_and_accepts_password() {
                 format: CreateFormat::Zip,
                 compression_level: 6,
                 password: Some(password.to_owned()),
+                ..CreateOptions::default()
             },
             &quiet_progress,
             &cancel,

@@ -392,7 +392,8 @@ impl Verb {
 
 /// (verb, label) pairs for the current selection, in menu order. Labels are
 /// computed from the real file names so each entry stays per-file, e.g.
-/// "보고서.zip으로 압축하기", "보고서.7z로 압축하기", "보고서\ 에 풀기".
+/// "보고서.zip으로 압축하기", "보고서.7z로 압축하기", "보고서\ 에 풀기". Long
+/// file names are shortened to 30 characters for display.
 fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
     if paths.is_empty() {
         return Vec::new();
@@ -407,7 +408,10 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or(base);
-            vec![(Verb::Extract, format!("{final_name}\\ 에 풀기"))]
+            vec![(
+                Verb::Extract,
+                format!("{}\\ 에 풀기", shorten_menu_name(&final_name)),
+            )]
         } else {
             // 여러 압축파일을 선택하면 각각 자기 이름의 폴더에 푼다.
             vec![(Verb::Extract, "각각의 폴더에 풀기".to_owned())]
@@ -423,10 +427,30 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "archive.7z".to_owned());
         vec![
-            (Verb::Zip, format!("{zip_name}으로 압축하기")),
-            (Verb::SevenZip, format!("{seven_name}로 압축하기")),
+            (
+                Verb::Zip,
+                format!("{}으로 압축하기", shorten_menu_name(&zip_name)),
+            ),
+            (
+                Verb::SevenZip,
+                format!("{}로 압축하기", shorten_menu_name(&seven_name)),
+            ),
         ]
     }
+}
+
+/// Maximum number of characters shown for a file name in the context menu.
+const MAX_MENU_NAME_CHARS: usize = 30;
+
+/// Shortens a file name for the context menu: names longer than
+/// [`MAX_MENU_NAME_CHARS`] characters are cut to 29 characters plus "…".
+fn shorten_menu_name(name: &str) -> String {
+    if name.chars().count() <= MAX_MENU_NAME_CHARS {
+        return name.to_owned();
+    }
+    let mut shortened: String = name.chars().take(MAX_MENU_NAME_CHARS - 1).collect();
+    shortened.push('…');
+    shortened
 }
 
 /// One IExplorerCommand subcommand ("압축하기"/"풀기"). Explorer asks for the
@@ -1190,4 +1214,34 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
         .chain(std::iter::once(0))
         .flat_map(u16::to_le_bytes)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shorten_menu_name;
+
+    #[test]
+    fn short_names_are_kept_whole() {
+        assert_eq!(shorten_menu_name("보고서.zip"), "보고서.zip");
+        assert_eq!(shorten_menu_name("a".repeat(30).as_str()), "a".repeat(30));
+    }
+
+    #[test]
+    fn long_names_are_cut_to_30_characters() {
+        let long = "이것은매우긴파일이름입니다정말정말정말정말정말긴파일이름입니다.zip";
+        let shortened = shorten_menu_name(long);
+        assert_eq!(shortened.chars().count(), 30);
+        assert!(shortened.ends_with('…'));
+        let expected: String = long.chars().take(29).collect::<String>() + "…";
+        assert_eq!(shortened, expected);
+    }
+
+    #[test]
+    fn ascii_long_names_are_cut_too() {
+        let long = "very-long-file-name-that-goes-on-and-on-and-on.zip";
+        let shortened = shorten_menu_name(long);
+        assert_eq!(shortened.chars().count(), 30);
+        let expected: String = long.chars().take(29).collect::<String>() + "…";
+        assert_eq!(shortened, expected);
+    }
 }

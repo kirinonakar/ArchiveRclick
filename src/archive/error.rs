@@ -8,6 +8,9 @@ pub enum ArchiveError {
     #[error("the installed libarchive is missing the required symbol {0}")]
     MissingSymbol(&'static str),
 
+    #[error("7-Zip (7z.dll) error: {0}")]
+    SevenZip(String),
+
     #[error("libarchive error during {operation}: {message}")]
     LibArchive {
         operation: &'static str,

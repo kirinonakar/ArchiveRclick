@@ -18,6 +18,7 @@ mod imp {
 
     const SETTINGS_KEY: &str = r"Software\ArchiveRclick\Settings";
     const FONT_VALUE: &str = "FontFamily";
+    const THREAD_VALUE: &str = "CpuThreads";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -63,6 +64,46 @@ mod imp {
         let data = utf16_bytes(family);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
         let status = unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the settings registry value (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads the stored CPU-thread preference for 7z compression; returns
+    /// "auto" when unset.
+    pub fn load_thread_preference() -> String {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return AUTO.to_owned();
+        };
+        match read_string_value(key.0, THREAD_VALUE) {
+            Some(value) if !value.is_empty() => value,
+            _ => AUTO.to_owned(),
+        }
+    }
+
+    /// Persists the CPU-thread preference ("auto", "4", "8", "16", "all").
+    pub fn save_thread_preference(preference: &str) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        let value = HSTRING::from(preference);
+        let data = utf16_bytes(preference);
+        // SAFETY: key is live and data is valid UTF-16 including its terminator.
+        let status = unsafe {
+            RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data))
+        };
         if status != ERROR_SUCCESS {
             return Err(format!(
                 "Could not write the settings registry value (Windows error {})",
@@ -226,6 +267,14 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_thread_preference() -> String {
+        "auto".to_owned()
+    }
+
+    pub fn save_thread_preference(_preference: &str) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn resolve_font_family(preference: &str) -> String {
         if preference.is_empty() || preference == "auto" {
             "Yu Gothic".to_owned()
@@ -235,4 +284,7 @@ mod imp {
     }
 }
 
-pub use imp::{load_font_preference, resolve_font_family, save_font_preference};
+pub use imp::{
+    load_font_preference, load_thread_preference, resolve_font_family, save_font_preference,
+    save_thread_preference,
+};

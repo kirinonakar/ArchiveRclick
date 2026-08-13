@@ -132,11 +132,88 @@ impl CreateFormat {
     }
 }
 
+/// CPU thread count used by the 7z backend when it compresses LZMA2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadCount {
+    Auto,
+    Four,
+    Eight,
+    Sixteen,
+    All,
+}
+
+impl ThreadCount {
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Four,
+        Self::Eight,
+        Self::Sixteen,
+        Self::All,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "자동",
+            Self::Four => "4",
+            Self::Eight => "8",
+            Self::Sixteen => "16",
+            Self::All => "전체",
+        }
+    }
+
+    pub fn from_ui_index(index: i32) -> Self {
+        Self::ALL
+            .get(index.max(0) as usize)
+            .copied()
+            .unwrap_or(Self::Auto)
+    }
+
+    pub fn ui_index(self) -> i32 {
+        Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0) as i32
+    }
+
+    pub fn registry_key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Four => "4",
+            Self::Eight => "8",
+            Self::Sixteen => "16",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_registry_key(key: &str) -> Self {
+        match key {
+            "4" => Self::Four,
+            "8" => Self::Eight,
+            "16" => Self::Sixteen,
+            "all" => Self::All,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Number of LZMA2 worker threads requested from 7z.dll. `None` lets
+    /// 7-Zip pick its default (all logical processors), which is what both
+    /// "자동" and "전체" resolve to.
+    pub fn sevenzip_threads(self) -> Option<u32> {
+        match self {
+            Self::Auto | Self::All => None,
+            Self::Four => Some(4),
+            Self::Eight => Some(8),
+            Self::Sixteen => Some(16),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CreateOptions {
     pub format: CreateFormat,
     pub compression_level: u8,
     pub password: Option<String>,
+    pub threads: ThreadCount,
 }
 
 impl fmt::Debug for CreateOptions {
@@ -146,6 +223,7 @@ impl fmt::Debug for CreateOptions {
             .field("format", &self.format)
             .field("compression_level", &self.compression_level)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("threads", &self.threads)
             .finish()
     }
 }
@@ -156,6 +234,7 @@ impl Default for CreateOptions {
             format: CreateFormat::Zip,
             compression_level: 6,
             password: None,
+            threads: ThreadCount::Auto,
         }
     }
 }

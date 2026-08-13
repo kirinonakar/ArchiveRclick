@@ -112,13 +112,55 @@ export component ExtractOverlay inherits Rectangle {
     }
 }
 
+component CpuThreadOption inherits Rectangle {
+    in property <string> option-text;
+    in property <bool> is-selected;
+    callback selected();
+
+    height: 26px;
+    background: is-selected ? Palette.accent-background : Palette.background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: is-selected ? Palette.accent-background : Palette.border;
+
+    TouchArea {
+        clicked => { root.selected(); }
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            x: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            border-width: 1.5px;
+            border-color: is-selected ? Palette.accent-background : Palette.border;
+            Rectangle {
+                x: 3px;
+                y: 3px;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: is-selected ? Palette.accent-background : transparent;
+            }
+        }
+        Text {
+            x: 26px;
+            vertical-alignment: center;
+            text: root.option-text;
+            color: Palette.foreground;
+        }
+    }
+}
+
 export component CreateOverlay inherits Rectangle {
     in property <string> source-summary;
     in property <string> destination;
     in property <[string]> available-formats;
     in property <bool> has-sources;
+    in property <int> thread-selection;
 
-    callback accepted(int, int, string);
+    private property <int> thread-index: root.thread-selection;
+
+    callback accepted(int, int, int, string);
     callback cancelled();
     callback choose-files();
     callback choose-folder();
@@ -131,7 +173,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 500px;
-        height: 450px;
+        height: 548px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -218,14 +260,51 @@ export component CreateOverlay inherits Rectangle {
             }
 
             Text {
+                text: "CPU 스레드 (7z 압축)";
+                color: Palette.foreground;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                CpuThreadOption {
+                    option-text: "자동";
+                    is-selected: thread-index == 0;
+                    selected => { thread-index = 0; }
+                }
+                CpuThreadOption {
+                    option-text: "4";
+                    is-selected: thread-index == 1;
+                    selected => { thread-index = 1; }
+                }
+                CpuThreadOption {
+                    option-text: "8";
+                    is-selected: thread-index == 2;
+                    selected => { thread-index = 2; }
+                }
+                CpuThreadOption {
+                    option-text: "16";
+                    is-selected: thread-index == 3;
+                    selected => { thread-index = 3; }
+                }
+                CpuThreadOption {
+                    option-text: "전체";
+                    is-selected: thread-index == 4;
+                    selected => { thread-index = 4; }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Text {
                 text: "Password (supported formats only)";
                 color: Palette.foreground;
             }
 
             password := LineEdit {
                 input-type: InputType.password;
-                enabled: format.current-value == "ZIP";
-                placeholder-text: format.current-value == "ZIP" ? "Optional (AES-256 ZIP)" : "ZIP only";
+                enabled: format.current-value == "ZIP" || format.current-value == "7z";
+                placeholder-text: format.current-value == "ZIP" || format.current-value == "7z" ? "Optional" : "ZIP / 7z only";
             }
 
             Rectangle { vertical-stretch: 1; }
@@ -245,7 +324,7 @@ export component CreateOverlay inherits Rectangle {
                     primary: true;
                     enabled: root.has-sources && root.available-formats.length > 0;
                     clicked => {
-                        root.accepted(format.current-index, level.value, password.text);
+                        root.accepted(format.current-index, level.value, thread-index, password.text);
                     }
                 }
             }

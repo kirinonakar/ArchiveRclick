@@ -230,6 +230,7 @@ export component AppWindow inherits Window {
     in-out property <string> create-destination;
     in-out property <[string]> create-formats;
     in-out property <bool> create-has-sources;
+    in-out property <int> create-thread-selection: 0;
 
     in-out property <bool> password-visible;
     in-out property <string> password-operation;
@@ -251,7 +252,7 @@ export component AppWindow inherits Window {
     callback prepare-create-requested();
     callback choose-create-files-requested();
     callback choose-create-folder-requested();
-    callback create-requested(int, int, string);
+    callback create-requested(int, int, int, string);
     callback test-requested();
     callback cancel-requested();
     callback conflict-response(int);
@@ -525,11 +526,12 @@ export component AppWindow inherits Window {
         destination: root.create-destination;
         available-formats: root.create-formats;
         has-sources: root.create-has-sources;
+        thread-selection: root.create-thread-selection;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
-        accepted(format-index, level, password) => {
+        accepted(format-index, level, thread-index, password) => {
             root.create-visible = false;
-            root.create-requested(format-index, level, password);
+            root.create-requested(format-index, level, thread-index, password);
         }
         cancelled => { root.create-visible = false; }
     }

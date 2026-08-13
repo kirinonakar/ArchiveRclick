@@ -11,8 +11,9 @@ use slint::{ComponentHandle, Model, ModelRc};
 use crate::{
     AppWindow, ProgressWindow,
     archive::{
-        ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
-        ExtractOptions, ExtractSelection, InitialConflictPolicy, libarchive::LibArchiveEngine,
+        ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
+        CreateFormat, CreateOptions, ExtractOptions, ExtractSelection, InitialConflictPolicy,
+        SevenZipEngine, ThreadCount, libarchive::LibArchiveEngine,
     },
     platform,
     tasks::{CancellationToken, ProgressSnapshot},
@@ -21,6 +22,22 @@ use crate::{
 use super::AppState;
 
 type Engine = Arc<dyn ArchiveEngine>;
+
+/// Builds the shared archive engine: 7z archives are handled by the bundled
+/// 7z.dll (multicore LZMA2), every other format by libarchive. When 7z.dll
+/// cannot be loaded, the composite still serves libarchive formats and 7z
+/// operations fail with a clear error.
+fn load_engine() -> Result<Engine, String> {
+    let libarchive = LibArchiveEngine::load().map_err(|error| error.to_string())?;
+    let sevenzip = match SevenZipEngine::load() {
+        Ok(engine) => Some(engine),
+        Err(error) => {
+            eprintln!("7z.dll unavailable; 7z archives will not open: {error}");
+            None
+        }
+    };
+    Ok(Arc::new(CompositeEngine::new(libarchive, sevenzip)))
+}
 
 // Font choices offered in Settings. The "auto" entry resolves at startup to
 // Noto Sans JP when it is installed, otherwise to Yu Gothic.
@@ -96,6 +113,9 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                             .to_owned(),
                     );
                 }
+                SevenZipEngine::load().map_err(|error| {
+                    format!("The bundled 7z.dll could not be loaded: {error}")
+                })?;
                 return Ok(());
             }
             _ => {}
@@ -119,7 +139,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 /// Builds the main application window and wires it up; shared by the
 /// interactive startup path and the Explorer context-menu operations.
 fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
-    let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
+    let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let state = Rc::new(AppState::new());
 
@@ -206,7 +226,7 @@ fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
             None => return Err(missing_path_message(&requested)),
         }
     }
-    let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
+    let engine: Engine = load_engine()?;
     let (ui, state) = open_progress_window()?;
     start_extract_batch_window(&ui, &state, Arc::clone(&engine), archives);
     ui.run()
@@ -233,9 +253,10 @@ fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     // When a file with the same name already exists, pick the next free name
     // (보고서.zip -> 보고서_2.zip -> 보고서_3.zip ...).
     let destination = unique_path(&cli_archive_destination(&sources, format));
-    let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
+    let engine: Engine = load_engine()?;
     let options = CreateOptions {
         format,
+        threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         ..CreateOptions::default()
     };
     let (ui, state) = open_progress_window()?;
@@ -614,6 +635,9 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         ui.on_prepare_create_requested(move || {
             if let Some(ui) = weak.upgrade() {
+                let thread_selection =
+                    ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index();
+                ui.set_create_thread_selection(thread_selection);
                 ui.set_create_visible(true);
             }
         });
@@ -653,7 +677,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
-        ui.on_create_requested(move |format_index, level, password| {
+        ui.on_create_requested(move |format_index, level, thread_index, password| {
             let sources = state.pending_create_sources.borrow().clone();
             if sources.is_empty() {
                 show_ui_error(
@@ -685,7 +709,9 @@ fn wire_callbacks(
                 format,
                 compression_level: level.clamp(0, 9) as u8,
                 password: (!password.is_empty()).then(|| password.to_string()),
+                threads: ThreadCount::from_ui_index(thread_index),
             };
+            let _ = platform::save_thread_preference(options.threads.registry_key());
             if let Some(ui) = weak.upgrade() {
                 start_create(
                     &ui,

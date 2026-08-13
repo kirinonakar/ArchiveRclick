@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf};
 use sha2::{Digest, Sha256};
 
 const RUNTIME_FILES: &[&str] = &[
+    "7z.dll",
     "archive.dll",
     "bz2.dll",
     "liblzma.dll",
