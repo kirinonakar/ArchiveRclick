@@ -37,7 +37,7 @@ mod imp {
     const WINDOW_WIDTH_VALUE: &str = "WindowWidth";
     const WINDOW_HEIGHT_VALUE: &str = "WindowHeight";
     const WINDOW_GEOMETRY_VERSION_VALUE: &str = "WindowGeometryVersion";
-    const WINDOW_GEOMETRY_VERSION: &str = "3";
+    const WINDOW_GEOMETRY_VERSION: &str = "4";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -217,8 +217,9 @@ mod imp {
     /// ignored so a monitor/layout change cannot make the app unusable.
     pub fn load_window_geometry() -> Option<super::WindowGeometry> {
         let key = open_key(HKEY_CURRENT_USER, SETTINGS_KEY)?;
-        // Version 2 stored logical pixels and must not be interpreted as the
-        // physical-pixel values used by the current format.
+        // Earlier formats either stored logical pixels or applied a physical
+        // size before the native window existed. Ignore them so a stale value
+        // cannot be scaled again on the next launch.
         if read_string_value(key.0, WINDOW_GEOMETRY_VERSION_VALUE)?.as_str()
             != WINDOW_GEOMETRY_VERSION
         {

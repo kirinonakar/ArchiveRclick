@@ -316,13 +316,18 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
 
     ui.show()
         .map_err(|error| format!("Could not show the UI: {error}"))?;
-    // Apply the physical size after the native window has been created.  The
-    // winit backend has no real monitor scale factor before `show()` and
-    // temporarily stores pre-show sizes as logical values, which would scale
-    // a physical size twice on a high-DPI monitor.
     if let Some(geometry) = saved_geometry {
-        ui.window()
-            .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+        // `show()` may only queue native-window creation until the event loop
+        // starts. Apply the physical size from an event-loop callback so the
+        // winit backend cannot temporarily reinterpret it as logical pixels.
+        let weak = ui.as_weak();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.window()
+                    .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+            }
+        })
+        .map_err(|error| format!("Could not schedule saved window size: {error}"))?;
     }
     platform::apply_window_theme(ui.window(), ui.get_theme_selection());
     Ok((ui, state, engine, writable_formats))
