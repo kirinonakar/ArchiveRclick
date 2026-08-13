@@ -21,13 +21,16 @@ use std::{
 use windows::{
     core::{implement, w, BOOL, IUnknown, Interface, Ref, GUID, HSTRING, PCWSTR, PSTR, PWSTR},
     Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HMODULE},
         System::{
             Com::{
                 CoTaskMemAlloc, CoTaskMemFree, FORMATETC, IClassFactory, IClassFactory_Impl,
                 IBindCtx, IDataObject, STGMEDIUM,
             },
-            LibraryLoader::{GetModuleFileNameW, GetModuleHandleW},
+            LibraryLoader::{
+                GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            },
             Ole::ReleaseStgMedium,
             Registry::{
                 HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, RegCloseKey,
@@ -44,7 +47,7 @@ use windows::{
                 IShellItemArray, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
                 SIGDN_FILESYSPATH, ShellExecuteW,
             },
-            WindowsAndMessaging::{AppendMenuW, HMENU, MF_STRING, SW_SHOWNORMAL},
+            WindowsAndMessaging::{HMENU, InsertMenuW, MF_BYPOSITION, MF_STRING, SW_SHOWNORMAL},
         },
     },
 };
@@ -72,10 +75,9 @@ const EXE_NAME: &str = "archive-rclick.exe";
 const SETTINGS_KEY: &str = r"Software\ArchiveRclick";
 const EXE_PATH_VALUE: &str = "ExePath";
 
-// Menu item offsets (relative to id_cmd_first).
-const OFF_EXTRACT: usize = 0;
-const OFF_ZIP: usize = 1;
-const OFF_7Z: usize = 2;
+// IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
+// The visible verbs are dynamic, so keep the actual menu order per instance
+// instead of assuming fixed numeric offsets.
 
 // HRESULT constants kept local to avoid feature-flag surprises.
 const S_OK: windows::core::HRESULT = windows::core::HRESULT(0);
@@ -109,7 +111,7 @@ fn decrement_live_objects() {
 #[implement(IShellExtInit, IContextMenu, IExplorerCommand)]
 struct ArchiveContextMenu {
     paths: Mutex<Vec<OsString>>,
-    cmd_first: Mutex<u32>,
+    active_verbs: Mutex<Vec<Verb>>,
 }
 
 impl Drop for ArchiveContextMenu {
@@ -122,7 +124,7 @@ impl ArchiveContextMenu {
     fn new() -> Self {
         Self {
             paths: Mutex::new(Vec::new()),
-            cmd_first: Mutex::new(0),
+            active_verbs: Mutex::new(Vec::new()),
         }
     }
 
@@ -153,16 +155,16 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
     fn QueryContextMenu(
         &self,
         hmenu: HMENU,
-        _index_menu: u32,
+        index_menu: u32,
         id_cmd_first: u32,
         id_cmd_last: u32,
         u_flags: u32,
     ) -> windows::core::HRESULT {
+        if let Ok(mut guard) = self.active_verbs.lock() {
+            guard.clear();
+        }
         if u_flags & CMF_DEFAULTONLY != 0 {
             return S_OK;
-        }
-        if let Ok(mut guard) = self.cmd_first.lock() {
-            *guard = id_cmd_first;
         }
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -172,18 +174,37 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         let verbs = menu_verbs(&paths_buf);
 
         let mut next_id = id_cmd_first;
-        let mut count = 0u32;
-        for (_, label) in &verbs {
+        let mut inserted = Vec::new();
+        for (verb, label) in &verbs {
             if next_id > id_cmd_last {
                 break;
             }
             if let Some(wide_label) = wide(label) {
+                // Explorer tells each context-menu handler where its first item
+                // belongs through index_menu.  Appending to the HMENU ignores
+                // that merge position and forces our commands to the very end.
+                let insert_at = index_menu.saturating_add(inserted.len() as u32);
                 // SAFETY: hmenu is valid for the duration of the menu and the
                 // label buffer stays alive for the call.
-                let _ = unsafe { AppendMenuW(hmenu, MF_STRING, next_id as usize, PCWSTR(wide_label.as_ptr())) };
-                next_id += 1;
-                count += 1;
+                if unsafe {
+                    InsertMenuW(
+                        hmenu,
+                        insert_at,
+                        MF_BYPOSITION | MF_STRING,
+                        next_id as usize,
+                        PCWSTR(wide_label.as_ptr()),
+                    )
+                }
+                .is_ok()
+                {
+                    inserted.push(*verb);
+                    next_id += 1;
+                }
             }
+        }
+        let count = inserted.len() as u32;
+        if let Ok(mut guard) = self.active_verbs.lock() {
+            *guard = inserted;
         }
         windows::core::HRESULT(count as i32)
     }
@@ -192,13 +213,28 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if pici.is_null() {
             return Err(E_POINTER.into());
         }
-        // Numeric verb ids are passed in the low word of lpVerb.
-        let verb = unsafe { (*pici).lpVerb.0 as usize };
-        if verb >> 16 != 0 {
-            return Ok(());
+        // For a numeric verb, Explorer passes the zero-based command offset
+        // directly in the low word of lpVerb; it is NOT the absolute menu id.
+        let raw_verb = unsafe { (*pici).lpVerb.0 as usize };
+        if raw_verb >> 16 != 0 {
+            // A string verb belongs to some other handler: this extension only
+            // advertises numeric command offsets from QueryContextMenu.  Never
+            // return S_OK for an unknown verb, because doing so tells the Shell
+            // that the command was handled and can swallow unrelated commands
+            // (including commands invoked from shell-owned menus such as Win+X).
+            return Err(E_FAIL.into());
         }
-        let first = self.cmd_first.lock().map(|guard| *guard).unwrap_or(0);
-        let offset = verb.wrapping_sub(first as usize);
+        let offset = raw_verb & 0xFFFF;
+        let verb = self
+            .active_verbs
+            .lock()
+            .ok()
+            .and_then(|verbs| verbs.get(offset).copied());
+        let Some(verb) = verb else {
+            // The numeric offset is outside the range we inserted.  Do not
+            // claim success for a command that is not ours.
+            return Err(E_FAIL.into());
+        };
         let paths = self.selected_paths();
         if paths.is_empty() {
             return Ok(());
@@ -206,12 +242,7 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         let Some(exe) = find_exe_path() else {
             return Ok(());
         };
-        match offset {
-            OFF_EXTRACT => run_exe(&exe, &build_args("extract", &paths)),
-            OFF_ZIP => run_exe(&exe, &build_args("zip", &paths)),
-            OFF_7Z => run_exe(&exe, &build_args("7z", &paths)),
-            _ => {}
-        }
+        run_exe(&exe, &build_args(verb.subcommand(), &paths));
         Ok(())
     }
 
@@ -533,6 +564,12 @@ impl IEnumExplorerCommand_Impl for VerbEnumerator_Impl {
 #[implement(IClassFactory)]
 struct ShellExtFactory;
 
+impl Drop for ShellExtFactory {
+    fn drop(&mut self) {
+        decrement_live_objects();
+    }
+}
+
 impl IClassFactory_Impl for ShellExtFactory_Impl {
     fn CreateInstance(
         &self,
@@ -546,19 +583,16 @@ impl IClassFactory_Impl for ShellExtFactory_Impl {
         if ppvobj.is_null() {
             return Err(E_POINTER.into());
         }
+        // Count the COM object from creation until its final Release/Drop.
+        // This keeps DllCanUnloadNow from unloading the DLL underneath it.
+        increment_live_objects();
         let handler: IContextMenu = ArchiveContextMenu::new().into();
         // SAFETY: riid/ppvobj are out-parameters provided by the caller and
         // the object's vtable starts with the standard IUnknown methods.
         unsafe {
             let object = handler.as_raw() as *mut c_void;
             let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-            let result = ((*vtbl).QueryInterface)(object, riid, ppvobj);
-            if result.is_ok() {
-                // The caller now holds a reference: keep the DLL resident
-                // until the object is released.
-                increment_live_objects();
-            }
-            result.ok()
+            ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
         }
     }
 
@@ -591,6 +625,10 @@ pub unsafe extern "system" fn DllGetClassObject(
     if unsafe { *rclsid } != CLSID_SHELL_EXT {
         return CLASS_E_CLASSNOTAVAILABLE;
     }
+    // The class factory itself is a live COM object too.  If it is omitted
+    // from the count, DllCanUnloadNow may return S_OK while Explorer still
+    // holds the factory and later call into an unloaded DLL.
+    increment_live_objects();
     let factory: IClassFactory = ShellExtFactory.into();
     // SAFETY: riid/ppv are out-parameters provided by the caller and the
     // object's vtable starts with the standard IUnknown methods.
@@ -756,15 +794,38 @@ fn find_exe_path() -> Option<OsString> {
 }
 
 fn module_file_name() -> Option<OsString> {
-    let module = unsafe { GetModuleHandleW(None) }.ok()?;
-    let mut buffer = vec![0u16; 1024];
-    // SAFETY: buffer is a valid writable buffer for the module handle.
-    let length = unsafe { GetModuleFileNameW(Some(module), &mut buffer) };
-    if length == 0 {
-        return None;
+    // GetModuleHandleW(None) returns the host executable (explorer.exe or
+    // regsvr32.exe), not this in-process shell-extension DLL. Resolve the
+    // module that contains one of our exported functions instead.
+    let mut module = HMODULE::default();
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(DllGetClassObject as *const () as *const u16),
+            &mut module,
+        )
     }
-    buffer.truncate(length as usize);
-    Some(OsString::from_wide(&buffer))
+    .ok()?;
+
+    // Grow the buffer if a long path does not fit.
+    let mut capacity = 512usize;
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        // SAFETY: buffer is writable and module is the handle returned above.
+        let length = unsafe { GetModuleFileNameW(Some(module), &mut buffer) } as usize;
+        if length == 0 {
+            return None;
+        }
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Some(OsString::from_wide(&buffer));
+        }
+        capacity = capacity.checked_mul(2)?;
+        if capacity > 32768 {
+            return None;
+        }
+    }
 }
 
 fn read_registry_string(hive: HKEY, key_path: &str, value: &str) -> Option<OsString> {
