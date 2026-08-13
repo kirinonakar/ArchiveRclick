@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     rc::Rc,
@@ -342,7 +343,16 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
         })
         .map_err(|error| format!("Could not schedule saved window size: {error}"))?;
     }
-    platform::apply_window_theme(ui.window(), ui.get_theme_selection());
+    // `show()` can queue native-window creation until the event loop starts.
+    // Reapply there so the Win32 title bar receives the selected theme too.
+    let weak_for_theme = ui.as_weak();
+    let theme_selection = ui.get_theme_selection();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak_for_theme.upgrade() {
+            platform::apply_window_theme(ui.window(), theme_selection);
+        }
+    })
+    .map_err(|error| format!("Could not schedule the window theme: {error}"))?;
     Ok((ui, state, engine, writable_formats))
 }
 
@@ -686,6 +696,9 @@ fn wire_callbacks(
     engine: Engine,
     writable_formats: Vec<CreateFormat>,
 ) {
+    // Keep the secondary progress window alive on the UI thread while a main
+    // window create/extract worker is running.
+    let operation_progress_window = Rc::new(RefCell::new(None::<ProgressWindow>));
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
@@ -984,6 +997,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_extract_requested(
             move |destination_mode, conflict_policy, password, selected_only| {
                 let Some(listing) = state.listing.borrow().as_ref().cloned() else {
@@ -1037,6 +1051,7 @@ fn wire_callbacks(
                         listing.archive_path,
                         destination,
                         options,
+                        Rc::clone(&progress_window),
                     );
                 }
             },
@@ -1089,6 +1104,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_create_requested(
             move |format_index,
                   level,
@@ -1144,6 +1160,7 @@ fn wire_callbacks(
                         destination,
                         sources,
                         options,
+                        Rc::clone(&progress_window),
                     );
                 }
             },
@@ -1418,26 +1435,41 @@ fn start_extract(
     archive: PathBuf,
     destination: PathBuf,
     options: ExtractOptions,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
     let mut options = options;
     let (hint_entries, hint_bytes) =
         extraction_progress_hints(state.listing.borrow().as_ref(), &options.selection);
     options.total_entries_hint = hint_entries;
     options.total_bytes_hint = hint_bytes;
-    let cancel = begin_operation(
+    let (cancel, weak_progress) = match begin_progress_window_operation(
         ui,
         &state,
+        &progress_window,
         "Extracting archive",
         &archive.display().to_string(),
-    );
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            ui.set_status_text(error.clone().into());
+            platform::show_error("Extract archive", &error);
+            return;
+        }
+    };
     let resolver = UiConflictResolver {
         weak: ui.as_weak(),
+        progress: weak_progress.clone(),
         pending: Arc::clone(&state.pending_conflict),
         cancel: cancel.clone(),
     };
     let weak = ui.as_weak();
-    let weak_progress = weak.clone();
-    let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
+    let weak_progress_updates = weak_progress.clone();
+    let weak_progress_finished = weak_progress.clone();
+    let cancellation = Arc::clone(&state.cancellation);
+    let pending_conflict = Arc::clone(&state.pending_conflict);
+    let progress = move |snapshot: ProgressSnapshot| {
+        update_progress_window(&weak_progress_updates, snapshot)
+    };
     std::thread::spawn(move || {
         let result = engine.extract(
             &archive,
@@ -1447,9 +1479,22 @@ fn start_extract(
             &resolver,
             &cancel,
         );
+        let cancelled = cancel.is_cancelled() || matches!(&result, Err(ArchiveError::Cancelled));
         let destination_for_ui = destination.clone();
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(progress_ui) = weak_progress_finished.upgrade() {
+                let _ = progress_ui.hide();
+            }
+            *cancellation.lock().expect("cancellation mutex poisoned") = None;
+            pending_conflict
+                .lock()
+                .expect("conflict mutex poisoned")
+                .take();
             finish_operation(&ui);
+            if cancelled {
+                ui.set_status_text("Extraction cancelled".into());
+                return;
+            }
             match result {
                 Ok(summary) => {
                     ui.set_status_text(
@@ -1474,21 +1519,43 @@ fn start_create(
     destination: PathBuf,
     sources: Vec<PathBuf>,
     options: CreateOptions,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
-    let cancel = begin_operation(
+    let (cancel, weak_progress) = match begin_progress_window_operation(
         ui,
         &state,
+        &progress_window,
         "Creating archive",
         &destination.display().to_string(),
-    );
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            ui.set_status_text(error.clone().into());
+            platform::show_error("Create archive", &error);
+            return;
+        }
+    };
     let weak = ui.as_weak();
-    let weak_progress = weak.clone();
-    let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
+    let weak_progress_updates = weak_progress.clone();
+    let weak_progress_finished = weak_progress.clone();
+    let cancellation = Arc::clone(&state.cancellation);
+    let progress = move |snapshot: ProgressSnapshot| {
+        update_progress_window(&weak_progress_updates, snapshot)
+    };
     std::thread::spawn(move || {
         let result = engine.create(&destination, &sources, &options, &progress, &cancel);
+        let cancelled = cancel.is_cancelled() || matches!(&result, Err(ArchiveError::Cancelled));
         let destination_for_ui = destination.clone();
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(progress_ui) = weak_progress_finished.upgrade() {
+                let _ = progress_ui.hide();
+            }
+            *cancellation.lock().expect("cancellation mutex poisoned") = None;
             finish_operation(&ui);
+            if cancelled {
+                ui.set_status_text("Archive creation cancelled".into());
+                return;
+            }
             match result {
                 Ok(summary) => {
                     ui.set_status_text(
@@ -1587,12 +1654,15 @@ const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 310.0;
 /// running operation.
 fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), String> {
     let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
+    let theme_selection = theme_selection_index(&platform::load_theme_preference());
+    ui.set_theme_selection(theme_selection);
     let state = Rc::new(ProgressWindowState {
         cancellation: Arc::new(Mutex::new(None)),
         password_prompt: Arc::new(ProgressPasswordPrompt::new()),
     });
     let state_for_cancel = Rc::clone(&state);
     let password_for_cancel = Arc::clone(&state.password_prompt);
+    let weak_for_cancel = ui.as_weak();
     ui.on_cancel_requested(move || {
         if let Some(token) = state_for_cancel
             .cancellation
@@ -1603,6 +1673,9 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
             token.cancel();
         }
         password_for_cancel.respond(None);
+        if let Some(ui) = weak_for_cancel.upgrade() {
+            ui.set_progress_title("Cancelling…".into());
+        }
     });
     let password_for_response = Arc::clone(&state.password_prompt);
     let weak_for_response = ui.as_weak();
@@ -1630,6 +1703,13 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     );
     ui.show()
         .map_err(|error| format!("Could not show the progress window: {error}"))?;
+    let weak_for_theme = ui.as_weak();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak_for_theme.upgrade() {
+            platform::apply_window_theme(ui.window(), theme_selection);
+        }
+    })
+    .map_err(|error| format!("Could not schedule the progress-window theme: {error}"))?;
     Ok((ui, state))
 }
 
@@ -1989,6 +2069,38 @@ fn begin_operation(
     cancel
 }
 
+/// Starts an operation from the main UI but renders progress in the same
+/// standalone window used by Explorer verbs. The strong handle is retained on
+/// the UI thread; workers receive only weak handles and cancellation tokens.
+fn begin_progress_window_operation(
+    ui: &AppWindow,
+    state: &AppState,
+    progress_window: &Rc<RefCell<Option<ProgressWindow>>>,
+    title: &str,
+    current_file: &str,
+) -> Result<(CancellationToken, slint::Weak<ProgressWindow>), String> {
+    let (progress_ui, progress_state) = open_progress_window()?;
+    let cancel = CancellationToken::new();
+    *state
+        .cancellation
+        .lock()
+        .expect("cancellation mutex poisoned") = Some(cancel.clone());
+    *progress_state
+        .cancellation
+        .lock()
+        .expect("progress cancellation mutex poisoned") = Some(cancel.clone());
+
+    ui.set_busy(true);
+    ui.set_progress_visible(false);
+    ui.set_status_text(title.into());
+    progress_ui.set_progress_title(title.into());
+    progress_ui.set_progress_file(current_file.into());
+    set_initial_progress_window(&progress_ui);
+    let weak = progress_ui.as_weak();
+    *progress_window.borrow_mut() = Some(progress_ui);
+    Ok((cancel, weak))
+}
+
 fn finish_operation(ui: &AppWindow) {
     ui.set_busy(false);
     ui.set_progress_visible(false);
@@ -2020,6 +2132,7 @@ fn update_progress(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
 /// batch operation can show "Extracting archive 2/3" while entries stream in.
 struct UiConflictResolver {
     weak: slint::Weak<AppWindow>,
+    progress: slint::Weak<ProgressWindow>,
     pending: Arc<Mutex<Option<mpsc::SyncSender<ConflictChoice>>>>,
     cancel: CancellationToken,
 }
@@ -2029,18 +2142,28 @@ impl ConflictResolver for UiConflictResolver {
         let (sender, receiver) = mpsc::sync_channel(1);
         *self.pending.lock().expect("conflict mutex poisoned") = Some(sender);
         let display = destination.display().to_string();
+        let progress = self.progress.clone();
         let _ = self.weak.clone().upgrade_in_event_loop(move |ui| {
+            if let Some(progress_ui) = progress.upgrade() {
+                let _ = progress_ui.hide();
+            }
             ui.set_conflict_path(display.into());
             ui.set_conflict_visible(true);
         });
 
-        loop {
+        let choice = loop {
             match receiver.recv_timeout(Duration::from_millis(100)) {
-                Ok(choice) => return choice,
+                Ok(choice) => break choice,
                 Err(mpsc::RecvTimeoutError::Timeout) if !self.cancel.is_cancelled() => {}
-                Err(_) => return ConflictChoice::Cancel,
+                Err(_) => break ConflictChoice::Cancel,
             }
+        };
+        if choice != ConflictChoice::Cancel {
+            let _ = self.progress.clone().upgrade_in_event_loop(|ui| {
+                let _ = ui.show();
+            });
         }
+        choice
     }
 }
 
@@ -2247,6 +2370,15 @@ fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
     } else {
         format!("{:.0}%", value * 100.0)
     };
+    let entry_detail = if let Some(total_entries) = snapshot.total_entries {
+        format!(
+            "Files {} / {}",
+            snapshot.entries_processed.min(total_entries),
+            total_entries
+        )
+    } else {
+        format!("Files {}", snapshot.entries_processed)
+    };
     ProgressUiText {
         file_percent,
         percent,
@@ -2257,8 +2389,7 @@ fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
         ),
         total: format!("Total {}", format_duration(snapshot.estimated_total)),
         detail: format!(
-            "{} entries  •  {} processed",
-            snapshot.entries_processed,
+            "{entry_detail}  •  {} processed",
             compact_bytes(snapshot.bytes_processed)
         ),
         file_value,
@@ -2335,9 +2466,10 @@ mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder,
         create_formats_for_ui, parse_dropped_path, parse_elevated_extract, parse_elevated_output,
-        run_with_startup_argument, unique_path,
+        progress_ui_text, run_with_startup_argument, unique_path,
     };
     use crate::archive::CreateFormat;
+    use crate::tasks::{ProgressPhase, ProgressSnapshot};
     use std::{
         ffi::OsString,
         path::{Path, PathBuf},
@@ -2358,6 +2490,15 @@ mod tests {
             parse_dropped_path("file:///C:/Temp/My%20Archive.zip\r\n"),
             Some(PathBuf::from(r"C:\Temp\My Archive.zip"))
         );
+    }
+
+    #[test]
+    fn progress_detail_shows_processed_and_total_file_counts() {
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
+        snapshot.entries_processed = 3;
+        snapshot.total_entries = Some(4);
+
+        assert!(progress_ui_text(&snapshot).detail.starts_with("Files 3 / 4"));
     }
 
     #[test]

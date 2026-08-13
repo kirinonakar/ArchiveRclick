@@ -6,6 +6,7 @@ import { ProgressStats } from "progress.slint";
 // itself (hide + quit_event_loop) once the operation is finished.
 export component ProgressWindow inherits Window {
     in-out property <string> font-family;
+    in-out property <int> theme-selection: 0;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
     in-out property <string> progress-file-percent;
@@ -31,6 +32,12 @@ export component ProgressWindow inherits Window {
     min-width: 620px;
     min-height: 290px;
     background: Palette.background;
+
+    // Theme selection: 0 = follow the system, 1 = light, 2 = dark.
+    changed theme-selection => {
+        Palette.color-scheme = root.theme-selection == 1 ? ColorScheme.light
+            : root.theme-selection == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
 
     VerticalLayout {
         padding: 18px;

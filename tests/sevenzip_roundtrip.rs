@@ -394,8 +394,8 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
     let work = Work::new();
     let input = work.0.join("compression-progress");
     fs::create_dir_all(&input).unwrap();
-    for file_index in 0..2u8 {
-        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+    for file_index in 0..4u8 {
+        let mut bytes = vec![0u8; 8 * 1024 * 1024];
         let mut state = u32::from(file_index) + 1;
         for byte in &mut bytes {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -423,9 +423,11 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
             )
             .unwrap();
         assert_eq!(summary.bytes_processed, 32 * 1024 * 1024);
+        assert_eq!(summary.entries_processed, 4);
         let snapshots = recorded.lock().unwrap();
         let mut previous_bytes = 0;
         let mut saw_partial = false;
+        let mut saw_last_quarter_advance = false;
         for snapshot in snapshots
             .iter()
             .filter(|snapshot| snapshot.phase == ProgressPhase::Compressing)
@@ -443,6 +445,14 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
             );
             previous_bytes = snapshot.bytes_processed;
             saw_partial |= snapshot.bytes_processed < total;
+            if format == CreateFormat::SevenZip
+                && snapshot.bytes_processed > total * 3 / 4
+                && snapshot.bytes_processed < total
+            {
+                saw_last_quarter_advance = true;
+            }
+            assert_eq!(snapshot.total_entries, Some(4));
+            assert!(snapshot.entries_processed <= 4);
             if let Some(current_total) = snapshot.current_file_total_bytes {
                 assert!(
                     snapshot.current_file_bytes_processed <= current_total,
@@ -468,6 +478,12 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
             saw_partial,
             "compression did not emit an intermediate source-byte snapshot for {format:?}"
         );
+        if format == CreateFormat::SevenZip {
+            assert!(
+                saw_last_quarter_advance,
+                "7z compression jumped directly from 75% to completion"
+            );
+        }
     }
 }
 

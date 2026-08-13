@@ -1803,10 +1803,12 @@ mod platform_impl {
 
     struct UpdateContext {
         total_bytes: u64,
+        handler_total_bytes: Option<u64>,
         password: Option<String>,
         current_item_index: Option<usize>,
         item_bytes_processed: Vec<u64>,
         item_total_bytes: Vec<u64>,
+        item_archive_names: Vec<String>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         error: Option<ArchiveError>,
@@ -1839,10 +1841,13 @@ mod platform_impl {
                     (delta, *processed)
                 };
 
-                // 7-Zip may keep more than one input stream alive while its
-                // worker threads finish an earlier item. Count each stream's
-                // high-water mark independently so a late read is not lost or
-                // charged to whichever file happens to be shown in the UI.
+                // SetCompleted is the primary source because it keeps moving
+                // while 7-Zip is doing CPU-heavy compression after reading an
+                // input buffer. Use stream positions only as a fallback for a
+                // handler that never supplies its own total.
+                if context.handler_total_bytes.is_some() {
+                    return;
+                }
                 context.snapshot.bytes_processed = context
                     .snapshot
                     .bytes_processed
@@ -1912,7 +1917,7 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn update_set_total(this: *mut c_void, _total: u64) -> i32 {
+    unsafe extern "system" fn update_set_total(this: *mut c_void, total: u64) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
         let snapshot = {
             let mut context = callback
@@ -1922,6 +1927,7 @@ mod platform_impl {
             // The input sizes collected before the update are the stable
             // denominator for the UI. Some handlers report a compressed or
             // output-side total through this callback.
+            context.handler_total_bytes = (total > 0).then_some(total);
             context.snapshot.total_bytes = Some(context.total_bytes);
             context.snapshot.clone()
         };
@@ -1931,17 +1937,74 @@ mod platform_impl {
 
     unsafe extern "system" fn update_set_completed(
         this: *mut c_void,
-        _complete: *const u64,
+        complete: *const u64,
     ) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
         if callback.cancel.is_cancelled() {
             return E_ABORT;
         }
-        // The update callback counter is handler-specific: ZIP can report
-        // packed/output-side bytes, while 7z can change its counter between
-        // items. The input stream reports the stable uncompressed source-byte
-        // domain used by the overall progress denominator.
+        if complete.is_null() {
+            return S_OK;
+        }
+        let snapshot = {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let Some(handler_total) = context.handler_total_bytes.filter(|total| *total > 0) else {
+                return S_OK;
+            };
+            let completed = unsafe { *complete }.min(handler_total);
+            let source_completed = ((u128::from(completed) * u128::from(context.total_bytes))
+                / u128::from(handler_total)) as u64;
+            context.snapshot.bytes_processed = context
+                .snapshot
+                .bytes_processed
+                .max(source_completed)
+                .min(context.total_bytes);
+
+            if source_completed > 0
+                && let Some((item_index, item_bytes)) = split_compression_progress(
+                    source_completed,
+                    &context.item_total_bytes,
+                )
+            {
+                context.current_item_index = Some(item_index);
+                context.snapshot.current_file = context
+                    .item_archive_names
+                    .get(item_index)
+                    .cloned()
+                    .unwrap_or_default();
+                let item_total = context.item_total_bytes.get(item_index).copied().unwrap_or(0);
+                context.snapshot.current_file_total_bytes = Some(item_total);
+                context.snapshot.current_file_bytes_processed = item_bytes.min(item_total);
+            }
+            context.snapshot.clone()
+        };
+        callback.progress.report(snapshot);
         S_OK
+    }
+
+    fn split_compression_progress(
+        source_completed: u64,
+        item_total_bytes: &[u64],
+    ) -> Option<(usize, u64)> {
+        let mut item_base = 0u64;
+        let mut last_file = None;
+        for (item_index, &item_total) in item_total_bytes.iter().enumerate() {
+            if item_total == 0 {
+                continue;
+            }
+            last_file = Some((item_index, item_total));
+            let item_end = item_base.saturating_add(item_total);
+            // Keep a completed file visible at the exact boundary; switch to
+            // the next file only once its allocated work has actually begun.
+            if source_completed <= item_end {
+                return Some((item_index, source_completed.saturating_sub(item_base)));
+            }
+            item_base = item_end;
+        }
+        last_file
     }
 
     unsafe extern "system" fn update_get_update_item_info(
@@ -3027,6 +3090,10 @@ mod platform_impl {
                 // large trees.
                 items.retain(|item| item.kind == SourceKind::File);
             }
+            let file_count = items
+                .iter()
+                .filter(|item| item.kind == SourceKind::File)
+                .count() as u64;
             let item_count = u32::try_from(items.len())
                 .map_err(|_| ArchiveError::LimitExceeded("too many entries".to_owned()))?;
 
@@ -3036,7 +3103,7 @@ mod platform_impl {
             let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
             let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
             let mut opening = ProgressSnapshot::new(ProgressPhase::Opening);
-            opening.total_entries = Some(items.len() as u64);
+            opening.total_entries = Some(file_count);
             opening.total_bytes = Some(total_bytes);
             opening.current_file = final_destination.display().to_string();
             throttled.report(opening, true);
@@ -3071,15 +3138,20 @@ mod platform_impl {
                         });
                         let stream_ptr = Box::into_raw(stream).cast::<c_void>();
                         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
-                        snapshot.total_entries = Some(items.len() as u64);
+                        snapshot.total_entries = Some(file_count);
                         snapshot.total_bytes = Some(total_bytes);
                         let items = Arc::new(items);
                         let context = Arc::new(Mutex::new(UpdateContext {
                             total_bytes,
+                            handler_total_bytes: None,
                             password: options.password.clone(),
                             current_item_index: None,
                             item_bytes_processed: vec![0; items.len()],
                             item_total_bytes: items.iter().map(|item| item.size).collect(),
+                            item_archive_names: items
+                                .iter()
+                                .map(|item| item.archive_name.clone())
+                                .collect(),
                             snapshot,
                             summary: OperationSummary::default(),
                             error: None,
@@ -4413,7 +4485,7 @@ mod platform_impl {
         use super::{
             ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, SevenZipEngine,
             archive_format, filetime_to_unix_seconds, split_callback_progress,
-            unix_seconds_to_filetime,
+            split_compression_progress, unix_seconds_to_filetime,
         };
         use crate::archive::ThreadCount;
         use std::io::Write;
@@ -4451,6 +4523,17 @@ mod platform_impl {
             assert_eq!(split_callback_progress(950, 900, Some(100)), (950, 50));
             assert_eq!(split_callback_progress(50, 900, Some(100)), (950, 50));
             assert_eq!(split_callback_progress(1400, 900, Some(100)), (1000, 100));
+        }
+
+        #[test]
+        fn compression_work_is_split_across_file_progress_ranges() {
+            let totals = [25, 25, 0, 25, 25];
+            assert_eq!(split_compression_progress(1, &totals), Some((0, 1)));
+            assert_eq!(split_compression_progress(25, &totals), Some((0, 25)));
+            assert_eq!(split_compression_progress(26, &totals), Some((1, 1)));
+            assert_eq!(split_compression_progress(75, &totals), Some((3, 25)));
+            assert_eq!(split_compression_progress(76, &totals), Some((4, 1)));
+            assert_eq!(split_compression_progress(100, &totals), Some((4, 25)));
         }
 
         #[test]
