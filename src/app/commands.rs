@@ -51,6 +51,24 @@ const FONT_OPTIONS: &[(&str, &str)] = &[
     ("Segoe UI", "Segoe UI"),
 ];
 
+// Theme choices offered in Settings. The selection index maps to a stored
+// registry value: 0 = follow the system, 1 = light, 2 = dark.
+fn theme_selection_index(preference: &str) -> i32 {
+    match preference {
+        "light" => 1,
+        "dark" => 2,
+        _ => 0,
+    }
+}
+
+fn theme_registry_key(index: i32) -> &'static str {
+    match index {
+        1 => "light",
+        2 => "dark",
+        _ => "auto",
+    }
+}
+
 pub fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
     let command = args.next();
@@ -169,6 +187,10 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
             .unwrap_or(0) as i32,
     );
     ui.set_context_menu_state(context_menu_state_text().into());
+    ui.set_settings_thread_selection(
+        ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
+    );
+    ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
     let writable_formats = engine.writable_formats();
     if writable_formats.is_empty() {
         return Err(
@@ -498,6 +520,10 @@ fn wire_callbacks(
         ui.on_settings_requested(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_context_menu_state(context_menu_state_text().into());
+                ui.set_settings_thread_selection(
+                    ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
+                );
+                ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
                 ui.set_settings_visible(true);
             }
         });
@@ -546,20 +572,33 @@ fn wire_callbacks(
 
     {
         let weak = ui.as_weak();
-        ui.on_settings_applied(move |selection| {
+        ui.on_settings_applied(move |font_selection, thread_selection, theme_selection| {
             let preference = FONT_OPTIONS
-                .get(selection.max(0) as usize)
+                .get(font_selection.max(0) as usize)
                 .map(|(_, key)| *key)
                 .unwrap_or("auto");
+            let mut failure: Option<String> = None;
             if let Err(error) = platform::save_font_preference(preference) {
+                failure = Some(format!("Could not save settings: {error}"));
+            } else if let Err(error) = platform::save_thread_preference(
+                ThreadCount::from_ui_index(thread_selection).registry_key(),
+            ) {
+                failure = Some(format!("Could not save settings: {error}"));
+            } else if let Err(error) =
+                platform::save_theme_preference(theme_registry_key(theme_selection))
+            {
+                failure = Some(format!("Could not save settings: {error}"));
+            }
+            if let Some(message) = failure {
                 if let Some(ui) = weak.upgrade() {
-                    ui.set_status_text(format!("Could not save settings: {error}").into());
+                    ui.set_status_text(message.into());
                 }
                 return;
             }
             let family = platform::resolve_font_family(preference);
             if let Some(ui) = weak.upgrade() {
                 ui.set_font_family(family.into());
+                ui.set_theme_selection(theme_selection);
             }
         });
     }

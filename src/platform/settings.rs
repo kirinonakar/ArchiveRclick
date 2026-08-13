@@ -19,6 +19,7 @@ mod imp {
     const SETTINGS_KEY: &str = r"Software\ArchiveRclick\Settings";
     const FONT_VALUE: &str = "FontFamily";
     const THREAD_VALUE: &str = "CpuThreads";
+    const THEME_VALUE: &str = "Theme";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -60,7 +61,7 @@ mod imp {
             ));
         }
         let key = OwnedKey(raw);
-        let value = HSTRING::from(family);
+        let value = HSTRING::from(FONT_VALUE);
         let data = utf16_bytes(family);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
         let status = unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
@@ -98,7 +99,46 @@ mod imp {
             ));
         }
         let key = OwnedKey(raw);
-        let value = HSTRING::from(preference);
+        let value = HSTRING::from(THREAD_VALUE);
+        let data = utf16_bytes(preference);
+        // SAFETY: key is live and data is valid UTF-16 including its terminator.
+        let status = unsafe {
+            RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data))
+        };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the settings registry value (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads the stored theme preference; returns "auto" when unset.
+    pub fn load_theme_preference() -> String {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return AUTO.to_owned();
+        };
+        match read_string_value(key.0, THEME_VALUE) {
+            Some(value) if !value.is_empty() => value,
+            _ => AUTO.to_owned(),
+        }
+    }
+
+    /// Persists the theme preference ("auto", "light", "dark").
+    pub fn save_theme_preference(preference: &str) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        let value = HSTRING::from(THEME_VALUE);
         let data = utf16_bytes(preference);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
         let status = unsafe {
@@ -275,6 +315,14 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_theme_preference() -> String {
+        "auto".to_owned()
+    }
+
+    pub fn save_theme_preference(_preference: &str) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn resolve_font_family(preference: &str) -> String {
         if preference.is_empty() || preference == "auto" {
             "Yu Gothic".to_owned()
@@ -285,6 +333,6 @@ mod imp {
 }
 
 pub use imp::{
-    load_font_preference, load_thread_preference, resolve_font_family, save_font_preference,
-    save_thread_preference,
+    load_font_preference, load_theme_preference, load_thread_preference, resolve_font_family,
+    save_font_preference, save_theme_preference, save_thread_preference,
 };

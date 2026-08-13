@@ -23,24 +23,25 @@ component HeaderCell inherits Rectangle {
     in property <int> column-index;
     callback sort(int);
 
-    background: pointer.has-hover ? Palette.control-background : Palette.alternate-background;
-    border-width: 1px;
-    border-color: Palette.border;
+    background: pointer.has-hover ? Palette.control-background : transparent;
+    border-radius: 6px;
     accessible-role: button;
     accessible-label: "Sort by " + root.label;
 
     Text {
-        x: 8px;
-        width: parent.width - 16px;
+        x: 10px;
+        width: parent.width - 20px;
         height: parent.height;
         text: root.label + "  ↕";
         color: Palette.foreground;
         font-weight: 600;
+        font-size: 12px;
         vertical-alignment: center;
         overflow: elide;
     }
 
     pointer := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
         clicked => { root.sort(root.column-index); }
     }
 }
@@ -51,14 +52,19 @@ component ArchiveTableHeader inherits Rectangle {
     private property <length> content-width: self.width - 36px;
     height: 32px;
     background: Palette.alternate-background;
+    border-radius: 12px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
 
     Rectangle {
         x: 0px;
         width: 36px;
         height: parent.height;
         background: Palette.alternate-background;
-        border-width: 1px;
-        border-color: Palette.border;
+        border-radius: 12px;
+        border-top-right-radius: 0px;
+        border-bottom-left-radius: 0px;
+        border-bottom-right-radius: 0px;
     }
 
     HeaderCell {
@@ -114,10 +120,10 @@ component ArchiveListRow inherits Rectangle {
     callback activate(int);
 
     private property <length> content-width: self.width - 36px;
-    height: 29px;
-    background: root.entry.selected ? Palette.selection-background : row-pointer.has-hover ? Palette.control-background : Palette.background;
-    border-width: 1px;
-    border-color: Palette.border;
+    height: 30px;
+    background: root.entry.selected ? Palette.selection-background
+        : row-pointer.has-hover ? Palette.control-background : transparent;
+    border-radius: 6px;
     accessible-role: list-item;
     accessible-label: root.entry.name;
     accessible-item-selectable: true;
@@ -199,9 +205,42 @@ component ArchiveListRow inherits Rectangle {
     row-pointer := TouchArea {
         x: 36px;
         width: parent.width - 36px;
+        height: parent.height;
         mouse-cursor: root.entry.is-folder ? pointer : default;
         clicked => { root.toggle(root.row-index); }
         double-clicked => { root.activate(root.row-index); }
+    }
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    callback clicked;
+
+    height: 34px;
+    border-radius: 8px;
+    background: !root.enabled ? Palette.control-background
+        : root.primary ? (touch.has-hover ? Palette.accent-background : Palette.selection-background)
+        : touch.has-hover ? Palette.control-background : Palette.alternate-background;
+    border-width: root.primary ? 0px : 1px;
+    border-color: Palette.border;
+    accessible-role: button;
+    accessible-label: root.text;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+
+        Text {
+            text: root.text;
+            color: root.enabled ? (root.primary ? Palette.accent-foreground : Palette.foreground) : Palette.foreground;
+            font-weight: 600;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -239,6 +278,8 @@ export component AppWindow inherits Window {
     in-out property <string> font-family;
     in-out property <[string]> font-options;
     in-out property <int> font-selection;
+    in-out property <int> settings-thread-selection: 0;
+    in-out property <int> theme-selection: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
 
@@ -260,7 +301,7 @@ export component AppWindow inherits Window {
     callback dropped(data-transfer);
 
     callback settings-requested();
-    callback settings-applied(int);
+    callback settings-applied(int, int, int);
     callback settings-cancelled();
     callback context-menu-register-requested();
     callback context-menu-unregister-requested();
@@ -272,13 +313,20 @@ export component AppWindow inherits Window {
     // The active interface font is resolved at startup (auto: Noto Sans JP
     // when installed, otherwise Yu Gothic) and can be changed in Settings.
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
-    preferred-width: 1040px;
-    preferred-height: 680px;
-    min-width: 720px;
-    min-height: 480px;
+    preferred-width: 1080px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 620px;
     background: Palette.background;
-    forward-focus: shortcuts;
+    // Theme selection: 0 = follow the system, 1 = light, 2 = dark.
+    // Slint 1.17 cannot bind Palette.color-scheme directly; apply the scheme
+    // whenever the selection changes (fires at startup when Rust sets it).
+    changed theme-selection => {
+        Palette.color-scheme = root.theme-selection == 1 ? ColorScheme.light
+            : root.theme-selection == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
 
+    forward-focus: shortcuts;
     shortcuts := FocusScope {
         width: parent.width;
         height: parent.height;
@@ -334,50 +382,31 @@ export component AppWindow inherits Window {
                 height: parent.height;
                 spacing: 0px;
 
+                // ---------------- Header ----------------
                 Rectangle {
-                    height: 44px;
+                    height: 52px;
                     background: Palette.alternate-background;
                     border-width: 1px;
                     border-color: Palette.border;
 
                     HorizontalLayout {
-                        padding-left: 7px;
-                        padding-right: 7px;
-                        padding-top: 6px;
-                        padding-bottom: 6px;
-                        spacing: 6px;
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
 
-                        Button {
-                            text: "Open";
-                            enabled: !root.busy;
-                            clicked => { root.open-requested(); }
+                        Image {
+                            width: 26px;
+                            height: 26px;
+                            source: @image-url("../app.png");
+                            vertical-alignment: center;
                         }
 
-                        Button {
-                            text: "Extract";
-                            enabled: root.has-archive && !root.busy;
-                            clicked => {
-                                root.show-extract-requested();
-                                root.extract-visible = true;
-                            }
-                        }
-
-                        Button {
-                            text: "Compress";
-                            enabled: !root.busy;
-                            clicked => { root.prepare-create-requested(); }
-                        }
-
-                        Button {
-                            text: "Test";
-                            enabled: root.has-archive && !root.busy;
-                            clicked => { root.test-requested(); }
-                        }
-
-                        Button {
-                            text: "Settings";
-                            enabled: !root.busy;
-                            clicked => { root.settings-requested(); }
+                        Text {
+                            text: "ArchiveRclick";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
                         }
 
                         Rectangle { horizontal-stretch: 1; }
@@ -385,6 +414,8 @@ export component AppWindow inherits Window {
                         Text {
                             text: root.busy ? "Working…" : root.status-text;
                             color: Palette.foreground;
+                            font-size: 12px;
+                            opacity: 0.8;
                             vertical-alignment: center;
                             horizontal-alignment: right;
                             overflow: elide;
@@ -392,81 +423,189 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // ---------------- Toolbar ----------------
                 Rectangle {
-                    height: 40px;
+                    height: 52px;
                     background: Palette.background;
                     border-width: 1px;
                     border-color: Palette.border;
 
                     HorizontalLayout {
-                        padding-left: 7px;
-                        padding-right: 9px;
-                        padding-top: 5px;
-                        padding-bottom: 5px;
-                        spacing: 7px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 9px;
+                        padding-bottom: 9px;
+                        spacing: 8px;
 
-                        Button {
-                            text: "Up";
-                            enabled: root.can-go-up && !root.busy;
-                            clicked => { root.up-requested(); }
+                        ToolButton {
+                            text: "Open";
+                            width: 88px;
+                            primary: true;
+                            enabled: !root.busy;
+                            clicked => { root.open-requested(); }
                         }
 
-                        Text {
-                            text: root.has-archive ? (root.current-folder == "" ? "/" : root.current-folder) : "No archive open";
-                            color: Palette.foreground;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            horizontal-stretch: 1;
+                        ToolButton {
+                            text: "Extract";
+                            width: 88px;
+                            enabled: root.has-archive && !root.busy;
+                            clicked => {
+                                root.show-extract-requested();
+                                root.extract-visible = true;
+                            }
+                        }
+
+                        ToolButton {
+                            text: "Compress";
+                            width: 100px;
+                            enabled: !root.busy;
+                            clicked => { root.prepare-create-requested(); }
+                        }
+
+                        ToolButton {
+                            text: "Test";
+                            width: 68px;
+                            enabled: root.has-archive && !root.busy;
+                            clicked => { root.test-requested(); }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        ToolButton {
+                            text: "Settings";
+                            width: 96px;
+                            enabled: !root.busy;
+                            clicked => { root.settings-requested(); }
                         }
                     }
                 }
 
-                if root.has-archive : Rectangle {
-                    vertical-stretch: 1;
+                // ---------------- Path bar ----------------
+                Rectangle {
+                    height: 44px;
                     background: Palette.background;
+                    border-width: 1px;
+                    border-color: Palette.border;
 
-                    VerticalLayout {
-                        spacing: 0px;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 12px;
+                        padding-top: 5px;
+                        padding-bottom: 5px;
+                        spacing: 8px;
 
-                        ArchiveTableHeader {
-                            sort(column) => { root.sort-requested(column); }
+                        ToolButton {
+                            text: "Up";
+                            width: 56px;
+                            enabled: root.can-go-up && !root.busy;
+                            clicked => { root.up-requested(); }
                         }
 
-                        ListView {
-                            vertical-stretch: 1;
-                            accessible-role: list;
-                            accessible-label: "Archive contents";
-                            accessible-item-count: root.archive-rows.length;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 8px;
+                            background: Palette.control-background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            clip: true;
 
-                            for row[index] in root.archive-rows : ArchiveListRow {
-                                entry: row;
-                                row-index: index;
-                                toggle(row-index) => { root.toggle-selection(row-index); }
-                                activate(row-index) => { root.activate-row(row-index); }
+                            Text {
+                                x: 12px;
+                                width: parent.width - 24px;
+                                height: parent.height;
+                                text: root.has-archive ? (root.current-folder == "" ? "/" : root.current-folder) : "No archive open";
+                                color: Palette.foreground;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
                             }
                         }
                     }
                 }
 
+                // ---------------- Archive table ----------------
+                if root.has-archive : Rectangle {
+                    vertical-stretch: 1;
+                    background: Palette.background;
+
+                    Rectangle {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height - 24px;
+                        background: Palette.background;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        border-radius: 12px;
+                        clip: true;
+                        drop-shadow-blur: 12px;
+                        drop-shadow-color: #00000033;
+                        drop-shadow-offset-y: 3px;
+
+                        VerticalLayout {
+                            spacing: 0px;
+
+                            ArchiveTableHeader {
+                                sort(column) => { root.sort-requested(column); }
+                            }
+
+                            ListView {
+                                vertical-stretch: 1;
+                                accessible-role: list;
+                                accessible-label: "Archive contents";
+                                accessible-item-count: root.archive-rows.length;
+
+                                for row[index] in root.archive-rows : ArchiveListRow {
+                                    entry: row;
+                                    row-index: index;
+                                    toggle(row-index) => { root.toggle-selection(row-index); }
+                                    activate(row-index) => { root.activate-row(row-index); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------------- Empty state ----------------
                 if !root.has-archive : Rectangle {
                     vertical-stretch: 1;
                     background: Palette.background;
 
                     VerticalLayout {
                         alignment: center;
-                        spacing: 12px;
+                        spacing: 14px;
                         padding: 24px;
+
+                        Rectangle {
+                            width: 88px;
+                            height: 88px;
+                            border-radius: 44px;
+                            background: Palette.alternate-background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            Image {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 44px;
+                                height: 44px;
+                                source: @image-url("../app.png");
+                            }
+                        }
 
                         Text {
                             text: drop-target.has-drag ? "Release to open" : "Open an archive to inspect its contents";
                             color: Palette.foreground;
-                            font-size: 18px;
+                            font-size: 19px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                         }
 
                         Text {
                             text: "Use Open, Ctrl+O, a command-line path, or drag an archive here.";
                             color: Palette.foreground;
+                            font-size: 12px;
+                            opacity: 0.7;
                             horizontal-alignment: center;
                             wrap: word-wrap;
                         }
@@ -480,6 +619,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // ---------------- Status bar ----------------
                 Rectangle {
                     height: 30px;
                     background: Palette.alternate-background;
@@ -487,13 +627,14 @@ export component AppWindow inherits Window {
                     border-color: Palette.border;
 
                     HorizontalLayout {
-                        padding-left: 9px;
-                        padding-right: 9px;
+                        padding-left: 12px;
+                        padding-right: 12px;
                         spacing: 10px;
 
                         Text {
                             text: root.summary-text;
                             color: Palette.foreground;
+                            font-size: 11px;
                             vertical-alignment: center;
                             overflow: elide;
                             horizontal-stretch: 1;
@@ -502,6 +643,8 @@ export component AppWindow inherits Window {
                         Text {
                             text: root.libarchive-version;
                             color: Palette.foreground;
+                            font-size: 11px;
+                            opacity: 0.7;
                             vertical-alignment: center;
                             horizontal-alignment: right;
                             overflow: elide;
@@ -552,12 +695,14 @@ export component AppWindow inherits Window {
     if root.settings-visible : SettingsOverlay {
         font-options: root.font-options;
         font-selection: root.font-selection;
+        thread-selection: root.settings-thread-selection;
+        theme-selection: root.theme-selection;
         context-menu-state: root.context-menu-state;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
-        accepted(selection) => {
+        accepted(font-selection, thread-index, theme-index) => {
             root.settings-visible = false;
-            root.settings-applied(selection);
+            root.settings-applied(font-selection, thread-index, theme-index);
         }
         cancelled => { root.settings-visible = false; }
     }
@@ -575,7 +720,10 @@ export component AppWindow inherits Window {
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
-            border-radius: 6px;
+            border-radius: 12px;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000055;
+            drop-shadow-offset-y: 6px;
 
             VerticalLayout {
                 padding: 18px;

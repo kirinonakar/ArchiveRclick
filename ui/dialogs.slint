@@ -335,9 +335,14 @@ export component CreateOverlay inherits Rectangle {
 export component SettingsOverlay inherits Rectangle {
     in property <[string]> font-options;
     in property <int> font-selection;
+    in property <int> thread-selection;
+    in property <int> theme-selection;
     in property <string> context-menu-state;
 
-    callback accepted(int);
+    private property <int> thread-index: root.thread-selection;
+    private property <int> theme-index: root.theme-selection;
+
+    callback accepted(int, int, int);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
@@ -349,27 +354,31 @@ export component SettingsOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 396px;
+        width: 560px;
+        height: 620px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
-        border-radius: 6px;
+        border-radius: 12px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000066;
+        drop-shadow-offset-y: 8px;
 
         VerticalLayout {
-            padding: 18px;
+            padding: 22px;
             spacing: 10px;
 
             Text {
                 text: "Settings";
-                font-size: 20px;
-                font-weight: 600;
+                font-size: 22px;
+                font-weight: 700;
                 color: Palette.foreground;
             }
 
             Text {
                 text: "Interface font";
                 color: Palette.foreground;
+                font-weight: 600;
             }
 
             font := ComboBox {
@@ -380,7 +389,75 @@ export component SettingsOverlay inherits Rectangle {
             Text {
                 text: "Auto picks Noto Sans JP when installed, otherwise Yu Gothic.";
                 color: Palette.foreground;
+                font-size: 12px;
+                opacity: 0.75;
                 wrap: word-wrap;
+            }
+
+            Text {
+                text: "CPU 스레드 (7z 압축)";
+                color: Palette.foreground;
+                font-weight: 600;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                CpuThreadOption {
+                    option-text: "자동";
+                    is-selected: thread-index == 0;
+                    selected => { thread-index = 0; }
+                }
+                CpuThreadOption {
+                    option-text: "4";
+                    is-selected: thread-index == 1;
+                    selected => { thread-index = 1; }
+                }
+                CpuThreadOption {
+                    option-text: "8";
+                    is-selected: thread-index == 2;
+                    selected => { thread-index = 2; }
+                }
+                CpuThreadOption {
+                    option-text: "16";
+                    is-selected: thread-index == 3;
+                    selected => { thread-index = 3; }
+                }
+                CpuThreadOption {
+                    option-text: "전체";
+                    is-selected: thread-index == 4;
+                    selected => { thread-index = 4; }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Text {
+                text: "테마";
+                color: Palette.foreground;
+                font-weight: 600;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                CpuThreadOption {
+                    option-text: "시스템";
+                    is-selected: theme-index == 0;
+                    selected => { theme-index = 0; }
+                }
+                CpuThreadOption {
+                    option-text: "라이트";
+                    is-selected: theme-index == 1;
+                    selected => { theme-index = 1; }
+                }
+                CpuThreadOption {
+                    option-text: "다크";
+                    is-selected: theme-index == 2;
+                    selected => { theme-index = 2; }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
             }
 
             Text {
@@ -392,6 +469,7 @@ export component SettingsOverlay inherits Rectangle {
             Text {
                 text: root.context-menu-state;
                 color: Palette.foreground;
+                font-size: 12px;
             }
 
             HorizontalLayout {
@@ -425,7 +503,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: "OK";
                     primary: true;
-                    clicked => { root.accepted(font.current-index); }
+                    clicked => { root.accepted(font.current-index, thread-index, theme-index); }
                 }
             }
         }
