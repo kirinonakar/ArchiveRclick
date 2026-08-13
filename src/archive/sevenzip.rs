@@ -1214,6 +1214,125 @@ mod platform_impl {
         }
     }
 
+    /// 7-Zip callbacks are not consistent about whether their byte counter is
+    /// operation-wide or starts at zero for each item. Convert either form to
+    /// one operation-wide value plus the current item's value before exposing
+    /// it to the UI.
+    fn split_callback_progress(
+        reported_bytes: u64,
+        current_file_base_bytes: u64,
+        current_file_total_bytes: Option<u64>,
+    ) -> (u64, u64) {
+        let current_file_bytes = if reported_bytes >= current_file_base_bytes {
+            reported_bytes - current_file_base_bytes
+        } else {
+            reported_bytes
+        };
+        let current_file_bytes = current_file_total_bytes
+            .map_or(current_file_bytes, |total| current_file_bytes.min(total));
+        (
+            current_file_base_bytes.saturating_add(current_file_bytes),
+            current_file_bytes,
+        )
+    }
+
+    struct ParallelWorkerProgress {
+        aggregate: Arc<ParallelProgress>,
+        worker_index: usize,
+    }
+
+    struct ParallelProgress {
+        inner: Arc<ThrottledProgress<'static>>,
+        state: Mutex<ParallelProgressState>,
+    }
+
+    struct ParallelProgressState {
+        sequence: u64,
+        workers: Vec<ParallelWorkerState>,
+    }
+
+    struct ParallelWorkerState {
+        sequence: u64,
+        current_file: String,
+        current_file_bytes_processed: u64,
+        current_file_total_bytes: Option<u64>,
+        entries_processed: u64,
+        bytes_processed: u64,
+        phase: ProgressPhase,
+    }
+
+    impl ParallelProgress {
+        fn new(inner: Arc<ThrottledProgress<'static>>, worker_count: usize) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                state: Mutex::new(ParallelProgressState {
+                    sequence: 0,
+                    workers: (0..worker_count)
+                        .map(|_| ParallelWorkerState {
+                            sequence: 0,
+                            current_file: String::new(),
+                            current_file_bytes_processed: 0,
+                            current_file_total_bytes: None,
+                            entries_processed: 0,
+                            bytes_processed: 0,
+                            phase: ProgressPhase::Extracting,
+                        })
+                        .collect(),
+                }),
+            })
+        }
+
+        fn report(&self, worker_index: usize, snapshot: ProgressSnapshot) {
+            let combined = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state.sequence = state.sequence.saturating_add(1);
+                let sequence = state.sequence;
+                let Some(worker) = state.workers.get_mut(worker_index) else {
+                    return;
+                };
+                worker.sequence = sequence;
+                worker.phase = snapshot.phase;
+                worker.current_file.clone_from(&snapshot.current_file);
+                worker.current_file_bytes_processed = snapshot.current_file_bytes_processed;
+                worker.current_file_total_bytes = snapshot.current_file_total_bytes;
+                worker.entries_processed = worker.entries_processed.max(snapshot.entries_processed);
+                worker.bytes_processed = worker.bytes_processed.max(snapshot.bytes_processed);
+
+                let latest = state
+                    .workers
+                    .iter()
+                    .max_by_key(|worker| worker.sequence)
+                    .expect("parallel progress has at least one worker");
+                let mut combined = snapshot;
+                combined.phase = latest.phase;
+                combined.current_file = latest.current_file.clone();
+                combined.current_file_bytes_processed = latest.current_file_bytes_processed;
+                combined.current_file_total_bytes = latest.current_file_total_bytes;
+                combined.entries_processed = state
+                    .workers
+                    .iter()
+                    .map(|worker| worker.entries_processed)
+                    .sum();
+                combined.bytes_processed = state
+                    .workers
+                    .iter()
+                    .map(|worker| worker.bytes_processed)
+                    .sum();
+                combined
+            };
+            self.inner.report(combined, false);
+        }
+    }
+
+    impl ProgressSink for ParallelWorkerProgress {
+        fn report(&self, snapshot: ProgressSnapshot) {
+            self.aggregate.report(self.worker_index, snapshot);
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum RuntimePolicy {
         Ask,
@@ -1257,7 +1376,7 @@ mod platform_impl {
         items: Arc<Vec<ExtractItem>>,
         selected: Arc<HashSet<u32>>,
         cancel: CancellationToken,
-        progress: Arc<ThrottledProgress<'static>>,
+        progress: Arc<dyn ProgressSink>,
         context: Arc<Mutex<ExtractContext>>,
     }
 
@@ -1299,10 +1418,15 @@ mod platform_impl {
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            context.snapshot.total_bytes = Some(total);
+            // Keep the total supplied by the caller when one is available.
+            // It is based on the selected uncompressed entries, while some
+            // handlers report a different (archive-side) total here.
+            if context.snapshot.total_bytes.is_none() {
+                context.snapshot.total_bytes = Some(total);
+            }
             context.snapshot.clone()
         };
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -1322,20 +1446,19 @@ mod platform_impl {
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let bytes_processed = unsafe { *complete };
-            context.snapshot.bytes_processed = bytes_processed;
-            let current_file_bytes = if bytes_processed >= context.current_file_base_bytes {
-                bytes_processed - context.current_file_base_bytes
-            } else {
-                bytes_processed
-            };
-            context.snapshot.current_file_bytes_processed = context
-                .snapshot
-                .current_file_total_bytes
-                .map_or(current_file_bytes, |total| current_file_bytes.min(total));
+            let (bytes_processed, current_file_bytes) = split_callback_progress(
+                unsafe { *complete },
+                context.current_file_base_bytes,
+                context.snapshot.current_file_total_bytes,
+            );
+            // A per-file callback must never move the overall bar backwards
+            // when the next file starts reporting from zero.
+            context.snapshot.bytes_processed =
+                context.snapshot.bytes_processed.max(bytes_processed);
+            context.snapshot.current_file_bytes_processed = current_file_bytes;
             context.snapshot.clone()
         };
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -1367,6 +1490,9 @@ mod platform_impl {
         // Solid-archive items that are not part of the request are decoded and
         // discarded by 7-Zip with kSkip; no output is wanted.
         if ask_extract_mode == EXTRACT_MODE_SKIP {
+            context.snapshot.current_file.clear();
+            context.snapshot.current_file_total_bytes = None;
+            context.snapshot.current_file_bytes_processed = 0;
             return S_OK;
         }
         let Some(item) = callback.items.get(index as usize).cloned() else {
@@ -1537,9 +1663,27 @@ mod platform_impl {
         }
         let Some(mut pending) = context.pending.pop_front() else {
             // Directories and skipped entries have no output stream.
+            let should_report = !context.snapshot.current_file.is_empty()
+                && context.snapshot.current_file_total_bytes.is_some();
+            if should_report {
+                let current_file_total_bytes =
+                    context.snapshot.current_file_total_bytes.unwrap_or(0);
+                let completed_bytes = context
+                    .current_file_base_bytes
+                    .saturating_add(current_file_total_bytes);
+                context.snapshot.current_file_bytes_processed = current_file_total_bytes;
+                context.snapshot.bytes_processed =
+                    context.snapshot.bytes_processed.max(completed_bytes);
+                context.current_file_base_bytes = context.snapshot.bytes_processed;
+            }
             if context.test_mode {
                 context.summary.entries_processed += 1;
                 context.snapshot.entries_processed = context.summary.entries_processed;
+            }
+            let snapshot = should_report.then(|| context.snapshot.clone());
+            drop(context);
+            if let Some(snapshot) = snapshot {
+                callback.progress.report(snapshot);
             }
             return S_OK;
         };
@@ -1571,10 +1715,16 @@ mod platform_impl {
         context.snapshot.current_file_total_bytes = Some(pending.size);
         context.snapshot.current_file_bytes_processed = pending.size;
         context.snapshot.entries_processed = context.summary.entries_processed;
-        context.snapshot.bytes_processed = context.summary.bytes_processed;
+        let completed_bytes = context.current_file_base_bytes.saturating_add(pending.size);
+        context.snapshot.bytes_processed = context
+            .snapshot
+            .bytes_processed
+            .max(completed_bytes)
+            .max(context.summary.bytes_processed);
+        context.current_file_base_bytes = context.snapshot.bytes_processed;
         let snapshot = context.snapshot.clone();
         drop(context);
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -1653,7 +1803,7 @@ mod platform_impl {
         refs: AtomicU32,
         items: Arc<Vec<SourceItem>>,
         cancel: CancellationToken,
-        progress: Arc<ThrottledProgress<'static>>,
+        progress: Arc<dyn ProgressSink>,
         context: Arc<Mutex<UpdateContext>>,
     }
 
@@ -1688,17 +1838,20 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn update_set_total(this: *mut c_void, total: u64) -> i32 {
+    unsafe extern "system" fn update_set_total(this: *mut c_void, _total: u64) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
         let snapshot = {
             let mut context = callback
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            context.snapshot.total_bytes = Some(total);
+            // The input sizes collected before the update are the stable
+            // denominator for the UI. Some handlers report a compressed or
+            // output-side total through this callback.
+            context.snapshot.total_bytes = Some(context.total_bytes);
             context.snapshot.clone()
         };
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -1715,24 +1868,19 @@ mod platform_impl {
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            // Some handlers report a compressed/output-side position here.
-            // Keep progress in the input-byte domain used by the UI and by
-            // OperationSummary.
-            let bytes_processed = unsafe { (*complete).min(context.total_bytes) };
-            context.snapshot.bytes_processed = bytes_processed;
-            let current_file_bytes = if bytes_processed >= context.current_file_base_bytes {
-                bytes_processed - context.current_file_base_bytes
-            } else {
-                bytes_processed
-            };
-            context.snapshot.current_file_bytes_processed = context
-                .snapshot
-                .current_file_total_bytes
-                .map_or(current_file_bytes, |total| current_file_bytes.min(total));
-            context.summary.bytes_processed = context.summary.bytes_processed.max(bytes_processed);
+            let (bytes_processed, current_file_bytes) = split_callback_progress(
+                unsafe { *complete },
+                context.current_file_base_bytes,
+                context.snapshot.current_file_total_bytes,
+            );
+            // A handler may restart its counter for each input item. Keep the
+            // overall value monotonic and derive the file value separately.
+            context.snapshot.bytes_processed =
+                context.snapshot.bytes_processed.max(bytes_processed);
+            context.snapshot.current_file_bytes_processed = current_file_bytes;
             context.snapshot.clone()
         };
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -1879,12 +2027,26 @@ mod platform_impl {
             return E_ABORT;
         }
         context.summary.entries_processed += 1;
-        context.snapshot.current_file_bytes_processed =
-            context.snapshot.current_file_total_bytes.unwrap_or(0);
+        let current_file_total_bytes = context.snapshot.current_file_total_bytes.unwrap_or(0);
+        context.snapshot.current_file_bytes_processed = current_file_total_bytes;
+        context.summary.bytes_processed = context
+            .summary
+            .bytes_processed
+            .saturating_add(current_file_total_bytes);
+        context.snapshot.bytes_processed = context
+            .snapshot
+            .bytes_processed
+            .max(
+                context
+                    .current_file_base_bytes
+                    .saturating_add(current_file_total_bytes),
+            )
+            .max(context.summary.bytes_processed);
+        context.current_file_base_bytes = context.snapshot.bytes_processed;
         context.snapshot.entries_processed = context.summary.entries_processed;
         let snapshot = context.snapshot.clone();
         drop(context);
-        callback.progress.report(snapshot, false);
+        callback.progress.report(snapshot);
         S_OK
     }
 
@@ -2266,6 +2428,7 @@ mod platform_impl {
             throttled,
             cancel,
             true,
+            true,
         )?;
         Ok((open_archive, entries))
     }
@@ -2283,7 +2446,7 @@ mod platform_impl {
         total_entries: u64,
         total_bytes: Option<u64>,
         cancel: CancellationToken,
-        progress: Arc<ThrottledProgress<'static>>,
+        progress: Arc<dyn ProgressSink>,
         conflicts: &'static dyn ConflictResolver,
         policy: RuntimePolicy,
         assume_targets_missing: bool,
@@ -2417,8 +2580,9 @@ mod platform_impl {
         }
 
         let chunk_size = indices.len().div_ceil(worker_count);
+        let aggregate = ParallelProgress::new(Arc::clone(&progress), worker_count);
         let mut workers = Vec::with_capacity(worker_count);
-        for chunk in indices.chunks(chunk_size) {
+        for (worker_index, chunk) in indices.chunks(chunk_size).enumerate() {
             let api = Arc::clone(&api);
             let archive = archive.to_path_buf();
             let password = password.map(str::to_owned);
@@ -2427,7 +2591,10 @@ mod platform_impl {
             let selected = Arc::new(chunk.iter().copied().collect::<HashSet<_>>());
             let indices = chunk.to_vec();
             let cancel = cancel.clone();
-            let progress = Arc::clone(&progress);
+            let progress: Arc<dyn ProgressSink> = Arc::new(ParallelWorkerProgress {
+                aggregate: Arc::clone(&aggregate),
+                worker_index,
+            });
             workers.push(std::thread::spawn(move || {
                 run_extract_worker(
                     &api,
@@ -2642,6 +2809,7 @@ mod platform_impl {
                 &throttled,
                 cancel,
                 false,
+                false,
             )?;
             apply_zip_name_records(&mut entries, zip_name_records.as_deref(), pathname_codepage)?;
             open_archive.in_archive.close_now();
@@ -2752,12 +2920,8 @@ mod platform_impl {
             snapshot.total_bytes = total_bytes;
             snapshot.current_file.clear();
             snapshot.phase = ProgressPhase::Finished;
-            snapshot.entries_processed = options
-                .total_entries_hint
-                .unwrap_or(summary.entries_processed)
-                .max(summary.entries_processed);
-            snapshot.bytes_processed = options
-                .total_bytes_hint
+            snapshot.entries_processed = total_entries.max(summary.entries_processed);
+            snapshot.bytes_processed = total_bytes
                 .unwrap_or(summary.bytes_processed)
                 .max(summary.bytes_processed);
             throttled.report(snapshot, true);
@@ -2869,7 +3033,7 @@ mod platform_impl {
                             refs: AtomicU32::new(1),
                             items: Arc::clone(&items),
                             cancel: cancel.clone(),
-                            progress: Arc::clone(&throttled),
+                            progress: throttled.clone(),
                             context: Arc::clone(&context),
                         };
                         let hr = out_archive.update_items(
@@ -2969,6 +3133,7 @@ mod platform_impl {
                 &throttled,
                 cancel,
                 false,
+                false,
             )?;
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Testing);
             snapshot.total_entries = Some(entries.len() as u64);
@@ -3015,7 +3180,7 @@ mod platform_impl {
                 items,
                 selected,
                 cancel: cancel.clone(),
-                progress: Arc::clone(&throttled),
+                progress: throttled.clone(),
                 context: Arc::clone(&context),
             };
             let hr = open_archive.in_archive.extract(
@@ -3621,6 +3786,7 @@ mod platform_impl {
         throttled: &ThrottledProgress,
         cancel: &CancellationToken,
         include_encryption: bool,
+        report_progress: bool,
     ) -> ArchiveResult<Vec<ArchiveEntry>> {
         let mut count: u32 = 0;
         require_hr(
@@ -3714,13 +3880,15 @@ mod platform_impl {
                 },
                 encrypted,
             });
-            snapshot.entries_processed = u64::from(index) + 1;
-            snapshot.current_file = entries
-                .last()
-                .expect("entry was pushed")
-                .display_path
-                .clone();
-            throttled.report(snapshot.clone(), false);
+            if report_progress {
+                snapshot.entries_processed = u64::from(index) + 1;
+                snapshot.current_file = entries
+                    .last()
+                    .expect("entry was pushed")
+                    .display_path
+                    .clone();
+                throttled.report(snapshot.clone(), false);
+            }
         }
         Ok(entries)
     }
@@ -4165,7 +4333,8 @@ mod platform_impl {
     mod tests {
         use super::{
             ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, SevenZipEngine,
-            archive_format, filetime_to_unix_seconds, unix_seconds_to_filetime,
+            archive_format, filetime_to_unix_seconds, split_callback_progress,
+            unix_seconds_to_filetime,
         };
         use crate::archive::ThreadCount;
         use std::io::Write;
@@ -4196,6 +4365,13 @@ mod platform_impl {
         #[test]
         fn create_options_default_to_auto_threads() {
             assert_eq!(CreateOptions::default().threads, ThreadCount::Auto);
+        }
+
+        #[test]
+        fn callback_progress_handles_counters_that_restart_per_file() {
+            assert_eq!(split_callback_progress(950, 900, Some(100)), (950, 50));
+            assert_eq!(split_callback_progress(50, 900, Some(100)), (950, 50));
+            assert_eq!(split_callback_progress(1400, 900, Some(100)), (1000, 100));
         }
 
         #[test]

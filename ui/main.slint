@@ -29,6 +29,7 @@ component HeaderCell inherits Rectangle {
 
     private property <length> drag-start-width: root.column-width;
     private property <length> drag-start-x: 0px;
+    private property <bool> resizing: false;
 
     width: root.column-width;
 
@@ -78,19 +79,78 @@ component HeaderCell inherits Rectangle {
         mouse-cursor: root.resizable ? MouseCursor.ew-resize : MouseCursor.default;
 
         pointer-event(event) => {
-            if (event.button != PointerEventButton.left) {
-                return;
-            }
-
             if (event.kind == PointerEventKind.down) {
-                root.drag-start-width = root.column-width;
-                root.drag-start-x = self.x + self.mouse-x;
+                if (event.button == PointerEventButton.left) {
+                    root.resizing = true;
+                    root.drag-start-width = root.column-width;
+                    root.drag-start-x = self.x + self.mouse-x;
+                }
             } else if (event.kind == PointerEventKind.move) {
-                root.resize(
-                    root.column-index,
-                    root.drag-start-width + self.x + self.mouse-x - root.drag-start-x
-                );
+                // Slint reports PointerEventButton.other for move events.  The
+                // resize state set on the left-button down event is therefore
+                // the reliable guard for the drag update.
+                if (root.resizing) {
+                    root.resize(
+                        root.column-index,
+                        root.drag-start-width + self.x + self.mouse-x - root.drag-start-x
+                    );
+                }
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.resizing = false;
             }
+        }
+    }
+}
+
+component ArchiveTextCell inherits Rectangle {
+    in property <string> value;
+    in property <bool> selected;
+    in property <bool> is-folder: false;
+    in property <bool> emphasize: false;
+    in property <bool> right-aligned: false;
+    in property <length> text-left-padding: 4px;
+    in property <length> text-right-padding: 4px;
+    out property <bool> has-hover: touch.has-hover;
+    callback clicked;
+    callback double-clicked;
+
+    folder-icon := Text {
+        x: root.text-left-padding;
+        width: 16px;
+        height: parent.height;
+        text: "\u{E8B7}";
+        font-family: "Segoe MDL2 Assets";
+        font-size: 14px;
+        color: root.selected ? Palette.selection-foreground : Palette.accent-background;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        visible: root.is-folder;
+    }
+
+    cell-text := Text {
+        x: root.is-folder ? root.text-left-padding + 20px : root.text-left-padding;
+        width: max(0px, parent.width - self.x - root.text-right-padding);
+        height: parent.height;
+        text: root.value;
+        color: root.selected ? Palette.selection-foreground : Palette.foreground;
+        font-weight: root.emphasize ? 600 : 400;
+        horizontal-alignment: root.right-aligned ? right : left;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // This TouchArea is intentionally above the Text and is the tooltip's
+    // hover owner.  The row-wide click area is underneath it, so text cells
+    // retain selection/double-click behavior while still receiving hover.
+    touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: root.is-folder ? pointer : default;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+
+        if cell-text.preferred-width > cell-text.width : Tooltip {
+            text: @markdown("\{root.value}");
         }
     }
 }
@@ -231,7 +291,9 @@ component ArchiveListRow inherits Rectangle {
 
     height: 28px;
     background: root.entry.selected ? Palette.selection-background
-        : row-pointer.has-hover ? Palette.control-background : transparent;
+        : row-pointer.has-hover || name-cell.has-hover || size-cell.has-hover
+            || packed-cell.has-hover || modified-cell.has-hover || path-cell.has-hover
+                ? Palette.control-background : transparent;
     border-radius: 6px;
     accessible-role: list-item;
     accessible-label: root.entry.name;
@@ -249,84 +311,75 @@ component ArchiveListRow inherits Rectangle {
         toggled => { root.toggle(root.row-index); }
     }
 
-    name-text := Text {
-        x: 40px;
-        width: root.name-column-width - 4px;
-        height: parent.height;
-        text: root.entry.name;
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        font-weight: root.entry.is-folder ? 600 : 400;
-        vertical-alignment: center;
-        overflow: elide;
-
-        if self.preferred-width > self.width : Tooltip {
-            text: @markdown("\{root.entry.name}");
-        }
-    }
-
-    size-text := Text {
-        x: 36px + root.name-column-width + 6px;
-        width: root.size-column-width - 12px;
-        height: parent.height;
-        text: root.entry.size;
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        horizontal-alignment: right;
-        vertical-alignment: center;
-        overflow: elide;
-
-        if self.preferred-width > self.width : Tooltip {
-            text: @markdown("\{root.entry.size}");
-        }
-    }
-
-    packed-text := Text {
-        x: 36px + root.name-column-width + root.size-column-width + 6px;
-        width: root.packed-column-width - 12px;
-        height: parent.height;
-        text: root.entry.packed;
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        horizontal-alignment: right;
-        vertical-alignment: center;
-        overflow: elide;
-
-        if self.preferred-width > self.width : Tooltip {
-            text: @markdown("\{root.entry.packed}");
-        }
-    }
-
-    modified-text := Text {
-        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + 8px;
-        width: root.modified-column-width - 16px;
-        height: parent.height;
-        text: root.entry.modified;
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        vertical-alignment: center;
-        overflow: elide;
-
-        if self.preferred-width > self.width : Tooltip {
-            text: @markdown("\{root.entry.modified}");
-        }
-    }
-
-    path-text := Text {
-        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + root.modified-column-width + 8px;
-        width: root.path-column-width - 16px;
-        height: parent.height;
-        text: root.entry.path;
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        vertical-alignment: center;
-        overflow: elide;
-
-        if self.preferred-width > self.width : Tooltip {
-            text: @markdown("\{root.entry.path}");
-        }
-    }
-
     row-pointer := TouchArea {
         x: 36px;
         width: parent.width - 36px;
         height: parent.height;
         mouse-cursor: root.entry.is-folder ? pointer : default;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+
+    name-cell := ArchiveTextCell {
+        x: 36px;
+        width: root.name-column-width;
+        height: parent.height;
+        value: root.entry.name;
+        selected: root.entry.selected;
+        is-folder: root.entry.is-folder;
+        emphasize: root.entry.is-folder;
+        text-left-padding: 4px;
+        text-right-padding: 0px;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+
+    size-cell := ArchiveTextCell {
+        x: 36px + root.name-column-width;
+        width: root.size-column-width;
+        height: parent.height;
+        value: root.entry.size;
+        selected: root.entry.selected;
+        right-aligned: true;
+        text-left-padding: 6px;
+        text-right-padding: 6px;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+
+    packed-cell := ArchiveTextCell {
+        x: 36px + root.name-column-width + root.size-column-width;
+        width: root.packed-column-width;
+        height: parent.height;
+        value: root.entry.packed;
+        selected: root.entry.selected;
+        right-aligned: true;
+        text-left-padding: 6px;
+        text-right-padding: 6px;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+
+    modified-cell := ArchiveTextCell {
+        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width;
+        width: root.modified-column-width;
+        height: parent.height;
+        value: root.entry.modified;
+        selected: root.entry.selected;
+        text-left-padding: 8px;
+        text-right-padding: 8px;
+        clicked => { root.toggle(root.row-index); }
+        double-clicked => { root.activate(root.row-index); }
+    }
+
+    path-cell := ArchiveTextCell {
+        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + root.modified-column-width;
+        width: root.path-column-width;
+        height: parent.height;
+        value: root.entry.path;
+        selected: root.entry.selected;
+        text-left-padding: 8px;
+        text-right-padding: 8px;
         clicked => { root.toggle(root.row-index); }
         double-clicked => { root.activate(root.row-index); }
     }

@@ -4,6 +4,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,9 +12,10 @@ use archive_rclick_core::archive::ThreadCount;
 use archive_rclick_core::{
     archive::{
         ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
-        CreateFormat, CreateOptions, ExtractOptions, SevenZipEngine, libarchive::LibArchiveEngine,
+        CreateFormat, CreateOptions, ExtractOptions, ProgressSink, SevenZipEngine,
+        libarchive::LibArchiveEngine,
     },
-    tasks::CancellationToken,
+    tasks::{CancellationToken, ProgressPhase, ProgressSnapshot},
 };
 
 struct Work(PathBuf);
@@ -59,6 +61,14 @@ impl ConflictResolver for CancelAfterResolve {
 }
 
 fn quiet(_: archive_rclick_core::tasks::ProgressSnapshot) {}
+
+struct RecordingProgress(Arc<Mutex<Vec<ProgressSnapshot>>>);
+
+impl ProgressSink for RecordingProgress {
+    fn report(&self, snapshot: ProgressSnapshot) {
+        self.0.lock().unwrap().push(snapshot);
+    }
+}
 
 fn load_engine() -> SevenZipEngine {
     let executable = std::env::current_exe().expect("locate test executable");
@@ -249,16 +259,46 @@ fn bundled_zip_many_files_extracts_with_parallel_workers() {
         .expect("create many-file ZIP archive");
 
     let output = work.0.join("out");
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let progress = RecordingProgress(Arc::clone(&recorded));
     let summary = engine
         .extract(
             &archive,
             &output,
             &ExtractOptions::default(),
-            &quiet,
+            &progress,
             &Overwrite,
             &cancel,
         )
         .expect("extract many-file ZIP archive");
+    let snapshots = recorded.lock().unwrap();
+    let mut previous_bytes = 0;
+    let mut previous_fraction = 0.0;
+    for snapshot in snapshots
+        .iter()
+        .filter(|snapshot| snapshot.phase == ProgressPhase::Extracting)
+    {
+        assert!(
+            snapshot.bytes_processed >= previous_bytes,
+            "overall progress moved backwards: {previous_bytes} -> {}",
+            snapshot.bytes_processed
+        );
+        previous_bytes = snapshot.bytes_processed;
+        let fraction = snapshot.fraction();
+        assert!(
+            fraction + f32::EPSILON >= previous_fraction,
+            "overall percentage moved backwards: {previous_fraction:.3} -> {fraction:.3}"
+        );
+        previous_fraction = fraction;
+        if let Some(total) = snapshot.current_file_total_bytes {
+            assert!(
+                snapshot.current_file_bytes_processed <= total,
+                "current file progress exceeded its total: {} > {total}",
+                snapshot.current_file_bytes_processed
+            );
+        }
+    }
+    assert!(previous_bytes > 0, "parallel extraction emitted no progress");
     assert_eq!(summary.entries_processed, 512);
     assert_eq!(fs::read_dir(output.join("payload")).unwrap().count(), 512);
     assert_eq!(

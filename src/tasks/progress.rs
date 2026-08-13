@@ -78,9 +78,6 @@ impl ProgressSnapshot {
     /// Returns the current file's progress when its size is known. A missing
     /// total means the caller should display an indeterminate bar.
     pub fn current_file_fraction(&self) -> Option<f32> {
-        if self.phase == ProgressPhase::Finished {
-            return Some(1.0);
-        }
         let total = self.current_file_total_bytes?;
         if total == 0 {
             return Some(1.0);
@@ -122,6 +119,13 @@ mod tests {
         assert!((snapshot.fraction() - 0.9).abs() < f32::EPSILON);
         assert!((snapshot.current_file_fraction().unwrap() - 0.25).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn finished_snapshot_without_a_current_file_is_indeterminate() {
+        let snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
+
+        assert_eq!(snapshot.current_file_fraction(), None);
+    }
 }
 
 pub struct ThrottledProgress<'a> {
@@ -161,5 +165,11 @@ impl<'a> ThrottledProgress<'a> {
             *last = Some(now);
             self.inner.report(snapshot);
         }
+    }
+}
+
+impl ProgressSink for ThrottledProgress<'_> {
+    fn report(&self, snapshot: ProgressSnapshot) {
+        self.report(snapshot, false);
     }
 }
