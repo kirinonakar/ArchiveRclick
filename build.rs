@@ -29,6 +29,8 @@ fn main() {
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=app.ico");
     slint_build::compile("ui/main.slint").expect("failed to compile Slint UI");
+    slint_build::compile("ui/progress_window.slint")
+        .expect("failed to compile Slint progress-window UI");
 
     if env::var_os("CARGO_CFG_WINDOWS").is_some() {
         embed_resource::compile("app.rc", embed_resource::NONE)

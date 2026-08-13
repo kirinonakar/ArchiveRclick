@@ -9,7 +9,7 @@ use std::{
 use slint::{ComponentHandle, Model, ModelRc};
 
 use crate::{
-    AppWindow,
+    AppWindow, ProgressWindow,
     archive::{
         ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
         ExtractOptions, ExtractSelection, InitialConflictPolicy, libarchive::LibArchiveEngine,
@@ -189,7 +189,8 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
 
 // ---------------------------------------------------------------------------
 // Explorer context-menu operations. The shell extension launches the app with
-// these verbs and the work runs inside the main window with live progress.
+// these verbs and the work runs in a small progress-only window: no main
+// window appears, and the window closes by itself once the work is finished.
 // ---------------------------------------------------------------------------
 
 fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
@@ -205,8 +206,9 @@ fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
             None => return Err(missing_path_message(&requested)),
         }
     }
-    let (ui, state, engine, _writable_formats) = open_main_window()?;
-    start_extract_batch(&ui, Rc::clone(&state), Arc::clone(&engine), archives);
+    let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
+    let (ui, state) = open_progress_window()?;
+    start_extract_batch_window(&ui, &state, Arc::clone(&engine), archives);
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
@@ -231,19 +233,13 @@ fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
     // When a file with the same name already exists, pick the next free name
     // (보고서.zip -> 보고서_2.zip -> 보고서_3.zip ...).
     let destination = unique_path(&cli_archive_destination(&sources, format));
-    let (ui, state, engine, _writable_formats) = open_main_window()?;
+    let engine: Engine = Arc::new(LibArchiveEngine::load().map_err(|error| error.to_string())?);
     let options = CreateOptions {
         format,
         ..CreateOptions::default()
     };
-    start_create(
-        &ui,
-        Rc::clone(&state),
-        Arc::clone(&engine),
-        destination,
-        sources,
-        options,
-    );
+    let (ui, state) = open_progress_window()?;
+    start_create_window(&ui, &state, Arc::clone(&engine), destination, sources, options);
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
@@ -1043,18 +1039,107 @@ fn start_create(
     });
 }
 
-/// Extracts each archive into its own `<archive-name>` subfolder, one after
-/// another, inside the main window's progress overlay. Used by the Explorer
-/// right-click "extract" entries, including multi-selection.
-fn start_extract_batch(
-    ui: &AppWindow,
-    state: Rc<AppState>,
+// ---------------------------------------------------------------------------
+// Progress-only window used by the Explorer right-click verbs. The shell
+// extension launches the app with "extract"/"zip"/"7z" and this window is the
+// only UI: no main window appears, and the window closes by itself once the
+// operation is finished.
+// ---------------------------------------------------------------------------
+
+struct ProgressWindowState {
+    cancellation: Arc<Mutex<Option<CancellationToken>>>,
+}
+
+/// Builds and shows the small progress window; its Cancel button cancels the
+/// running operation.
+fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), String> {
+    let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
+    let state = Rc::new(ProgressWindowState {
+        cancellation: Arc::new(Mutex::new(None)),
+    });
+    let state_for_cancel = Rc::clone(&state);
+    ui.on_cancel_requested(move || {
+        if let Some(token) = state_for_cancel
+            .cancellation
+            .lock()
+            .expect("cancellation mutex poisoned")
+            .as_ref()
+        {
+            token.cancel();
+        }
+    });
+    let font_family = platform::resolve_font_family(&platform::load_font_preference());
+    ui.set_font_family(font_family.into());
+    ui.set_progress_title("Working…".into());
+    ui.set_progress_file("".into());
+    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_value(-1.0);
+    ui.show()
+        .map_err(|error| format!("Could not show the progress window: {error}"))?;
+    Ok((ui, state))
+}
+
+/// Hides the progress window and ends the event loop so the process exits.
+fn close_progress_window(ui: &ProgressWindow) {
+    let _ = ui.hide();
+    let _ = slint::quit_event_loop();
+}
+
+fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
+    ui.set_progress_file(snapshot.current_file.clone().into());
+    ui.set_progress_detail(
+        format!(
+            "{} entries  •  {} processed",
+            snapshot.entries_processed,
+            compact_bytes(snapshot.bytes_processed)
+        )
+        .into(),
+    );
+    let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
+        snapshot.fraction()
+    } else {
+        -1.0
+    };
+    ui.set_progress_value(fraction);
+}
+
+fn update_progress_window(weak: &slint::Weak<ProgressWindow>, snapshot: ProgressSnapshot) {
+    let weak = weak.clone();
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        ui.set_progress_title(snapshot.phase.label().into());
+        apply_progress_window(&ui, &snapshot);
+    });
+}
+
+/// Like [`update_progress_window`], but keeps the operation title so that a
+/// batch operation can show "Extracting archive 2/3" while entries stream in.
+fn update_progress_window_details(
+    weak: &slint::Weak<ProgressWindow>,
+    snapshot: ProgressSnapshot,
+) {
+    let weak = weak.clone();
+    let _ = weak.upgrade_in_event_loop(move |ui| apply_progress_window(&ui, &snapshot));
+}
+
+/// Extracts each archive into its own `<archive-name>` subfolder inside the
+/// progress-only window; the window closes when the batch finishes.
+fn start_extract_batch_window(
+    ui: &ProgressWindow,
+    state: &Rc<ProgressWindowState>,
     engine: Engine,
     archives: Vec<PathBuf>,
 ) {
     let total = archives.len();
     let first = archives[0].display().to_string();
-    let cancel = begin_operation(ui, &state, "Extracting archives", &first);
+    let cancel = CancellationToken::new();
+    *state
+        .cancellation
+        .lock()
+        .expect("cancellation mutex poisoned") = Some(cancel.clone());
+    ui.set_progress_title("Extracting archives".into());
+    ui.set_progress_file(first.into());
+    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_value(-1.0);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
     std::thread::spawn(move || {
@@ -1079,8 +1164,9 @@ fn start_extract_batch(
                 conflict_policy: InitialConflictPolicy::OverwriteAll,
                 ..ExtractOptions::default()
             };
-            let progress =
-                |snapshot: ProgressSnapshot| update_progress_details(&weak_progress, snapshot);
+            let progress = |snapshot: ProgressSnapshot| {
+                update_progress_window_details(&weak_progress, snapshot)
+            };
             match engine.extract(
                 archive,
                 &destination,
@@ -1095,29 +1181,62 @@ fn start_extract_batch(
             }
         }
         let _ = weak.upgrade_in_event_loop(move |ui| {
-            finish_operation(&ui);
-            if cancel.is_cancelled() {
-                ui.set_status_text("Operation cancelled".into());
-            } else if failures.is_empty() {
-                let noun = if processed == 1 { "archive" } else { "archives" };
-                ui.set_status_text(format!("Extracted {processed} {noun}").into());
-            } else if processed == 0 {
-                let (path, error) = failures.remove(0);
-                let message = format!("{}: {error}", path.display());
-                ui.set_status_text(message.clone().into());
-                platform::show_error("Extract archives", &message);
-            } else {
-                let details = failures
-                    .iter()
-                    .map(|(path, error)| format!("{}: {error}", path.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ui.set_status_text(format!("Extracted {processed} of {total} archives").into());
-                platform::show_error(
-                    "Extract archives",
-                    &format!("Some archives failed:\n{details}"),
-                );
+            if !cancel.is_cancelled() && !failures.is_empty() {
+                if processed == 0 {
+                    let (path, error) = failures.remove(0);
+                    let message = format!("{}: {error}", path.display());
+                    platform::show_error("Extract archives", &message);
+                } else {
+                    let details = failures
+                        .iter()
+                        .map(|(path, error)| format!("{}: {error}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    platform::show_error(
+                        "Extract archives",
+                        &format!("Some archives failed:\n{details}"),
+                    );
+                }
             }
+            close_progress_window(&ui);
+        });
+    });
+}
+
+/// Creates an archive from the Explorer right-click menu inside the
+/// progress-only window; the window closes when the work is done.
+fn start_create_window(
+    ui: &ProgressWindow,
+    state: &Rc<ProgressWindowState>,
+    engine: Engine,
+    destination: PathBuf,
+    sources: Vec<PathBuf>,
+    options: CreateOptions,
+) {
+    let cancel = CancellationToken::new();
+    *state
+        .cancellation
+        .lock()
+        .expect("cancellation mutex poisoned") = Some(cancel.clone());
+    ui.set_progress_title("Creating archive".into());
+    ui.set_progress_file(destination.display().to_string().into());
+    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_value(-1.0);
+    let weak = ui.as_weak();
+    let weak_progress = weak.clone();
+    let progress =
+        move |snapshot: ProgressSnapshot| update_progress_window(&weak_progress, snapshot);
+    std::thread::spawn(move || {
+        let result = engine.create(&destination, &sources, &options, &progress, &cancel);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            match result {
+                Ok(_) => {}
+                Err(error) if !cancel.is_cancelled() => {
+                    platform::show_error("Create archive", &error.to_string());
+                }
+                Err(_) => {}
+            }
+            close_progress_window(&ui);
         });
     });
 }
@@ -1253,11 +1372,6 @@ fn update_progress(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
 
 /// Like [`update_progress`], but keeps the current operation title so that a
 /// batch operation can show "Extracting archive 2/3" while entries stream in.
-fn update_progress_details(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
-    let weak = weak.clone();
-    let _ = weak.upgrade_in_event_loop(move |ui| apply_progress_to(&ui, &snapshot));
-}
-
 struct UiConflictResolver {
     weak: slint::Weak<AppWindow>,
     pending: Arc<Mutex<Option<mpsc::SyncSender<ConflictChoice>>>>,

@@ -1,0 +1,66 @@
+import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
+
+// Small progress-only window shown while Explorer right-click operations run.
+// Unlike the main window it has no archive browser UI; the app closes it by
+// itself (hide + quit_event_loop) once the operation is finished.
+export component ProgressWindow inherits Window {
+    in-out property <string> font-family;
+    in-out property <string> progress-title;
+    in-out property <string> progress-file;
+    in-out property <string> progress-detail;
+    in-out property <float> progress-value;
+
+    callback cancel-requested();
+
+    title: "ArchiveRclick";
+    icon: @image-url("../app.png");
+    default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
+    preferred-width: 520px;
+    preferred-height: 210px;
+    min-width: 420px;
+    min-height: 180px;
+    background: Palette.background;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+
+        Text {
+            text: root.progress-title;
+            font-size: 19px;
+            font-weight: 600;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.progress-file;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+
+        ProgressIndicator {
+            progress: root.progress-value;
+            indeterminate: root.progress-value < 0;
+            accessible-label: "Operation progress";
+            accessible-value: root.progress-value < 0 ? "Working" : "" + Math.round(root.progress-value * 100) + "%";
+        }
+
+        Text {
+            text: root.progress-detail;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        HorizontalLayout {
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel-requested(); }
+            }
+        }
+    }
+}

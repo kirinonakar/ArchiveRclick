@@ -22,6 +22,7 @@ use windows::{
     core::{implement, w, BOOL, IUnknown, Interface, Ref, GUID, HSTRING, PCWSTR, PSTR, PWSTR},
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HMODULE},
+        Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ},
         System::{
             Com::{
                 CoTaskMemAlloc, CoTaskMemFree, FORMATETC, IClassFactory, IClassFactory_Impl,
@@ -47,7 +48,11 @@ use windows::{
                 IShellItemArray, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
                 SIGDN_FILESYSPATH, ShellExecuteW,
             },
-            WindowsAndMessaging::{HMENU, InsertMenuW, MF_BYPOSITION, MF_STRING, SW_SHOWNORMAL},
+            WindowsAndMessaging::{
+                DestroyIcon, GetIconInfo, HICON, HMENU, ICONINFO, IMAGE_ICON, InsertMenuW,
+                LR_LOADFROMFILE, LoadImageW, MF_BYPOSITION, MF_STRING, SW_SHOWNORMAL,
+                SetMenuItemBitmaps,
+            },
         },
     },
 };
@@ -112,10 +117,25 @@ fn decrement_live_objects() {
 struct ArchiveContextMenu {
     paths: Mutex<Vec<OsString>>,
     active_verbs: Mutex<Vec<Verb>>,
+    // Classic-menu bitmap shown in front of the verbs; released in Drop.
+    menu_bitmap: Mutex<Option<HBITMAP>>,
 }
 
 impl Drop for ArchiveContextMenu {
     fn drop(&mut self) {
+        // The classic menu keeps using the bitmap until it is destroyed, and
+        // Explorer destroys the menu before releasing this handler, so Drop
+        // is the right moment to release the bitmap.
+        if let Some(bitmap) = self
+            .menu_bitmap
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+        {
+            // SAFETY: the bitmap was created by us and the menu referencing it
+            // is gone by the time the handler is released.
+            let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
+        }
         decrement_live_objects();
     }
 }
@@ -125,6 +145,7 @@ impl ArchiveContextMenu {
         Self {
             paths: Mutex::new(Vec::new()),
             active_verbs: Mutex::new(Vec::new()),
+            menu_bitmap: Mutex::new(None),
         }
     }
 
@@ -206,6 +227,34 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if let Ok(mut guard) = self.active_verbs.lock() {
             *guard = inserted;
         }
+        // Show the app icon in front of the classic-menu verbs. The bitmap is
+        // kept in the handler (released in Drop, after Explorer destroys the
+        // menu) so the menu never references freed memory.
+        if let Some(exe) = find_exe_path() {
+            if let Some(bitmap) = load_menu_icon_bitmap(&exe) {
+                for offset in 0..count {
+                    let item = index_menu.saturating_add(offset);
+                    // SAFETY: hmenu is valid, `item` is a position we just
+                    // inserted at, and the bitmap outlives the menu.
+                    unsafe {
+                        let _ = SetMenuItemBitmaps(
+                            hmenu,
+                            item,
+                            MF_BYPOSITION,
+                            Some(bitmap),
+                            Some(bitmap),
+                        );
+                    }
+                }
+                if let Ok(mut guard) = self.menu_bitmap.lock() {
+                    if let Some(previous) = guard.replace(bitmap) {
+                        // SAFETY: a previous bitmap belongs to a menu that has
+                        // already been dismissed and can be released now.
+                        let _ = unsafe { DeleteObject(HGDIOBJ(previous.0)) };
+                    }
+                }
+            }
+        }
         windows::core::HRESULT(count as i32)
     }
 
@@ -271,7 +320,12 @@ impl IExplorerCommand_Impl for ArchiveContextMenu_Impl {
     }
 
     fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        Err(E_NOTIMPL.into())
+        let Some(exe) = find_exe_path() else {
+            return Err(E_NOTIMPL.into());
+        };
+        // Explorer resolves "path,index" against the executable's icon
+        // resources, so the Windows 11 default menu shows the app icon.
+        wide_alloc(&format!("{},0", exe.to_string_lossy())).ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
@@ -427,7 +481,12 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     }
 
     fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        Err(E_NOTIMPL.into())
+        let Some(exe) = find_exe_path() else {
+            return Err(E_NOTIMPL.into());
+        };
+        // Explorer resolves "path,index" against the executable's icon
+        // resources, so the Windows 11 default menu shows the app icon.
+        wide_alloc(&format!("{},0", exe.to_string_lossy())).ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
@@ -791,6 +850,43 @@ fn find_exe_path() -> Option<OsString> {
     let directory = Path::new(&module).parent()?;
     let candidate = directory.join(EXE_NAME);
     candidate.is_file().then(|| candidate.into_os_string())
+}
+
+/// Loads the small app icon from the executable as a 32bpp bitmap for
+/// `SetMenuItemBitmaps`, so the classic Explorer menu shows an icon next to
+/// each ArchiveRclick verb. The caller owns the returned bitmap.
+fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
+    let exe_wide = wide(&exe.to_string_lossy())?;
+    // SAFETY: exe_wide is NUL-terminated and the returned handle is checked.
+    let loaded = unsafe {
+        LoadImageW(
+            None,
+            PCWSTR(exe_wide.as_ptr()),
+            IMAGE_ICON,
+            16,
+            16,
+            LR_LOADFROMFILE,
+        )
+    }
+    .ok()?;
+    if loaded.0.is_null() {
+        return None;
+    }
+    let icon = HICON(loaded.0);
+    let mut info = ICONINFO::default();
+    // SAFETY: info is an out-parameter and icon is a live HICON.
+    if unsafe { GetIconInfo(icon, &mut info) }.is_ok() {
+        let color = info.hbmColor;
+        // SAFETY: the mask was created by GetIconInfo and is no longer needed.
+        let _ = unsafe { DeleteObject(HGDIOBJ(info.hbmMask.0)) };
+        // SAFETY: the icon handle is no longer needed after GetIconInfo.
+        let _ = unsafe { DestroyIcon(icon) };
+        Some(color)
+    } else {
+        // SAFETY: the icon was loaded successfully above and must be released.
+        let _ = unsafe { DestroyIcon(icon) };
+        None
+    }
 }
 
 fn module_file_name() -> Option<OsString> {

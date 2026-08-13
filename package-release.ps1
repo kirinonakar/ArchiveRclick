@@ -4,7 +4,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repository = Split-Path -Parent $PSScriptRoot
+# The script works both from the repository root and from scripts/. Pick the
+# directory that actually contains the Cargo.toml.
+$repository = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "Cargo.toml")) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $PSScriptRoot
+}
 $runtimeDirectory = Join-Path $repository "runtime\x64"
 $manifestPath = Join-Path $repository "runtime\SHA256SUMS"
 $output = [System.IO.Path]::GetFullPath((Join-Path $repository $OutputDirectory))
