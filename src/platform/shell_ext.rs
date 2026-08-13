@@ -42,16 +42,15 @@ use windows::{
         UI::{
             Shell::{
                 CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, ECF_HASSUBCOMMANDS,
-                ECS_ENABLED, ECS_HIDDEN, HDROP, IContextMenu, IContextMenu_Impl,
+                ECS_ENABLED, ECS_HIDDEN, ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl,
                 IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
                 IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl, IShellItem,
                 IShellItemArray, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
                 SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                DestroyIcon, GetIconInfo, HICON, HMENU, ICONINFO, IMAGE_ICON, InsertMenuW,
-                LR_LOADFROMFILE, LoadImageW, MF_BYPOSITION, MF_STRING, SW_SHOWNORMAL,
-                SetMenuItemBitmaps,
+                DestroyIcon, GetIconInfo, HICON, HMENU, ICONINFO, InsertMenuW, MF_BYPOSITION,
+                MF_STRING, SW_SHOWNORMAL, SetMenuItemBitmaps,
             },
         },
     },
@@ -857,34 +856,35 @@ fn find_exe_path() -> Option<OsString> {
 /// each ArchiveRclick verb. The caller owns the returned bitmap.
 fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
     let exe_wide = wide(&exe.to_string_lossy())?;
-    // SAFETY: exe_wide is NUL-terminated and the returned handle is checked.
-    let loaded = unsafe {
-        LoadImageW(
-            None,
+    // LoadImageW with LR_LOADFROMFILE cannot extract icons from .exe files
+    // (it only reads .ico/.cur/.ani files), so use ExtractIconExW, the API
+    // the shell itself uses to resolve file icons.
+    let mut small = HICON(ptr::null_mut());
+    // SAFETY: exe_wide is NUL-terminated and phiconsmall is an out-parameter.
+    let count = unsafe {
+        ExtractIconExW(
             PCWSTR(exe_wide.as_ptr()),
-            IMAGE_ICON,
-            16,
-            16,
-            LR_LOADFROMFILE,
+            0,
+            None,
+            Some(&mut small),
+            1,
         )
-    }
-    .ok()?;
-    if loaded.0.is_null() {
+    };
+    if count == 0 || small.0.is_null() {
         return None;
     }
-    let icon = HICON(loaded.0);
     let mut info = ICONINFO::default();
-    // SAFETY: info is an out-parameter and icon is a live HICON.
-    if unsafe { GetIconInfo(icon, &mut info) }.is_ok() {
+    // SAFETY: info is an out-parameter and small is a live HICON.
+    if unsafe { GetIconInfo(small, &mut info) }.is_ok() {
         let color = info.hbmColor;
         // SAFETY: the mask was created by GetIconInfo and is no longer needed.
         let _ = unsafe { DeleteObject(HGDIOBJ(info.hbmMask.0)) };
         // SAFETY: the icon handle is no longer needed after GetIconInfo.
-        let _ = unsafe { DestroyIcon(icon) };
+        let _ = unsafe { DestroyIcon(small) };
         Some(color)
     } else {
-        // SAFETY: the icon was loaded successfully above and must be released.
-        let _ = unsafe { DestroyIcon(icon) };
+        // SAFETY: the icon was extracted successfully above and must be released.
+        let _ = unsafe { DestroyIcon(small) };
         None
     }
 }
