@@ -1806,6 +1806,7 @@ mod platform_impl {
         password: Option<String>,
         current_item_index: Option<usize>,
         item_bytes_processed: Vec<u64>,
+        item_total_bytes: Vec<u64>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         error: Option<ArchiveError>,
@@ -1847,7 +1848,18 @@ mod platform_impl {
                     .bytes_processed
                     .saturating_add(delta)
                     .min(context.total_bytes);
-                if context.current_item_index == Some(self.item_index) {
+                let current_item_complete = context.current_item_index.is_some_and(|index| {
+                    context.item_bytes_processed.get(index).copied().unwrap_or(0)
+                        >= context.item_total_bytes.get(index).copied().unwrap_or(0)
+                });
+                let should_display = context.current_item_index.is_none()
+                    || context.current_item_index == Some(self.item_index)
+                    || context
+                        .current_item_index
+                        .is_some_and(|index| self.item_index < index)
+                    || current_item_complete;
+                if should_display {
+                    context.current_item_index = Some(self.item_index);
                     context.snapshot.current_file.clone_from(&self.archive_name);
                     context.snapshot.current_file_total_bytes = Some(self.total_bytes);
                     context.snapshot.current_file_bytes_processed = processed;
@@ -2000,21 +2012,7 @@ mod platform_impl {
             return E_INVALIDARG;
         };
         let item_index = index as usize;
-        let total_bytes = {
-            let mut context = callback
-                .context
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            context.snapshot.current_file.clone_from(&item.archive_name);
-            context.snapshot.current_file_total_bytes = Some(item.size);
-            context.snapshot.current_file_bytes_processed = context
-                .item_bytes_processed
-                .get(item_index)
-                .copied()
-                .unwrap_or(0);
-            context.current_item_index = Some(item_index);
-            item.size
-        };
+        let total_bytes = item.size;
         if item.kind == SourceKind::Directory {
             return S_OK;
         }
@@ -3081,6 +3079,7 @@ mod platform_impl {
                             password: options.password.clone(),
                             current_item_index: None,
                             item_bytes_processed: vec![0; items.len()],
+                            item_total_bytes: items.iter().map(|item| item.size).collect(),
                             snapshot,
                             summary: OperationSummary::default(),
                             error: None,
