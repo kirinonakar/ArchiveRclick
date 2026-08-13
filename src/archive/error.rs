@@ -59,6 +59,31 @@ impl ArchiveError {
             source,
         }
     }
+
+    /// Returns true for failures that are commonly fixed by running the
+    /// operation with a Windows administrator token. Archive libraries often
+    /// surface access-denied as text instead of preserving the I/O error kind.
+    pub fn requires_elevation(&self) -> bool {
+        match self {
+            Self::Io { source, .. } => {
+                source.kind() == std::io::ErrorKind::PermissionDenied
+                    || matches!(source.raw_os_error(), Some(5 | 1314))
+            }
+            Self::LibArchive { message, .. } | Self::SevenZip(message) => {
+                let message = message.to_ascii_lowercase();
+                [
+                    "access is denied",
+                    "access denied",
+                    "permission denied",
+                    "eacces",
+                    "0x80070005",
+                ]
+                .iter()
+                .any(|marker| message.contains(marker))
+            }
+            _ => false,
+        }
+    }
 }
 
 pub type ArchiveResult<T> = Result<T, ArchiveError>;

@@ -15,10 +15,10 @@ export component ProgressWindow inherits Window {
     title: "ArchiveRclick";
     icon: @image-url("../app.png");
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
-    preferred-width: 520px;
-    preferred-height: 210px;
-    min-width: 420px;
-    min-height: 180px;
+    preferred-width: 700px;
+    preferred-height: 230px;
+    min-width: 620px;
+    min-height: 200px;
     background: Palette.background;
 
     VerticalLayout {
@@ -49,7 +49,9 @@ export component ProgressWindow inherits Window {
         Text {
             text: root.progress-detail;
             color: Palette.foreground;
-            overflow: elide;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            min-height: 28px;
         }
 
         Rectangle { vertical-stretch: 1; }

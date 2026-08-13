@@ -1,7 +1,8 @@
 # ArchiveRclick
 
 ArchiveRclick is a Windows-focused archive browser written in Rust. It uses
-Slint for the native desktop UI and libarchive for archive format support.
+Slint for the native desktop UI, libarchive for most archive formats, and the
+7-Zip runtime (`7z.dll`) for 7z archives.
 
 The project is intentionally small: open an archive, inspect it, extract all or
 selected entries, test it, or create a new archive.
@@ -24,7 +25,7 @@ cargo build --release
 ```
 
 The resulting `target\release` directory contains `archive-rclick.exe`, the
-seven required native runtime DLLs, and `THIRD-PARTY-NOTICES.md`. Keep these
+eight required native runtime DLLs, and `THIRD-PARTY-NOTICES.md`. Keep these
 files together when copying or packaging the application. Developers may set
 `ARCHIVERCLICK_LIBARCHIVE` to an absolute path to test another supported
 libarchive 3.x build.

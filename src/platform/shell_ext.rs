@@ -98,6 +98,8 @@ const E_FAIL: windows::core::HRESULT = windows::core::HRESULT(0x8000_4005u32 as 
 const E_OUTOFMEMORY: windows::core::HRESULT = windows::core::HRESULT(0x8007_000Eu32 as i32);
 const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT =
     windows::core::HRESULT(0x8004_0111u32 as i32);
+const GCS_VERBW: u32 = 4;
+const GCS_HELPTEXTW: u32 = 5;
 
 /// Number of COM objects the host still holds, plus IClassFactory locks.
 /// `DllCanUnloadNow` must answer "no" while this is non-zero: saying "yes"
@@ -304,13 +306,35 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
 
     fn GetCommandString(
         &self,
-        _idcmd: usize,
-        _uflags: u32,
+        idcmd: usize,
+        uflags: u32,
         _reserved: *const u32,
-        _commandstring: PSTR,
-        _cch: u32,
+        commandstring: PSTR,
+        cch: u32,
     ) -> WinResult<()> {
-        Err(E_NOTIMPL.into())
+        if uflags != GCS_VERBW && uflags != GCS_HELPTEXTW {
+            return Err(E_NOTIMPL.into());
+        }
+        let verb = self
+            .active_verbs
+            .lock()
+            .ok()
+            .and_then(|verbs| verbs.get(idcmd).copied())
+            .ok_or(E_FAIL)?;
+        let paths: Vec<PathBuf> = self.selected_paths().iter().map(PathBuf::from).collect();
+        let label = menu_verbs(&paths)
+            .into_iter()
+            .find_map(|(candidate, label)| (candidate == verb).then_some(label))
+            .ok_or(E_FAIL)?;
+        let text = if uflags == GCS_VERBW {
+            // GCS_VERBW is the canonical invocation string, not the visible
+            // menu caption. Returning the caption here makes Explorer cache a
+            // broken verb and results in incorrect help/tooltips.
+            verb.subcommand().to_owned()
+        } else {
+            format!("ArchiveRclick: {label}")
+        };
+        write_wide_buffer(&text, commandstring, cch)
     }
 }
 
@@ -336,7 +360,8 @@ impl IExplorerCommand_Impl for ArchiveContextMenu_Impl {
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        Err(E_NOTIMPL.into())
+        wide_alloc("ArchiveRclick: archive or extract the selected items")
+            .ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
     fn GetCanonicalName(&self) -> WinResult<GUID> {
@@ -400,6 +425,14 @@ impl Verb {
             Verb::SevenZip => "7z",
         }
     }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Extract => "Extract the selected archive(s)",
+            Self::Zip => "Create a ZIP archive from the selected items",
+            Self::SevenZip => "Create a 7z archive from the selected items",
+        }
+    }
 }
 
 /// (verb, label) pairs for the current selection, in menu order. Labels are
@@ -455,14 +488,32 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
 const MAX_MENU_NAME_CHARS: usize = 30;
 
 /// Shortens a file name for the context menu: names longer than
-/// [`MAX_MENU_NAME_CHARS`] characters are cut to 29 characters plus "…".
+/// [`MAX_MENU_NAME_CHARS`] characters keep the final archive extension visible.
 fn shorten_menu_name(name: &str) -> String {
     if name.chars().count() <= MAX_MENU_NAME_CHARS {
         return name.to_owned();
     }
-    let mut shortened: String = name.chars().take(MAX_MENU_NAME_CHARS - 1).collect();
-    shortened.push('…');
-    shortened
+    let suffix = archive_suffix(name).unwrap_or_default();
+    let suffix_len = suffix.chars().count();
+    if suffix_len + 1 >= MAX_MENU_NAME_CHARS {
+        let mut shortened: String = name.chars().take(MAX_MENU_NAME_CHARS - 1).collect();
+        shortened.push('…');
+        return shortened;
+    }
+    let prefix_len = MAX_MENU_NAME_CHARS - suffix_len - 1;
+    let prefix: String = name.chars().take(prefix_len).collect();
+    format!("{prefix}…{suffix}")
+}
+
+fn archive_suffix(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    for extension in [".tar.zst", ".tar.xz", ".tar.gz", ".tar.bz2"] {
+        if lower.ends_with(extension) {
+            return name.get(name.len().saturating_sub(extension.len())..);
+        }
+    }
+    let dot = name.rfind('.')?;
+    (dot > 0).then(|| &name[dot..])
 }
 
 /// One IExplorerCommand subcommand ("압축하기"/"풀기"). Explorer asks for the
@@ -525,7 +576,15 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        Err(E_NOTIMPL.into())
+        let paths: Vec<PathBuf> = self
+            .paths
+            .lock()
+            .map(|paths| paths.iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
+        let label = self
+            .label(&paths)
+            .unwrap_or_else(|| self.verb.tooltip().to_owned());
+        wide_alloc(&format!("ArchiveRclick: {label}")).ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
     fn GetCanonicalName(&self) -> WinResult<GUID> {
@@ -1298,6 +1357,22 @@ fn wide_alloc(text: &str) -> Option<PWSTR> {
     Some(PWSTR(raw as *mut u16))
 }
 
+fn write_wide_buffer(text: &str, buffer: PSTR, cch: u32) -> WinResult<()> {
+    if buffer.is_null() || cch == 0 {
+        return Err(E_POINTER.into());
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let capacity = cch as usize;
+    let count = units.len().min(capacity.saturating_sub(1));
+    // SAFETY: the shell supplied a writable buffer of cch characters; count
+    // leaves room for the terminating NUL.
+    unsafe {
+        std::ptr::copy_nonoverlapping(units.as_ptr(), buffer.0.cast::<u16>(), count);
+        *buffer.0.cast::<u16>().add(count) = 0;
+    }
+    Ok(())
+}
+
 fn utf16_bytes(value: &str) -> Vec<u8> {
     value
         .encode_utf16()
@@ -1321,8 +1396,8 @@ mod tests {
         let long = "이것은매우긴파일이름입니다정말정말정말정말정말긴파일이름입니다.zip";
         let shortened = shorten_menu_name(long);
         assert_eq!(shortened.chars().count(), 30);
-        assert!(shortened.ends_with('…'));
-        let expected: String = long.chars().take(29).collect::<String>() + "…";
+        assert!(shortened.ends_with(".zip"));
+        let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
         assert_eq!(shortened, expected);
     }
 
@@ -1331,7 +1406,8 @@ mod tests {
         let long = "very-long-file-name-that-goes-on-and-on-and-on.zip";
         let shortened = shorten_menu_name(long);
         assert_eq!(shortened.chars().count(), 30);
-        let expected: String = long.chars().take(29).collect::<String>() + "…";
+        assert!(shortened.ends_with(".zip"));
+        let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
         assert_eq!(shortened, expected);
     }
 }

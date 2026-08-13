@@ -1,9 +1,9 @@
 # ArchiveRclick third-party notices
 
 ArchiveRclick includes unmodified Windows x64 runtime binaries for libarchive
-3.8.9, zlib 1.3.2, bzip2 1.0.8, XZ Utils/liblzma 5.8.3, LZ4 1.10.0, and
-Zstandard 1.5.7. Their complete license texts are in the adjacent `licenses`
-directory in the source distribution.
+3.8.9, zlib 1.3.2, bzip2 1.0.8, XZ Utils/liblzma 5.8.3, LZ4 1.10.0,
+Zstandard 1.5.7, and 7-Zip 26.02 (7z.dll). Their complete license texts are
+in the adjacent `licenses` directory in the source distribution.
 
 The portable package also includes Microsoft's unmodified
 `vcruntime140.dll` 14.51.36247.0 from the Visual Studio 2026 redistributable
@@ -18,3 +18,4 @@ Source and project information:
 - XZ Utils: <https://tukaani.org/xz/>
 - LZ4: <https://github.com/lz4/lz4>
 - Zstandard: <https://github.com/facebook/zstd>
+- 7-Zip: <https://www.7-zip.org/>

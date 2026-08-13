@@ -65,6 +65,45 @@ fn load_runtime() -> LibArchiveEngine {
 fn quiet_progress(_: archive_rclick_core::tasks::ProgressSnapshot) {}
 
 #[test]
+fn cancelled_zip_creation_removes_temporary_file() {
+    let work = TestDirectory::new("cancelled-zip");
+    let input = work.0.join("payload");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("hello.txt"), b"cancel me\n").unwrap();
+
+    let engine = load_runtime();
+    let archive = work.0.join("cancelled.zip");
+    let cancel = CancellationToken::new();
+    let cancel_from_progress = cancel.clone();
+    let progress = move |_: archive_rclick_core::tasks::ProgressSnapshot| {
+        cancel_from_progress.cancel();
+    };
+    let result = engine.create(
+        &archive,
+        std::slice::from_ref(&input),
+        &CreateOptions {
+            format: CreateFormat::Zip,
+            ..CreateOptions::default()
+        },
+        &progress,
+        &cancel,
+    );
+
+    assert!(matches!(result, Err(ArchiveError::Cancelled)));
+    assert!(!archive.exists());
+    let leftovers = fs::read_dir(&work.0)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.contains("archiverclick"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files remain: {leftovers:?}"
+    );
+}
+
+#[test]
 fn bundled_runtime_is_supported_libarchive_3_8_9() {
     let engine = load_runtime();
     let version = engine.version();

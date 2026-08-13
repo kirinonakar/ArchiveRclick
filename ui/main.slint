@@ -117,8 +117,11 @@ component ArchiveTableHeader inherits Rectangle {
 component ArchiveListRow inherits Rectangle {
     in property <ArchiveRow> entry;
     in property <int> row-index;
+    in property <int> language-index;
+    in property <bool> context-menu-enabled: true;
     callback toggle(int);
     callback activate(int);
+    callback extract-context(int);
 
     private property <length> content-width: self.width - 36px;
     height: 28px;
@@ -201,6 +204,23 @@ component ArchiveListRow inherits Rectangle {
         mouse-cursor: root.entry.is-folder ? pointer : default;
         clicked => { root.toggle(root.row-index); }
         double-clicked => { root.activate(root.row-index); }
+    }
+
+    context-menu := ContextMenuArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.context-menu-enabled;
+
+        Menu {
+            MenuItem {
+                title: root.language-index == 1
+                    ? "선택 항목 압축 풀기…"
+                    : root.language-index == 2
+                        ? "選択項目を展開…"
+                        : "Extract selected item(s)…";
+                activated => { root.extract-context(root.row-index); }
+            }
+        }
     }
 }
 
@@ -293,6 +313,7 @@ export component AppWindow inherits Window {
     callback toggle-selection(int);
     callback select-all-requested(bool);
     callback activate-row(int);
+    callback extract-context-requested(int);
     callback sort-requested(int);
     callback encoding-selection-changed(int);
     callback show-extract-requested();
@@ -314,6 +335,7 @@ export component AppWindow inherits Window {
     callback context-menu-unregister-requested();
 
     in-out property <bool> extract-visible: false;
+    in-out property <bool> extract-selected-only: false;
 
     title: root.archive-title == "" ? "ArchiveRclick" : root.archive-title + " — ArchiveRclick";
     icon: @image-url("../app.png");
@@ -418,6 +440,7 @@ export component AppWindow inherits Window {
                             label: root.language-selection == 1 ? "압축 풀기" : root.language-selection == 2 ? "展開" : "Extract";
                             enabled: root.has-archive && !root.busy;
                             clicked => {
+                                root.extract-selected-only = false;
                                 root.show-extract-requested();
                                 root.extract-visible = true;
                             }
@@ -597,8 +620,11 @@ export component AppWindow inherits Window {
                                     for row[index] in root.archive-rows : ArchiveListRow {
                                         entry: row;
                                         row-index: index;
+                                        language-index: root.language-selection;
+                                        context-menu-enabled: !root.busy;
                                         toggle(row-index) => { root.toggle-selection(row-index); }
                                         activate(row-index) => { root.activate-row(row-index); }
+                                        extract-context(row-index) => { root.extract-context-requested(row-index); }
                                     }
                                 }
                             }
@@ -687,11 +713,16 @@ export component AppWindow inherits Window {
     if root.extract-visible : ExtractOverlay {
         language-index: root.language-selection;
         archive-name: root.archive-title;
+        selected-only-default: root.extract-selected-only;
         accepted(destination-mode, conflict-policy, password, selected-only) => {
             root.extract-visible = false;
+            root.extract-selected-only = false;
             root.extract-requested(destination-mode, conflict-policy, password, selected-only);
         }
-        cancelled => { root.extract-visible = false; }
+        cancelled => {
+            root.extract-visible = false;
+            root.extract-selected-only = false;
+        }
     }
 
     if root.create-visible : CreateOverlay {

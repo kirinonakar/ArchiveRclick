@@ -15,8 +15,8 @@ export component ProgressOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 222px;
+        width: 680px;
+        height: 238px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -50,7 +50,9 @@ export component ProgressOverlay inherits Rectangle {
             Text {
                 text: root.detail;
                 color: Palette.foreground;
-                overflow: elide;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                min-height: 28px;
             }
 
             Rectangle { vertical-stretch: 1; }
@@ -144,4 +146,3 @@ export component ConflictOverlay inherits Rectangle {
         }
     }
 }
-

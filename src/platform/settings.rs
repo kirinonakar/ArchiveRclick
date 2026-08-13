@@ -1,8 +1,11 @@
 //! User preferences, persisted in the per-user registry.
 
-/// Last normal position and content size of the main window, in physical
-/// screen pixels.  Keeping this separate from the visual settings also lets
-/// the window restore safely when the UI language or theme changes.
+/// Last normal position and content size of the main window.
+///
+/// The position is stored in physical screen coordinates, while the size is
+/// stored in DPI-independent logical pixels.  Slint's `Window::size()` is
+/// physical, so callers must convert it with the window scale factor before
+/// persisting it and restore it through `LogicalSize`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowGeometry {
     pub x: i32,
@@ -36,6 +39,7 @@ mod imp {
     const WINDOW_Y_VALUE: &str = "WindowY";
     const WINDOW_WIDTH_VALUE: &str = "WindowWidth";
     const WINDOW_HEIGHT_VALUE: &str = "WindowHeight";
+    const WINDOW_GEOMETRY_VERSION_VALUE: &str = "WindowGeometryVersion";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -215,6 +219,12 @@ mod imp {
     /// ignored so a monitor/layout change cannot make the app unusable.
     pub fn load_window_geometry() -> Option<super::WindowGeometry> {
         let key = open_key(HKEY_CURRENT_USER, SETTINGS_KEY)?;
+        // Version 2 stores width/height in logical pixels.  Do not interpret
+        // the old physical-pixel values as logical pixels because that is
+        // exactly what makes a 125%/150% DPI monitor restore too large.
+        if read_string_value(key.0, WINDOW_GEOMETRY_VERSION_VALUE)?.as_str() != "2" {
+            return None;
+        }
         let x = read_string_value(key.0, WINDOW_X_VALUE)?.parse().ok()?;
         let y = read_string_value(key.0, WINDOW_Y_VALUE)?.parse().ok()?;
         let width: u32 = read_string_value(key.0, WINDOW_WIDTH_VALUE)?.parse().ok()?;
@@ -235,7 +245,7 @@ mod imp {
         })
     }
 
-    /// Persists the main window's current position and content size.
+    /// Persists the main window's current position and DPI-independent size.
     pub fn save_window_geometry(geometry: &super::WindowGeometry) -> Result<(), String> {
         let key_name = HSTRING::from(SETTINGS_KEY);
         let mut raw = HKEY(ptr::null_mut());
@@ -249,6 +259,7 @@ mod imp {
         }
         let key = OwnedKey(raw);
         for (name, value) in [
+            (WINDOW_GEOMETRY_VERSION_VALUE, "2".to_owned()),
             (WINDOW_X_VALUE, geometry.x.to_string()),
             (WINDOW_Y_VALUE, geometry.y.to_string()),
             (WINDOW_WIDTH_VALUE, geometry.width.to_string()),

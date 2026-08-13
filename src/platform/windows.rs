@@ -2,11 +2,10 @@
 
 #[cfg(windows)]
 mod imp {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::PathBuf;
 
-    use windows::Win32::Foundation::ERROR_CANCELLED;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
         CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -14,10 +13,14 @@ mod imp {
     use windows::Win32::UI::Shell::{
         FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
         FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
-        IFileOpenDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH,
+        IFileOpenDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH, ShellExecuteW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+        GetCursorPos, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_SHOWNORMAL,
+    };
+    use windows::Win32::{
+        Foundation::{ERROR_CANCELLED, POINT},
+        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
     };
     use windows::core::{Error, HRESULT, HSTRING, PWSTR};
 
@@ -227,11 +230,112 @@ mod imp {
             let _ = MessageBoxW(None, &message, &title, MB_OK | MB_ICONINFORMATION);
         }
     }
+
+    /// Places a newly created window in the work area of the monitor holding
+    /// the pointer. Slint reports the current window size in physical pixels,
+    /// which is exactly what SetWindowPos uses.
+    pub fn center_window(window: &slint::Window) {
+        let mut cursor = POINT::default();
+        // SAFETY: cursor is a valid writable point supplied by the caller.
+        let _ = unsafe { GetCursorPos(&mut cursor) };
+        // SAFETY: the point is initialized even when GetCursorPos fails.
+        let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+        if monitor.0.is_null() {
+            return;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: info is initialized with the required cbSize and the
+        // monitor handle came from MonitorFromPoint.
+        if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+            return;
+        }
+        let size = window.size();
+        let width = i32::try_from(size.width).unwrap_or(i32::MAX);
+        let height = i32::try_from(size.height).unwrap_or(i32::MAX);
+        let work = info.rcWork;
+        let x = work.left + (work.right - work.left - width).max(0) / 2;
+        let y = work.top + (work.bottom - work.top - height).max(0) / 2;
+        window.set_position(slint::PhysicalPosition::new(x, y));
+    }
+
+    /// Starts a second copy of the app with the Windows UAC runas verb.
+    /// false means the shell rejected the request (most commonly the user
+    /// pressed No in the consent dialog).
+    pub fn run_elevated(args: &[OsString]) -> Result<bool, String> {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))?;
+        let executable = wide_os(executable.as_os_str())?;
+        let command_line = args
+            .iter()
+            .map(|argument| quote_windows_arg(argument.as_os_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command_line = wide_text(&command_line)?;
+        // SAFETY: all strings are NUL-terminated and remain alive through the
+        // synchronous ShellExecuteW call.
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                windows::core::w!("runas"),
+                windows::core::PCWSTR(executable.as_ptr()),
+                windows::core::PCWSTR(command_line.as_ptr()),
+                windows::core::PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        Ok(result.0 as usize > 32)
+    }
+
+    fn wide_text(value: &str) -> Result<Vec<u16>, String> {
+        if value.contains('\0') {
+            return Err("The elevation command contains a null character".to_owned());
+        }
+        let mut wide: Vec<u16> = value.encode_utf16().collect();
+        wide.push(0);
+        Ok(wide)
+    }
+
+    fn wide_os(value: &OsStr) -> Result<Vec<u16>, String> {
+        if value.encode_wide().any(|unit| unit == 0) {
+            return Err("The executable path contains a null character".to_owned());
+        }
+        let mut wide: Vec<u16> = value.encode_wide().collect();
+        wide.push(0);
+        Ok(wide)
+    }
+
+    fn quote_windows_arg(value: &OsStr) -> String {
+        let value = value.to_string_lossy();
+        let mut quoted = String::with_capacity(value.len() + 2);
+        quoted.push('"');
+        let mut backslashes = 0usize;
+        for character in value.chars() {
+            match character {
+                '\\' => backslashes += 1,
+                '"' => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                    quoted.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
+                    quoted.push(character);
+                }
+            }
+        }
+        quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+        quoted.push('"');
+        quoted
+    }
 }
 
 #[cfg(not(windows))]
 mod imp {
-    use std::path::PathBuf;
+    use std::{ffi::OsString, path::PathBuf};
 
     fn unsupported(operation: &str) -> String {
         format!("{operation} is only available on Windows")
@@ -260,7 +364,16 @@ mod imp {
     pub fn show_info(title: &str, message: &str) {
         println!("{title}: {message}");
     }
+
+    pub fn center_window(_window: &slint::Window) {}
+
+    pub fn run_elevated(_args: &[OsString]) -> Result<bool, String> {
+        Err(unsupported("Elevation"))
+    }
 }
 
 pub use super::shell::reveal_in_explorer;
-pub use imp::{pick_archive, pick_files, pick_folder, save_archive, show_error, show_info};
+pub use imp::{
+    center_window, pick_archive, pick_files, pick_folder, run_elevated, save_archive, show_error,
+    show_info,
+};

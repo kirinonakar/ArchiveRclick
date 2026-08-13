@@ -10,6 +10,7 @@ import {
 export component ExtractOverlay inherits Rectangle {
     in property <int> language-index;
     in property <string> archive-name;
+    in property <bool> selected-only-default: false;
 
     callback accepted(int, int, string, bool);
     callback cancelled();
@@ -90,7 +91,7 @@ export component ExtractOverlay inherits Rectangle {
 
                 selected-only := CheckBox {
                     text: root.language-index == 1 ? "선택 항목만" : root.language-index == 2 ? "選択項目のみ" : "Selected only";
-                    checked: false;
+                    checked: root.selected-only-default;
                 }
             }
 

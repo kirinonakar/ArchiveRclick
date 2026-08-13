@@ -262,6 +262,10 @@ mod platform_impl {
         w_reserved2: u16,
         w_reserved3: u16,
         payload: u64,
+        // PROPVARIANT's union is as large as DECIMAL (16 bytes) even when the
+        // active value is a scalar. Keeping the full union width is essential
+        // when 7-Zip walks an array containing more than one property.
+        payload2: u64,
     }
 
     impl PropVariant {
@@ -272,6 +276,7 @@ mod platform_impl {
                 w_reserved2: 0,
                 w_reserved3: 0,
                 payload: 0,
+                payload2: 0,
             }
         }
 
@@ -631,7 +636,13 @@ mod platform_impl {
         iid: *const Guid,
         out: *mut *mut c_void,
     ) -> i32 {
-        stream_query_interface(this, iid, out, &[IID_ISEQUENTIAL_IN_STREAM, IID_IIN_STREAM])
+        stream_query_interface(
+            this,
+            iid,
+            out,
+            &[IID_ISEQUENTIAL_IN_STREAM, IID_IIN_STREAM],
+            stream_add_ref,
+        )
     }
 
     unsafe extern "system" fn in_stream_release(this: *mut c_void) -> u32 {
@@ -742,6 +753,7 @@ mod platform_impl {
             iid,
             out,
             &[IID_ISEQUENTIAL_OUT_STREAM, IID_IOUT_STREAM],
+            stream_add_ref,
         )
     }
 
@@ -851,6 +863,7 @@ mod platform_impl {
         iid: *const Guid,
         out: *mut *mut c_void,
         supported: &[Guid],
+        add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
@@ -859,6 +872,9 @@ mod platform_impl {
         let requested = unsafe { *iid };
         if requested == IID_IUNKNOWN || supported.contains(&requested) {
             unsafe { *out = this };
+            // QueryInterface returns a new owned interface reference.  7-Zip
+            // releases that reference independently from the original one.
+            unsafe { add_ref(this) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -944,6 +960,7 @@ mod platform_impl {
             || requested == IID_IPROGRESS
         {
             unsafe { *out = this };
+            unsafe { open_callback_add_ref(this) };
             S_OK
         } else if requested == IID_ICRYPTO_GET_TEXT_PASSWORD {
             // The crypto interface is the second vtable pointer of the object.
@@ -953,6 +970,7 @@ mod platform_impl {
                     .cast::<c_void>()
             };
             unsafe { *out = crypto };
+            unsafe { open_crypto_add_ref(crypto) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -1023,6 +1041,7 @@ mod platform_impl {
         let requested = unsafe { *iid };
         if requested == IID_IUNKNOWN || requested == IID_ICRYPTO_GET_TEXT_PASSWORD {
             unsafe { *out = this };
+            unsafe { open_crypto_add_ref(this) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -1185,6 +1204,7 @@ mod platform_impl {
             || requested == IID_IPROGRESS
         {
             unsafe { *out = this };
+            unsafe { extract_callback_add_ref(this) };
             S_OK
         } else if requested == IID_ICRYPTO_GET_TEXT_PASSWORD {
             let crypto = unsafe {
@@ -1193,6 +1213,7 @@ mod platform_impl {
                     .cast::<c_void>()
             };
             unsafe { *out = crypto };
+            unsafe { extract_crypto_add_ref(crypto) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -1421,6 +1442,8 @@ mod platform_impl {
             }
         }
         if let Err(error) = install_temporary(&context.root, &pending.temp_path, &pending.target) {
+            close_pending_file(&pending);
+            let _ = fs::remove_file(&pending.temp_path);
             if context.error.is_none() {
                 context.error = Some(error);
             }
@@ -1527,6 +1550,7 @@ mod platform_impl {
             || requested == IID_IPROGRESS
         {
             unsafe { *out = this };
+            unsafe { update_callback_add_ref(this) };
             S_OK
         } else if requested == IID_ICRYPTO_GET_TEXT_PASSWORD2 {
             let crypto = unsafe {
@@ -1535,6 +1559,7 @@ mod platform_impl {
                     .cast::<c_void>()
             };
             unsafe { *out = crypto };
+            unsafe { update_crypto_add_ref(crypto) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -1717,6 +1742,7 @@ mod platform_impl {
         let requested = unsafe { *iid };
         if requested == IID_IUNKNOWN || requested == IID_ICRYPTO_GET_TEXT_PASSWORD2 {
             unsafe { *out = this };
+            unsafe { update_crypto_add_ref(this) };
             S_OK
         } else {
             E_NOINTERFACE
@@ -2264,17 +2290,27 @@ mod platform_impl {
             throttled.report(opening, true);
 
             let temporary_path = temporary_path(&parent, &final_destination);
-            let temp_file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary_path)
-                .map_err(|error| ArchiveError::io(&temporary_path, error))?;
+            let mut temp_file = Some(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary_path)
+                    .map_err(|error| ArchiveError::io(&temporary_path, error))?,
+            );
 
-            let out_archive = self.api.create_out_archive()?;
+            let out_archive = match self.api.create_out_archive() {
+                Ok(archive) => archive,
+                Err(error) => {
+                    drop(temp_file.take());
+                    let _ = fs::remove_file(&temporary_path);
+                    return Err(error);
+                }
+            };
             let result = match apply_create_properties(&out_archive, options) {
                 Ok(()) => {
-                    let shared_file: Arc<Mutex<Option<File>>> =
-                        Arc::new(Mutex::new(Some(temp_file)));
+                    let shared_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(Some(
+                        temp_file.take().expect("temporary file is live"),
+                    )));
                     let stream = Box::new(OutStream {
                         vtbl: &OUT_STREAM_VTBL,
                         refs: AtomicU32::new(1),
@@ -2347,7 +2383,12 @@ mod platform_impl {
                     throttled.report(snapshot, true);
                     Ok(summary)
                 }
-                Err(error) => finish_create_error(&temporary_path, error),
+                Err(error) => {
+                    // `finish_create_error` removes the path immediately;
+                    // close the still-owned file first on Windows.
+                    drop(temp_file.take());
+                    finish_create_error(&temporary_path, error)
+                }
             };
             drop(out_archive);
             result
@@ -2928,8 +2969,17 @@ mod platform_impl {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         while let Some(pending) = context.pending.pop_front() {
+            close_pending_file(&pending);
             let _ = fs::remove_file(&pending.temp_path);
         }
+    }
+
+    fn close_pending_file(pending: &PendingFile) {
+        let mut guard = pending
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        drop(guard.take());
     }
 
     // ------------------------------------------------------------------

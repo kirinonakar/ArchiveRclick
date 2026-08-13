@@ -72,6 +72,25 @@ impl ArchiveRowModel {
         self.notify.row_changed(row);
     }
 
+    /// Selects the row targeted by a context menu.  A right-click on an
+    /// unselected row replaces the current selection; right-clicking a row
+    /// that is already selected keeps an existing multi-selection intact.
+    pub(crate) fn select_for_context(&self, row: usize) -> bool {
+        let display = self.display.borrow();
+        let Some(entry) = display.get(row) else {
+            return false;
+        };
+        let path = entry.relative_path.clone();
+        let mut selected = self.selected.borrow_mut();
+        if !selected.contains(&path) {
+            selected.clear();
+            selected.insert(path);
+        }
+        drop(selected);
+        self.notify.reset();
+        true
+    }
+
     pub(crate) fn clear_selection(&self) {
         if self.selected.borrow().is_empty() {
             return;

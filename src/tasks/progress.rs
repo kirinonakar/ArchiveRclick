@@ -36,6 +36,9 @@ pub struct ProgressSnapshot {
     pub total_entries: Option<u64>,
     pub bytes_processed: u64,
     pub total_bytes: Option<u64>,
+    pub elapsed: Duration,
+    pub estimated_remaining: Option<Duration>,
+    pub estimated_total: Option<Duration>,
 }
 
 impl ProgressSnapshot {
@@ -47,6 +50,9 @@ impl ProgressSnapshot {
             total_entries: None,
             bytes_processed: 0,
             total_bytes: None,
+            elapsed: Duration::ZERO,
+            estimated_remaining: None,
+            estimated_total: None,
         }
     }
 
@@ -64,6 +70,7 @@ impl ProgressSnapshot {
 pub struct ThrottledProgress<'a> {
     inner: &'a dyn ProgressSink,
     interval: Duration,
+    started_at: Instant,
     last_report: Mutex<Option<Instant>>,
 }
 
@@ -72,13 +79,27 @@ impl<'a> ThrottledProgress<'a> {
         Self {
             inner,
             interval,
+            started_at: Instant::now(),
             last_report: Mutex::new(None),
         }
     }
 
-    pub fn report(&self, snapshot: ProgressSnapshot, force: bool) {
+    pub fn report(&self, mut snapshot: ProgressSnapshot, force: bool) {
         let mut last = self.last_report.lock().expect("progress mutex poisoned");
         let now = Instant::now();
+        snapshot.elapsed = now.duration_since(self.started_at);
+        let fraction = snapshot.fraction();
+        if snapshot.phase == ProgressPhase::Finished || fraction >= 1.0 {
+            snapshot.estimated_remaining = Some(Duration::ZERO);
+            snapshot.estimated_total = Some(snapshot.elapsed);
+        } else if fraction > 0.0 {
+            let elapsed_seconds = snapshot.elapsed.as_secs_f64();
+            let total_seconds = elapsed_seconds / f64::from(fraction);
+            let total =
+                Duration::from_secs_f64(total_seconds.max(0.0).min(Duration::MAX.as_secs_f64()));
+            snapshot.estimated_total = Some(total);
+            snapshot.estimated_remaining = total.checked_sub(snapshot.elapsed);
+        }
         if force || last.is_none_or(|previous| now.duration_since(previous) >= self.interval) {
             *last = Some(now);
             self.inner.report(snapshot);

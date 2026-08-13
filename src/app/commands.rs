@@ -1,11 +1,12 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc};
 
 use crate::{
@@ -108,7 +109,9 @@ fn pathname_codepage(index: i32) -> u32 {
 
 pub fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let command = args.next();
+    let first = args.next();
+    let elevated_retry = first.as_deref() == Some(OsStr::new("--elevated-retry"));
+    let command = if elevated_retry { args.next() } else { first };
     let subcommand = command
         .as_deref()
         .and_then(|value| value.to_str())
@@ -116,15 +119,15 @@ pub fn run() -> Result<(), String> {
     match subcommand.as_deref() {
         Some("extract") => {
             let rest: Vec<OsString> = args.collect();
-            run_gui_extract(&rest)
+            run_gui_extract(&rest, elevated_retry)
         }
         Some("zip") => {
             let rest: Vec<OsString> = args.collect();
-            run_gui_create(&rest, CreateFormat::Zip)
+            run_gui_create(&rest, CreateFormat::Zip, elevated_retry)
         }
         Some("7z") => {
             let rest: Vec<OsString> = args.collect();
-            run_gui_create(&rest, CreateFormat::SevenZip)
+            run_gui_create(&rest, CreateFormat::SevenZip, elevated_retry)
         }
         _ => run_with_startup_argument(command),
     }
@@ -203,8 +206,10 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     if let Some(geometry) = platform::load_window_geometry() {
-        ui.window()
-            .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+        ui.window().set_size(slint::LogicalSize::new(
+            geometry.width as f32,
+            geometry.height as f32,
+        ));
         ui.window()
             .set_position(slint::PhysicalPosition::new(geometry.x, geometry.y));
     }
@@ -298,16 +303,15 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     let weak_for_close = ui.as_weak();
     ui.window().on_close_requested(move || {
         if let Some(ui) = weak_for_close.upgrade()
-            && !ui.window().is_maximized()
-            && !ui.window().is_minimized()
+            && should_save_window_geometry(ui.window())
         {
-            let size = ui.window().size();
+            let (width, height) = logical_window_size(ui.window());
             let position = ui.window().position();
             let _ = platform::save_window_geometry(&platform::WindowGeometry {
                 x: position.x,
                 y: position.y,
-                width: size.width,
-                height: size.height,
+                width,
+                height,
             });
         }
         slint::CloseRequestResponse::HideWindow
@@ -319,13 +323,55 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     Ok((ui, state, engine, writable_formats))
 }
 
+/// Converts Slint's physical window size to DPI-independent logical pixels
+/// before it is persisted.  This keeps the same user-visible size when the
+/// next launch happens on a monitor with a different scale factor.
+fn logical_window_size(window: &slint::Window) -> (u32, u32) {
+    let scale_factor = f64::from(window.scale_factor()).max(0.01);
+    let size = window.size();
+    let width = (f64::from(size.width) / scale_factor)
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    let height = (f64::from(size.height) / scale_factor)
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    (width, height)
+}
+
+/// Returns false for maximized/fullscreen bounds even when the backend has
+/// not updated Slint's state flags yet during the close request.  Saving such
+/// bounds would make the next normal launch reopen at the monitor's full size.
+fn should_save_window_geometry(window: &slint::Window) -> bool {
+    if window.is_maximized() || window.is_minimized() || window.is_fullscreen() {
+        return false;
+    }
+
+    let mut reject = false;
+    let _ = window.with_winit_window(|winit_window| {
+        if winit_window.is_maximized() || winit_window.fullscreen().is_some() {
+            reject = true;
+            return;
+        }
+
+        let Some(monitor) = winit_window.current_monitor() else {
+            return;
+        };
+        let monitor_size = monitor.size();
+        let outer_size = winit_window.outer_size();
+        let width_matches = outer_size.width.abs_diff(monitor_size.width) <= 8;
+        let height_matches = outer_size.height.abs_diff(monitor_size.height) <= 8;
+        reject = width_matches && height_matches;
+    });
+    !reject
+}
+
 // ---------------------------------------------------------------------------
 // Explorer context-menu operations. The shell extension launches the app with
 // these verbs and the work runs in a small progress-only window: no main
 // window appears, and the window closes by itself once the work is finished.
 // ---------------------------------------------------------------------------
 
-fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
+fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String> {
     if args.is_empty() {
         return Err("Usage: ArchiveRclick extract <archive>...".to_owned());
     }
@@ -340,12 +386,16 @@ fn run_gui_extract(args: &[OsString]) -> Result<(), String> {
     }
     let engine: Engine = load_engine()?;
     let (ui, state) = open_progress_window()?;
-    start_extract_batch_window(&ui, &state, Arc::clone(&engine), archives);
+    start_extract_batch_window(&ui, &state, Arc::clone(&engine), archives, elevated_retry);
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
 
-fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String> {
+fn run_gui_create(
+    args: &[OsString],
+    format: CreateFormat,
+    elevated_retry: bool,
+) -> Result<(), String> {
     let verb = match format {
         CreateFormat::Zip => "zip",
         CreateFormat::SevenZip => "7z",
@@ -379,6 +429,7 @@ fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
         destination,
         sources,
         options,
+        elevated_retry,
     );
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
@@ -624,6 +675,28 @@ fn wire_callbacks(
                 update_folder_ui(&weak, &state);
                 update_selection_ui(&weak, &state);
             }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_extract_context_requested(move |row| {
+            if row < 0 {
+                return;
+            }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if ui.get_busy() || !ui.get_has_archive() {
+                return;
+            }
+            if !state.rows.select_for_context(row as usize) {
+                return;
+            }
+            update_selection_ui(&weak, &state);
+            ui.set_extract_selected_only(true);
+            ui.set_extract_visible(true);
         });
     }
 
@@ -1333,8 +1406,9 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     ui.set_font_family(font_family.into());
     ui.set_progress_title("Working…".into());
     ui.set_progress_file("".into());
-    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_detail(initial_progress_detail().into());
     ui.set_progress_value(-1.0);
+    platform::center_window(ui.window());
     ui.show()
         .map_err(|error| format!("Could not show the progress window: {error}"))?;
     Ok((ui, state))
@@ -1348,14 +1422,7 @@ fn close_progress_window(ui: &ProgressWindow) {
 
 fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
     ui.set_progress_file(snapshot.current_file.clone().into());
-    ui.set_progress_detail(
-        format!(
-            "{} entries  •  {} processed",
-            snapshot.entries_processed,
-            compact_bytes(snapshot.bytes_processed)
-        )
-        .into(),
-    );
+    ui.set_progress_detail(progress_detail(snapshot).into());
     let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
         snapshot.fraction()
     } else {
@@ -1381,11 +1448,33 @@ fn update_progress_window_details(weak: &slint::Weak<ProgressWindow>, snapshot: 
 
 /// Extracts each archive into its own `<archive-name>` subfolder inside the
 /// progress-only window; the window closes when the batch finishes.
+fn request_context_elevation(
+    retry_already_attempted: bool,
+    subcommand: &str,
+    paths: &[PathBuf],
+) -> bool {
+    if retry_already_attempted || paths.is_empty() {
+        return false;
+    }
+    let mut args = Vec::with_capacity(paths.len() + 2);
+    args.push(OsString::from("--elevated-retry"));
+    args.push(OsString::from(subcommand));
+    args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+    match platform::run_elevated(&args) {
+        Ok(launched) => launched,
+        Err(error) => {
+            platform::show_error("Request administrator access", &error);
+            false
+        }
+    }
+}
+
 fn start_extract_batch_window(
     ui: &ProgressWindow,
     state: &Rc<ProgressWindowState>,
     engine: Engine,
     archives: Vec<PathBuf>,
+    elevated_retry: bool,
 ) {
     let total = archives.len();
     let first = archives[0].display().to_string();
@@ -1396,7 +1485,7 @@ fn start_extract_batch_window(
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
     ui.set_progress_title("Extracting archives".into());
     ui.set_progress_file(first.into());
-    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_detail(initial_progress_detail().into());
     ui.set_progress_value(-1.0);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
@@ -1412,7 +1501,7 @@ fn start_extract_batch_window(
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_progress_title(title.into());
                 ui.set_progress_file(archive_display.into());
-                ui.set_progress_detail("Starting…".into());
+                ui.set_progress_detail(initial_progress_detail().into());
                 ui.set_progress_value(-1.0);
             });
             let parent = archive.parent().unwrap_or_else(|| Path::new("."));
@@ -1439,6 +1528,18 @@ fn start_extract_batch_window(
             }
         }
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            let elevation_paths = failures
+                .iter()
+                .filter(|(_, error)| error.requires_elevation())
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            if !cancel.is_cancelled()
+                && !elevation_paths.is_empty()
+                && request_context_elevation(elevated_retry, "extract", &elevation_paths)
+            {
+                close_progress_window(&ui);
+                return;
+            }
             if !cancel.is_cancelled() && !failures.is_empty() {
                 if processed == 0 {
                     let (path, error) = failures.remove(0);
@@ -1470,6 +1571,7 @@ fn start_create_window(
     destination: PathBuf,
     sources: Vec<PathBuf>,
     options: CreateOptions,
+    elevated_retry: bool,
 ) {
     let cancel = CancellationToken::new();
     *state
@@ -1478,10 +1580,11 @@ fn start_create_window(
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
     ui.set_progress_title("Creating archive".into());
     ui.set_progress_file(destination.display().to_string().into());
-    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_detail(initial_progress_detail().into());
     ui.set_progress_value(-1.0);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
+    let elevation_sources = sources.clone();
     let progress =
         move |snapshot: ProgressSnapshot| update_progress_window(&weak_progress, snapshot);
     std::thread::spawn(move || {
@@ -1490,7 +1593,20 @@ fn start_create_window(
             match result {
                 Ok(_) => {}
                 Err(error) if !cancel.is_cancelled() => {
-                    platform::show_error("Create archive", &error.to_string());
+                    let subcommand = match options.format {
+                        CreateFormat::Zip => "zip",
+                        CreateFormat::SevenZip => "7z",
+                        _ => "",
+                    };
+                    let relaunched = error.requires_elevation()
+                        && request_context_elevation(
+                            elevated_retry,
+                            subcommand,
+                            &elevation_sources,
+                        );
+                    if !relaunched {
+                        platform::show_error("Create archive", &error.to_string());
+                    }
                 }
                 Err(_) => {}
             }
@@ -1591,7 +1707,7 @@ fn begin_operation(
     ui.set_progress_visible(true);
     ui.set_progress_title(title.into());
     ui.set_progress_file(current_file.into());
-    ui.set_progress_detail("Starting…".into());
+    ui.set_progress_detail(initial_progress_detail().into());
     ui.set_progress_value(-1.0);
     cancel
 }
@@ -1604,14 +1720,7 @@ fn finish_operation(ui: &AppWindow) {
 
 fn apply_progress_to(ui: &AppWindow, snapshot: &ProgressSnapshot) {
     ui.set_progress_file(snapshot.current_file.clone().into());
-    ui.set_progress_detail(
-        format!(
-            "{} entries  •  {} processed",
-            snapshot.entries_processed,
-            compact_bytes(snapshot.bytes_processed)
-        )
-        .into(),
-    );
+    ui.set_progress_detail(progress_detail(snapshot).into());
     let fraction = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
         snapshot.fraction()
     } else {
@@ -1779,6 +1888,38 @@ fn show_ui_error(weak: &slint::Weak<AppWindow>, title: &str, message: String) {
         ui.set_status_text(message.clone().into());
     }
     platform::show_error(title, &message);
+}
+
+fn initial_progress_detail() -> String {
+    let snapshot = ProgressSnapshot::new(crate::tasks::ProgressPhase::Opening);
+    progress_detail(&snapshot)
+}
+
+fn progress_detail(snapshot: &ProgressSnapshot) -> String {
+    let percent = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
+        format!("{:.0}%", snapshot.fraction() * 100.0)
+    } else {
+        "—%".to_owned()
+    };
+    format!(
+        "{percent}  •  Elapsed {}  •  Remaining {}  •  Total {}  •  {} entries  •  {} processed",
+        format_duration(Some(snapshot.elapsed)),
+        format_duration(snapshot.estimated_remaining),
+        format_duration(snapshot.estimated_total),
+        snapshot.entries_processed,
+        compact_bytes(snapshot.bytes_processed),
+    )
+}
+
+fn format_duration(duration: Option<Duration>) -> String {
+    let Some(duration) = duration else {
+        return "—".to_owned();
+    };
+    let seconds = duration.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 fn compact_bytes(value: u64) -> String {

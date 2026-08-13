@@ -260,7 +260,6 @@ mod platform_impl {
         write_data: ArchiveWriteData,
         finish_entry: ArchiveWriteUnary,
         close: ArchiveWriteUnary,
-        fail: Option<ArchiveWriteUnary>,
         free: ArchiveWriteUnary,
         entry_new: ArchiveEntryNew,
         entry_free: ArchiveEntryFree,
@@ -719,7 +718,6 @@ mod platform_impl {
                     ArchiveWriteUnary
                 )?,
                 close: optional_symbol!(library, "archive_write_close", ArchiveWriteUnary)?,
-                fail: optional_symbol!(library, "archive_write_fail", ArchiveWriteUnary),
                 free: optional_symbol!(library, "archive_write_free", ArchiveWriteUnary)?,
                 entry_new: optional_symbol!(library, "archive_entry_new", ArchiveEntryNew)?,
                 entry_free: optional_symbol!(library, "archive_entry_free", ArchiveEntryFree)?,
@@ -1586,11 +1584,13 @@ mod platform_impl {
 
     impl Drop for Writer<'_> {
         fn drop(&mut self) {
-            if !self.finished
-                && let Some(fail) = self.write.fail
-            {
-                // SAFETY: this is the documented fast-abort operation.
-                let _ = unsafe { fail(self.raw.as_ptr()) };
+            if !self.finished {
+                // `archive_write_fail` aborts the writer state, but some
+                // Windows builds leave the output handle open until the
+                // normal close path runs.  Always close before freeing so
+                // TemporaryPath can remove a cancelled/failed output file.
+                let _ = unsafe { (self.write.close)(self.raw.as_ptr()) };
+                self.finished = true;
             }
             // SAFETY: writer uniquely owns this handle.
             let _ = unsafe { (self.write.free)(self.raw.as_ptr()) };
@@ -1878,10 +1878,14 @@ mod platform_impl {
                             }
                             ConflictAction::Overwrite => {
                                 ensure_parent_directories(&root, &target)?;
-                                let (mut output, mut temporary) = temporary_file(
+                                let mut temporary = temporary_file(
                                     target.parent().expect("validated target has parent"),
                                 )?;
-                                verify_file_handle_within_root(&root, &output, &temporary.path)?;
+                                verify_file_handle_within_root(
+                                    &root,
+                                    temporary.file(),
+                                    &temporary.path,
+                                )?;
                                 let mut file_bytes = 0u64;
                                 loop {
                                     check_cancel(cancel)?;
@@ -1905,18 +1909,19 @@ mod platform_impl {
                                             entry.display_path
                                         )));
                                     }
-                                    output.write_all(&buffer[..amount]).map_err(|error| {
-                                        ArchiveError::io(&temporary.path, error)
-                                    })?;
+                                    temporary.file_mut().write_all(&buffer[..amount]).map_err(
+                                        |error| ArchiveError::io(&temporary.path, error),
+                                    )?;
                                     snapshot.bytes_processed =
                                         progress_bytes.saturating_add(file_bytes);
                                     snapshot.entries_processed = progress_entries;
                                     throttled.report(snapshot.clone(), false);
                                 }
-                                output
+                                temporary
+                                    .file_mut()
                                     .flush()
                                     .map_err(|error| ArchiveError::io(&temporary.path, error))?;
-                                drop(output);
+                                temporary.close_file();
                                 install_temporary(&root, &temporary.path, &target)?;
                                 temporary.disarm();
                                 summary.bytes_processed = summary
@@ -2001,9 +2006,9 @@ mod platform_impl {
             let mut opening = opening_snapshot(&final_destination, total_bytes);
             opening.total_entries = Some(items.len() as u64);
             throttled.report(opening, true);
-            let (temporary_file, mut temporary) = temporary_file(&parent)?;
-            verify_file_handle_within_root(&parent, &temporary_file, &temporary.path)?;
-            drop(temporary_file);
+            let mut temporary = temporary_file(&parent)?;
+            verify_file_handle_within_root(&parent, temporary.file(), &temporary.path)?;
+            temporary.close_file();
             let mut writer = Writer::create(&self.api, &temporary.path, options)?;
             let mut summary = OperationSummary::default();
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
@@ -2359,10 +2364,27 @@ mod platform_impl {
 
     struct TemporaryPath {
         path: PathBuf,
+        file: Option<File>,
         armed: bool,
     }
 
     impl TemporaryPath {
+        fn file(&self) -> &File {
+            self.file
+                .as_ref()
+                .expect("temporary file handle is still open")
+        }
+
+        fn file_mut(&mut self) -> &mut File {
+            self.file
+                .as_mut()
+                .expect("temporary file handle is still open")
+        }
+
+        fn close_file(&mut self) {
+            drop(self.file.take());
+        }
+
         fn disarm(&mut self) {
             self.armed = false;
         }
@@ -2370,19 +2392,24 @@ mod platform_impl {
 
     impl Drop for TemporaryPath {
         fn drop(&mut self) {
+            self.close_file();
             if self.armed {
                 let _ = fs::remove_file(&self.path);
             }
         }
     }
 
-    fn temporary_file(directory: &Path) -> ArchiveResult<(File, TemporaryPath)> {
+    fn temporary_file(directory: &Path) -> ArchiveResult<TemporaryPath> {
         for _ in 0..128 {
             let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!(".archiverclick-{}-{id}.tmp", std::process::id()));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => {
-                    return Ok((file, TemporaryPath { path, armed: true }));
+                    return Ok(TemporaryPath {
+                        path,
+                        file: Some(file),
+                        armed: true,
+                    });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(ArchiveError::io(path, error)),
