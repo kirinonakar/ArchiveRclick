@@ -133,8 +133,9 @@ export component CreateOverlay inherits Rectangle {
     in property <int> thread-selection;
 
     private property <int> thread-index: root.thread-selection;
+    private property <string> password-error: "";
 
-    callback accepted(int, int, int, string);
+    callback accepted(int, int, int, string, string);
     callback cancelled();
     callback choose-files();
     callback choose-folder();
@@ -146,8 +147,8 @@ export component CreateOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 470px;
+        width: 460px;
+        height: 420px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -157,8 +158,8 @@ export component CreateOverlay inherits Rectangle {
         drop-shadow-offset-y: 6px;
 
         VerticalLayout {
-            padding: 18px;
-            spacing: 8px;
+            padding: 14px;
+            spacing: 6px;
 
             Text {
                 text: root.language-index == 1 ? "압축파일 만들기" : root.language-index == 2 ? "アーカイブを作成" : "Create archive";
@@ -259,7 +260,7 @@ export component CreateOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 8px;
+                spacing: 6px;
 
                 password := LineEdit {
                     horizontal-stretch: 1;
@@ -270,7 +271,21 @@ export component CreateOverlay inherits Rectangle {
                         : (root.language-index == 1 ? "ZIP/7z만 지원" : root.language-index == 2 ? "ZIP/7zのみ対応" : "ZIP / 7z only");
                 }
 
-                Rectangle { horizontal-stretch: 1; }
+                password-confirmation := LineEdit {
+                    horizontal-stretch: 1;
+                    input-type: InputType.password;
+                    enabled: format.current-value == "ZIP" || format.current-value == "7z";
+                    placeholder-text: root.language-index == 1 ? "암호 확인" : root.language-index == 2 ? "パスワード確認" : "Confirm password";
+                }
+            }
+
+            Text {
+                visible: root.password-error != "";
+                text: root.password-error;
+                color: #c53d3d;
+                font-size: 12px;
+                height: 16px;
+                vertical-alignment: center;
             }
 
             Rectangle { vertical-stretch: 1; }
@@ -290,7 +305,22 @@ export component CreateOverlay inherits Rectangle {
                     primary: true;
                     enabled: root.has-sources && root.available-formats.length > 0;
                     clicked => {
-                        root.accepted(format.current-index, level.value, root.thread-index, password.text);
+                        if (password.text != password-confirmation.text) {
+                            root.password-error = root.language-index == 1
+                                ? "암호가 일치하지 않습니다."
+                                : root.language-index == 2
+                                    ? "パスワードが一致しません。"
+                                    : "Passwords do not match.";
+                        } else {
+                            root.password-error = "";
+                            root.accepted(
+                                format.current-index,
+                                level.value,
+                                root.thread-index,
+                                password.text,
+                                password-confirmation.text
+                            );
+                        }
                     }
                 }
             }
@@ -323,8 +353,8 @@ export component SettingsOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 480px;
-        height: 440px;
+        width: 420px;
+        height: 360px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -334,8 +364,8 @@ export component SettingsOverlay inherits Rectangle {
         drop-shadow-offset-y: 8px;
 
         VerticalLayout {
-            padding: 20px;
-            spacing: 8px;
+            padding: 14px;
+            spacing: 6px;
 
             Text {
                 text: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
@@ -345,7 +375,7 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 Text {
                     text: root.language-selection == 1 ? "언어" : root.language-selection == 2 ? "言語" : "Language";
                     color: Palette.foreground;
@@ -362,7 +392,7 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 Text {
                     text: root.language-selection == 1 ? "인터페이스 글꼴" : root.language-selection == 2 ? "インターフェースフォント" : "Interface font";
                     color: Palette.foreground;
@@ -378,7 +408,7 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 Text {
                     text: root.language-selection == 1 ? "CPU 스레드 (7z)" : root.language-selection == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
                     color: Palette.foreground;
@@ -399,7 +429,7 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 Text {
                     text: root.language-selection == 1 ? "테마" : root.language-selection == 2 ? "テーマ" : "Theme";
                     color: Palette.foreground;

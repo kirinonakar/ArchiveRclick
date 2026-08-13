@@ -120,6 +120,14 @@ impl ArchiveRowModel {
         self.notify.reset();
     }
 
+    pub(crate) fn clear_listing(&self) {
+        *self.listing.borrow_mut() = None;
+        self.display.borrow_mut().clear();
+        self.current_folder.borrow_mut().clear();
+        self.selected.borrow_mut().clear();
+        self.notify.reset();
+    }
+
     pub(crate) fn rebuild_display(&self) {
         rebuild_display(
             &self.listing,
@@ -238,6 +246,12 @@ impl AppState {
 
     pub(crate) fn rebuild_display(&self) {
         self.rows.rebuild_display();
+    }
+
+    pub(crate) fn clear_archive(&self) {
+        self.rows.clear_listing();
+        self.sort_column.set(ARCHIVE_ORDER);
+        self.sort_ascending.set(true);
     }
 
     pub(crate) fn activate_row(&self, row: usize) -> Option<PathBuf> {

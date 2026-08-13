@@ -1,4 +1,4 @@
-import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, Palette, ProgressIndicator } from "std-widgets.slint";
 import { ProgressStats } from "progress.slint";
 
 // Small progress-only window shown while Explorer right-click operations run.
@@ -8,22 +8,28 @@ export component ProgressWindow inherits Window {
     in-out property <string> font-family;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
+    in-out property <string> progress-file-percent;
     in-out property <string> progress-percent;
     in-out property <string> progress-elapsed;
     in-out property <string> progress-remaining;
     in-out property <string> progress-total;
     in-out property <string> progress-detail;
+    in-out property <float> progress-file-value;
     in-out property <float> progress-value;
+    in-out property <bool> password-visible;
+    in-out property <string> password-operation;
+    in-out property <string> password-value;
 
     callback cancel-requested();
+    callback password-response(string, bool);
 
     title: "ArchiveRclick";
     icon: @image-url("../app.png");
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
     preferred-width: 700px;
-    preferred-height: 270px;
+    preferred-height: 320px;
     min-width: 620px;
-    min-height: 240px;
+    min-height: 290px;
     background: Palette.background;
 
     VerticalLayout {
@@ -44,11 +50,60 @@ export component ProgressWindow inherits Window {
             overflow: elide;
         }
 
-        ProgressIndicator {
-            progress: root.progress-value;
-            indeterminate: root.progress-value < 0;
-            accessible-label: "Operation progress";
-            accessible-value: root.progress-value < 0 ? "Working" : "" + Math.round(root.progress-value * 100) + "%";
+        HorizontalLayout {
+            height: 26px;
+            spacing: 8px;
+
+            Text {
+                text: "File";
+                width: 58px;
+                color: Palette.foreground;
+                vertical-alignment: center;
+            }
+
+            ProgressIndicator {
+                progress: root.progress-file-value;
+                indeterminate: root.progress-file-value < 0;
+                horizontal-stretch: 1;
+                accessible-label: "Current file progress";
+                accessible-value: root.progress-file-value < 0 ? "Working" : "" + Math.round(root.progress-file-value * 100) + "%";
+            }
+
+            Text {
+                text: root.progress-file-percent;
+                width: 48px;
+                color: Palette.foreground;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            height: 26px;
+            spacing: 8px;
+
+            Text {
+                text: "Overall";
+                width: 58px;
+                color: Palette.foreground;
+                vertical-alignment: center;
+            }
+
+            ProgressIndicator {
+                progress: root.progress-value;
+                indeterminate: root.progress-value < 0;
+                horizontal-stretch: 1;
+                accessible-label: "Overall operation progress";
+                accessible-value: root.progress-value < 0 ? "Working" : "" + Math.round(root.progress-value * 100) + "%";
+            }
+
+            Text {
+                text: root.progress-percent;
+                width: 48px;
+                color: Palette.foreground;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
         }
 
         ProgressStats {
@@ -74,6 +129,70 @@ export component ProgressWindow inherits Window {
             Button {
                 text: "Cancel";
                 clicked => { root.cancel-requested(); }
+            }
+        }
+    }
+
+    if root.password-visible : Rectangle {
+        background: #00000094;
+        accessible-role: region;
+        accessible-label: "Archive password";
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 440px;
+            height: 220px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 12px;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: #00000055;
+            drop-shadow-offset-y: 6px;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+
+                Text {
+                    text: "Password required";
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: root.password-operation;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
+                }
+
+                password-entry := LineEdit {
+                    input-type: InputType.password;
+                    text <=> root.password-value;
+                    placeholder-text: "Archive password";
+                    enabled: true;
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.password-response("", false); }
+                    }
+
+                    Button {
+                        text: "Continue";
+                        primary: true;
+                        enabled: password-entry.text != "";
+                        clicked => { root.password-response(password-entry.text, true); }
+                    }
+                }
             }
         }
     }

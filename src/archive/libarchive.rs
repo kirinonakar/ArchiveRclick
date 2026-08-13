@@ -1820,10 +1820,20 @@ mod platform_impl {
                 let relative = safe_relative_path(&entry.path)?;
                 if !options.selection.includes(&relative) {
                     snapshot.current_file.clone_from(&entry.display_path);
+                    snapshot.current_file_total_bytes = entry
+                        .size
+                        .or_else(|| (entry.kind == ArchiveEntryKind::Directory).then_some(0));
+                    snapshot.current_file_bytes_processed = 0;
                     if entry.kind == ArchiveEntryKind::File {
-                        reader.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {
-                            throttled.report(snapshot.clone(), false)
-                        })?;
+                        reader.drain_current_entry(
+                            &mut buffer,
+                            cancel,
+                            &mut scan,
+                            |entry_bytes, _| {
+                                snapshot.current_file_bytes_processed = entry_bytes;
+                                throttled.report(snapshot.clone(), false)
+                            },
+                        )?;
                     }
                     continue;
                 }
@@ -1852,6 +1862,10 @@ mod platform_impl {
 
                 snapshot.current_file.clone_from(&entry.display_path);
                 let declared_progress_bytes = entry.size.unwrap_or(0);
+                snapshot.current_file_total_bytes = entry
+                    .size
+                    .or_else(|| (entry.kind == ArchiveEntryKind::Directory).then_some(0));
+                snapshot.current_file_bytes_processed = 0;
                 let mut completed_progress_bytes = declared_progress_bytes;
                 let target = root.join(&relative);
                 ensure_no_reparse_ancestors(&root, &target)?;
@@ -1871,6 +1885,7 @@ mod platform_impl {
                                     cancel,
                                     &mut scan,
                                     |entry_bytes, _| {
+                                        snapshot.current_file_bytes_processed = entry_bytes;
                                         snapshot.bytes_processed =
                                             progress_bytes.saturating_add(entry_bytes);
                                         snapshot.entries_processed = progress_entries;
@@ -1916,6 +1931,7 @@ mod platform_impl {
                                     temporary.file_mut().write_all(&buffer[..amount]).map_err(
                                         |error| ArchiveError::io(&temporary.path, error),
                                     )?;
+                                    snapshot.current_file_bytes_processed = file_bytes;
                                     snapshot.bytes_processed =
                                         progress_bytes.saturating_add(file_bytes);
                                     snapshot.entries_processed = progress_entries;
@@ -1955,6 +1971,7 @@ mod platform_impl {
                     .ok_or_else(|| {
                         ArchiveError::LimitExceeded("progress byte count overflow".to_owned())
                     })?;
+                snapshot.current_file_bytes_processed = completed_progress_bytes;
                 snapshot.entries_processed = progress_entries;
                 snapshot.bytes_processed = progress_bytes;
                 throttled.report(snapshot.clone(), false);
@@ -1963,6 +1980,8 @@ mod platform_impl {
             reader.finish()?;
             snapshot.phase = ProgressPhase::Finished;
             snapshot.current_file.clear();
+            snapshot.current_file_bytes_processed = 0;
+            snapshot.current_file_total_bytes = None;
             snapshot.entries_processed = options
                 .total_entries_hint
                 .unwrap_or(progress_entries)
@@ -2024,6 +2043,8 @@ mod platform_impl {
             for item in &items {
                 check_cancel(cancel)?;
                 snapshot.current_file.clone_from(&item.archive_name);
+                snapshot.current_file_total_bytes = Some(item.size);
+                snapshot.current_file_bytes_processed = 0;
                 writer.write_header(item)?;
                 if item.kind == SourceKind::File {
                     let mut input = File::open(&item.source)
@@ -2047,6 +2068,7 @@ mod platform_impl {
                         }
                         writer.write_all(&buffer[..amount])?;
                         remaining -= amount as u64;
+                        snapshot.current_file_bytes_processed = item.size.saturating_sub(remaining);
                         summary.bytes_processed += amount as u64;
                         snapshot.bytes_processed = summary.bytes_processed;
                         snapshot.entries_processed = summary.entries_processed;
@@ -2060,6 +2082,7 @@ mod platform_impl {
                 }
                 writer.finish_entry()?;
                 summary.entries_processed += 1;
+                snapshot.current_file_bytes_processed = item.size;
                 snapshot.entries_processed = summary.entries_processed;
                 throttled.report(snapshot.clone(), false);
             }
@@ -2070,6 +2093,8 @@ mod platform_impl {
             temporary.disarm();
             snapshot.phase = ProgressPhase::Finished;
             snapshot.current_file.clear();
+            snapshot.current_file_bytes_processed = 0;
+            snapshot.current_file_total_bytes = None;
             snapshot.entries_processed = summary.entries_processed;
             snapshot.bytes_processed = summary.bytes_processed;
             throttled.report(snapshot, true);

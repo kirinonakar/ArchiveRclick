@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc},
     time::Duration,
 };
 
@@ -38,6 +38,13 @@ fn load_engine() -> Result<Engine, String> {
         }
     };
     Ok(Arc::new(CompositeEngine::new(libarchive, sevenzip)))
+}
+
+fn create_formats_for_ui(formats: Vec<CreateFormat>) -> Vec<CreateFormat> {
+    formats
+        .into_iter()
+        .filter(|format| matches!(*format, CreateFormat::Zip | CreateFormat::SevenZip))
+        .collect()
 }
 
 // Font choices offered in Settings. The "auto" entry resolves at startup to
@@ -261,7 +268,7 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     ));
     ui.set_encoding_selection(0);
     ui.set_selection_state(0);
-    let writable_formats = engine.writable_formats();
+    let writable_formats = create_formats_for_ui(engine.writable_formats());
     if writable_formats.is_empty() {
         return Err(
             "The loaded libarchive DLL does not expose archive creation support".to_owned(),
@@ -416,7 +423,9 @@ fn parse_elevated_extract(
     while index < args.len() {
         if args[index].as_os_str() == OsStr::new("--output") {
             if pending_output.is_some() {
-                return Err("The elevated extraction retry has an output without an archive".to_owned());
+                return Err(
+                    "The elevated extraction retry has an output without an archive".to_owned(),
+                );
             }
             let Some(output) = args.get(index + 1) else {
                 return Err("The elevated extraction retry is missing an output path".to_owned());
@@ -489,9 +498,7 @@ fn parse_elevated_output(
     args: &[OsString],
     elevated_retry: bool,
 ) -> Result<(Option<PathBuf>, Vec<OsString>), String> {
-    if !elevated_retry || args.first().map(OsString::as_os_str)
-        != Some(OsStr::new("--output"))
-    {
+    if !elevated_retry || args.first().map(OsString::as_os_str) != Some(OsStr::new("--output")) {
         return Ok((None, args.to_vec()));
     }
     let destination = args
@@ -692,6 +699,20 @@ fn wire_callbacks(
             }
             Ok(None) => {}
             Err(error) => show_ui_error(&weak, "Open archive", error),
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_close_archive_requested(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if ui.get_busy() {
+                return;
+            }
+            close_archive(&ui, &state);
         });
     }
 
@@ -1039,52 +1060,59 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
-        ui.on_create_requested(move |format_index, level, thread_index, password| {
-            let sources = state.pending_create_sources.borrow().clone();
-            if sources.is_empty() {
-                show_ui_error(
-                    &weak,
-                    "Create archive",
-                    "No input files were selected".to_owned(),
-                );
-                return;
-            }
-            let Some(format) = writable_formats.get(format_index.max(0) as usize).copied() else {
-                show_ui_error(
-                    &weak,
-                    "Create archive",
-                    "Unsupported archive format".to_owned(),
-                );
-                return;
-            };
-            let default_name = default_archive_name(&sources, format);
-            let destination =
-                match platform::save_archive(&default_name, format.default_extension()) {
-                    Ok(Some(path)) => path,
-                    Ok(None) => return,
-                    Err(error) => {
-                        show_ui_error(&weak, "Create archive", error);
-                        return;
-                    }
+        ui.on_create_requested(
+            move |format_index, level, thread_index, password, password_confirmation| {
+                let sources = state.pending_create_sources.borrow().clone();
+                if sources.is_empty() {
+                    show_ui_error(
+                        &weak,
+                        "Create archive",
+                        "No input files were selected".to_owned(),
+                    );
+                    return;
+                }
+                if password != password_confirmation {
+                    show_ui_error(&weak, "Create archive", "Passwords do not match".to_owned());
+                    return;
+                }
+                let Some(format) = writable_formats.get(format_index.max(0) as usize).copied()
+                else {
+                    show_ui_error(
+                        &weak,
+                        "Create archive",
+                        "Unsupported archive format".to_owned(),
+                    );
+                    return;
                 };
-            let options = CreateOptions {
-                format,
-                compression_level: level.clamp(0, 9) as u8,
-                password: (!password.is_empty()).then(|| password.to_string()),
-                threads: ThreadCount::from_ui_index(thread_index),
-            };
-            let _ = platform::save_thread_preference(options.threads.registry_key());
-            if let Some(ui) = weak.upgrade() {
-                start_create(
-                    &ui,
-                    Rc::clone(&state),
-                    Arc::clone(&engine),
-                    destination,
-                    sources,
-                    options,
-                );
-            }
-        });
+                let default_name = default_archive_name(&sources, format);
+                let destination =
+                    match platform::save_archive(&default_name, format.default_extension()) {
+                        Ok(Some(path)) => path,
+                        Ok(None) => return,
+                        Err(error) => {
+                            show_ui_error(&weak, "Create archive", error);
+                            return;
+                        }
+                    };
+                let options = CreateOptions {
+                    format,
+                    compression_level: level.clamp(0, 9) as u8,
+                    password: (!password.is_empty()).then(|| password.to_string()),
+                    threads: ThreadCount::from_ui_index(thread_index),
+                };
+                let _ = platform::save_thread_preference(options.threads.registry_key());
+                if let Some(ui) = weak.upgrade() {
+                    start_create(
+                        &ui,
+                        Rc::clone(&state),
+                        Arc::clone(&engine),
+                        destination,
+                        sources,
+                        options,
+                    );
+                }
+            },
+        );
     }
 
     {
@@ -1452,10 +1480,73 @@ fn start_create(
 
 struct ProgressWindowState {
     cancellation: Arc<Mutex<Option<CancellationToken>>>,
+    password_prompt: Arc<ProgressPasswordPrompt>,
+}
+
+/// Coordinates a password dialog shown by the progress-only Explorer window
+/// with the worker thread that is waiting to retry the current archive.
+struct ProgressPasswordPrompt {
+    response: Mutex<Option<Option<String>>>,
+    wake: Condvar,
+}
+
+impl ProgressPasswordPrompt {
+    fn new() -> Self {
+        Self {
+            response: Mutex::new(None),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn respond(&self, password: Option<String>) {
+        let mut response = self
+            .response
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *response = Some(password);
+        self.wake.notify_all();
+    }
+
+    fn wait(
+        &self,
+        weak: &slint::Weak<ProgressWindow>,
+        archive: &Path,
+        cancel: &CancellationToken,
+    ) -> Option<String> {
+        {
+            let mut response = self
+                .response
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *response = None;
+        }
+        let operation = format!("Enter the password for {}", archive.display());
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_password_operation(operation.into());
+            ui.set_password_value("".into());
+            ui.set_password_visible(true);
+        });
+
+        let mut response = self
+            .response
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while !cancel.is_cancelled() {
+            if let Some(password) = response.take() {
+                return password;
+            }
+            response = self
+                .wake
+                .wait_timeout(response, Duration::from_millis(50))
+                .unwrap_or_else(|poison| poison.into_inner())
+                .0;
+        }
+        None
+    }
 }
 
 const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 700.0;
-const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 230.0;
+const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 310.0;
 
 /// Builds and shows the small progress window; its Cancel button cancels the
 /// running operation.
@@ -1463,8 +1554,10 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let state = Rc::new(ProgressWindowState {
         cancellation: Arc::new(Mutex::new(None)),
+        password_prompt: Arc::new(ProgressPasswordPrompt::new()),
     });
     let state_for_cancel = Rc::clone(&state);
+    let password_for_cancel = Arc::clone(&state.password_prompt);
     ui.on_cancel_requested(move || {
         if let Some(token) = state_for_cancel
             .cancellation
@@ -1474,6 +1567,16 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
         {
             token.cancel();
         }
+        password_for_cancel.respond(None);
+    });
+    let password_for_response = Arc::clone(&state.password_prompt);
+    let weak_for_response = ui.as_weak();
+    ui.on_password_response(move |password, accepted| {
+        if let Some(ui) = weak_for_response.upgrade() {
+            ui.set_password_visible(false);
+        }
+        let password = (accepted && !password.is_empty()).then(|| password.to_string());
+        password_for_response.respond(password);
     });
     let font_family = platform::resolve_font_family(&platform::load_font_preference());
     ui.set_font_family(font_family.into());
@@ -1504,11 +1607,13 @@ fn close_progress_window(ui: &ProgressWindow) {
 fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
     let text = progress_ui_text(snapshot);
     ui.set_progress_file(snapshot.current_file.clone().into());
+    ui.set_progress_file_percent(text.file_percent.into());
     ui.set_progress_percent(text.percent.into());
     ui.set_progress_elapsed(text.elapsed.into());
     ui.set_progress_remaining(text.remaining.into());
     ui.set_progress_total(text.total.into());
     ui.set_progress_detail(text.detail.into());
+    ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
 }
 
@@ -1607,6 +1712,8 @@ fn start_extract_batch_window(
     set_initial_progress_window(ui);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
+    let weak_password = weak.clone();
+    let password_prompt = Arc::clone(&state.password_prompt);
     std::thread::spawn(move || {
         let mut processed = 0usize;
         let mut failures: Vec<(PathBuf, PathBuf, ArchiveError)> = Vec::new();
@@ -1626,25 +1733,47 @@ fn start_extract_batch_window(
                 .get(index)
                 .and_then(|path| path.clone())
                 .unwrap_or_else(|| unique_path(&parent.join(archive_directory_name(archive))));
-            let options = ExtractOptions {
-                selection: ExtractSelection::All,
-                conflict_policy: InitialConflictPolicy::OverwriteAll,
-                ..ExtractOptions::default()
-            };
             let progress = |snapshot: ProgressSnapshot| {
                 update_progress_window_details(&weak_progress, snapshot)
             };
-            match engine.extract(
-                archive,
-                &destination,
-                &options,
-                &progress,
-                &OverwriteAllResolver,
-                &cancel,
-            ) {
-                Ok(_) => processed += 1,
-                Err(ArchiveError::Cancelled) => break,
-                Err(error) => failures.push((archive.clone(), destination, error)),
+            let mut password = None;
+            loop {
+                let options = ExtractOptions {
+                    selection: ExtractSelection::All,
+                    password: password.clone(),
+                    conflict_policy: InitialConflictPolicy::OverwriteAll,
+                    ..ExtractOptions::default()
+                };
+                match engine.extract(
+                    archive,
+                    &destination,
+                    &options,
+                    &progress,
+                    &OverwriteAllResolver,
+                    &cancel,
+                ) {
+                    Ok(_) => {
+                        processed += 1;
+                        break;
+                    }
+                    Err(ArchiveError::PasswordRequired) => {
+                        let Some(next_password) =
+                            password_prompt.wait(&weak_password, archive, &cancel)
+                        else {
+                            cancel.cancel();
+                            break;
+                        };
+                        password = Some(next_password);
+                    }
+                    Err(ArchiveError::Cancelled) => break,
+                    Err(error) => {
+                        failures.push((archive.clone(), destination.clone(), error));
+                        break;
+                    }
+                }
+            }
+            if cancel.is_cancelled() {
+                break;
             }
         }
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -1834,11 +1963,13 @@ fn finish_operation(ui: &AppWindow) {
 fn apply_progress_to(ui: &AppWindow, snapshot: &ProgressSnapshot) {
     let text = progress_ui_text(snapshot);
     ui.set_progress_file(snapshot.current_file.clone().into());
+    ui.set_progress_file_percent(text.file_percent.into());
     ui.set_progress_percent(text.percent.into());
     ui.set_progress_elapsed(text.elapsed.into());
     ui.set_progress_remaining(text.remaining.into());
     ui.set_progress_total(text.total.into());
     ui.set_progress_detail(text.detail.into());
+    ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
 }
 
@@ -1945,6 +2076,27 @@ fn update_folder_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
     }
 }
 
+fn close_archive(ui: &AppWindow, state: &AppState) {
+    state.clear_archive();
+    *state.open_password.lock().expect("password mutex poisoned") = None;
+    *state
+        .pending_password_path
+        .lock()
+        .expect("password-path mutex poisoned") = None;
+    *state
+        .pending_test_password_path
+        .lock()
+        .expect("test-password-path mutex poisoned") = None;
+
+    ui.set_archive_title("".into());
+    ui.set_current_folder("".into());
+    ui.set_has_archive(false);
+    ui.set_can_go_up(false);
+    ui.set_selection_state(0);
+    ui.set_status_text("Archive closed".into());
+    ui.set_summary_text("No archive open".into());
+}
+
 fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
     let display = state.display.borrow();
     let selected = state.selected.borrow();
@@ -2004,11 +2156,13 @@ fn show_ui_error(weak: &slint::Weak<AppWindow>, title: &str, message: String) {
 }
 
 struct ProgressUiText {
+    file_percent: String,
     percent: String,
     elapsed: String,
     remaining: String,
     total: String,
     detail: String,
+    file_value: f32,
     value: f32,
 }
 
@@ -2019,29 +2173,39 @@ fn initial_progress_text() -> ProgressUiText {
 
 fn set_initial_progress(ui: &AppWindow) {
     let text = initial_progress_text();
+    ui.set_progress_file_percent(text.file_percent.into());
     ui.set_progress_percent(text.percent.into());
     ui.set_progress_elapsed(text.elapsed.into());
     ui.set_progress_remaining(text.remaining.into());
     ui.set_progress_total(text.total.into());
     ui.set_progress_detail(text.detail.into());
+    ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
 }
 
 fn set_initial_progress_window(ui: &ProgressWindow) {
     let text = initial_progress_text();
+    ui.set_progress_file_percent(text.file_percent.into());
     ui.set_progress_percent(text.percent.into());
     ui.set_progress_elapsed(text.elapsed.into());
     ui.set_progress_remaining(text.remaining.into());
     ui.set_progress_total(text.total.into());
     ui.set_progress_detail(text.detail.into());
+    ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
 }
 
 fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
+    let file_value = snapshot.current_file_fraction().unwrap_or(-1.0);
     let value = if snapshot.total_bytes.is_some() || snapshot.total_entries.is_some() {
         snapshot.fraction()
     } else {
         -1.0
+    };
+    let file_percent = if file_value < 0.0 {
+        "—%".to_owned()
+    } else {
+        format!("{:.0}%", file_value * 100.0)
     };
     let percent = if value < 0.0 {
         "—%".to_owned()
@@ -2049,6 +2213,7 @@ fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
         format!("{:.0}%", value * 100.0)
     };
     ProgressUiText {
+        file_percent,
         percent,
         elapsed: format!("Elapsed {}", format_duration(Some(snapshot.elapsed))),
         remaining: format!(
@@ -2061,6 +2226,7 @@ fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {
             snapshot.entries_processed,
             compact_bytes(snapshot.bytes_processed)
         ),
+        file_value,
         value,
     }
 }
@@ -2132,11 +2298,15 @@ fn hex(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_directory_name, cli_archive_destination, common_parent_folder, parse_dropped_path,
-        parse_elevated_extract, parse_elevated_output, run_with_startup_argument, unique_path,
+        archive_directory_name, cli_archive_destination, common_parent_folder,
+        create_formats_for_ui, parse_dropped_path, parse_elevated_extract, parse_elevated_output,
+        run_with_startup_argument, unique_path,
     };
     use crate::archive::CreateFormat;
-    use std::{ffi::OsString, path::{Path, PathBuf}};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn strips_compound_archive_extensions() {
@@ -2171,6 +2341,14 @@ mod tests {
         assert_eq!(
             cli_archive_destination(&[PathBuf::from("data/notes.txt")], CreateFormat::SevenZip),
             PathBuf::from("data/notes.7z")
+        );
+    }
+
+    #[test]
+    fn create_formats_for_ui_keeps_only_zip_and_sevenzip() {
+        assert_eq!(
+            create_formats_for_ui(CreateFormat::ALL.to_vec()),
+            vec![CreateFormat::Zip, CreateFormat::SevenZip]
         );
     }
 

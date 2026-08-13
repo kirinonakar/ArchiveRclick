@@ -22,7 +22,15 @@ export struct ArchiveRow {
 component HeaderCell inherits Rectangle {
     in property <string> label;
     in property <int> column-index;
+    in property <length> column-width;
+    in property <bool> resizable: true;
     callback sort(int);
+    callback resize(int, length);
+
+    private property <length> drag-start-width: root.column-width;
+    private property <length> drag-start-x: 0px;
+
+    width: root.column-width;
 
     background: pointer.has-hover ? Palette.control-background : transparent;
     border-radius: 6px;
@@ -39,18 +47,74 @@ component HeaderCell inherits Rectangle {
         font-size: 12px;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.label}");
+        }
     }
 
     pointer := TouchArea {
+        width: parent.width;
+        height: parent.height;
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.sort(root.column-index); }
+    }
+
+    Rectangle {
+        x: parent.width - 1px;
+        y: 5px;
+        width: 1px;
+        height: parent.height - 10px;
+        background: resize-handle.has-hover || resize-handle.pressed
+            ? Palette.accent-background : Palette.border;
+        opacity: resize-handle.has-hover || resize-handle.pressed ? 0.9 : 0.32;
+    }
+
+    resize-handle := TouchArea {
+        enabled: root.resizable;
+        x: max(0px, parent.width - 10px);
+        width: min(10px, parent.width);
+        height: parent.height;
+        mouse-cursor: root.resizable ? MouseCursor.ew-resize : MouseCursor.default;
+
+        pointer-event(event) => {
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+
+            if (event.kind == PointerEventKind.down) {
+                root.drag-start-width = root.column-width;
+                root.drag-start-x = self.x + self.mouse-x;
+            } else if (event.kind == PointerEventKind.move) {
+                root.resize(
+                    root.column-index,
+                    root.drag-start-width + self.x + self.mouse-x - root.drag-start-x
+                );
+            }
+        }
     }
 }
 
 component ArchiveTableHeader inherits Rectangle {
     callback sort(int);
 
-    private property <length> content-width: self.width - 36px;
+    private property <length> content-width: max(1px, self.width - 36px);
+    private property <float> name-boundary: 0.28;
+    private property <float> size-boundary: 0.40;
+    private property <float> packed-boundary: 0.52;
+    private property <float> modified-boundary: 0.70;
+    private property <length> min-name-width: 96px;
+    private property <length> min-size-width: 60px;
+    private property <length> min-packed-width: 60px;
+    private property <length> min-modified-width: 100px;
+    private property <length> min-path-width: 90px;
+
+    out property <length> name-column-width: root.content-width * root.name-boundary;
+    out property <length> size-column-width: root.content-width * (root.size-boundary - root.name-boundary);
+    out property <length> packed-column-width: root.content-width * (root.packed-boundary - root.size-boundary);
+    out property <length> modified-column-width: root.content-width * (root.modified-boundary - root.packed-boundary);
+    out property <length> path-column-width: root.content-width * (1.0 - root.modified-boundary);
+
     height: 30px;
     background: Palette.alternate-background;
     border-radius: 10px;
@@ -70,46 +134,83 @@ component ArchiveTableHeader inherits Rectangle {
 
     HeaderCell {
         x: 36px;
-        width: root.content-width * 0.28;
+        column-width: root.name-column-width;
         height: parent.height;
         label: "Name";
         column-index: 0;
         sort(column) => { root.sort(column); }
+        resize(column, width) => {
+            if (column == 0) {
+                root.name-boundary = clamp(
+                    width / root.content-width,
+                    root.min-name-width / root.content-width,
+                    root.size-boundary - root.min-size-width / root.content-width
+                );
+            }
+        }
     }
 
     HeaderCell {
-        x: 36px + root.content-width * 0.28;
-        width: root.content-width * 0.12;
+        x: 36px + root.name-column-width;
+        column-width: root.size-column-width;
         height: parent.height;
         label: "Size";
         column-index: 1;
         sort(column) => { root.sort(column); }
+        resize(column, width) => {
+            if (column == 1) {
+                root.size-boundary = clamp(
+                    root.name-boundary + width / root.content-width,
+                    root.name-boundary + root.min-size-width / root.content-width,
+                    root.packed-boundary - root.min-packed-width / root.content-width
+                );
+            }
+        }
     }
 
     HeaderCell {
-        x: 36px + root.content-width * 0.40;
-        width: root.content-width * 0.12;
+        x: 36px + root.size-column-width + root.name-column-width;
+        column-width: root.packed-column-width;
         height: parent.height;
         label: "Packed";
         column-index: 2;
         sort(column) => { root.sort(column); }
+        resize(column, width) => {
+            if (column == 2) {
+                root.packed-boundary = clamp(
+                    root.size-boundary + width / root.content-width,
+                    root.size-boundary + root.min-packed-width / root.content-width,
+                    root.modified-boundary - root.min-modified-width / root.content-width
+                );
+            }
+        }
     }
 
     HeaderCell {
-        x: 36px + root.content-width * 0.52;
-        width: root.content-width * 0.18;
+        x: 36px + root.packed-column-width + root.size-column-width + root.name-column-width;
+        column-width: root.modified-column-width;
         height: parent.height;
         label: "Modified";
         column-index: 3;
         sort(column) => { root.sort(column); }
+        resize(column, width) => {
+            if (column == 3) {
+                root.modified-boundary = clamp(
+                    root.packed-boundary + width / root.content-width,
+                    root.packed-boundary + root.min-modified-width / root.content-width,
+                    1.0 - root.min-path-width / root.content-width
+                );
+            }
+        }
     }
 
     HeaderCell {
-        x: 36px + root.content-width * 0.70;
-        width: root.content-width * 0.30;
+        x: 36px + root.modified-column-width + root.packed-column-width + root.size-column-width + root.name-column-width;
+        column-width: root.path-column-width;
         height: parent.height;
         label: "Path";
         column-index: 4;
+        resizable: false;
         sort(column) => { root.sort(column); }
     }
 }
@@ -118,12 +219,16 @@ component ArchiveListRow inherits Rectangle {
     in property <ArchiveRow> entry;
     in property <int> row-index;
     in property <int> language-index;
+    in property <length> name-column-width;
+    in property <length> size-column-width;
+    in property <length> packed-column-width;
+    in property <length> modified-column-width;
+    in property <length> path-column-width;
     in property <bool> context-menu-enabled: true;
     callback toggle(int);
     callback activate(int);
     callback extract-context(int);
 
-    private property <length> content-width: self.width - 36px;
     height: 28px;
     background: root.entry.selected ? Palette.selection-background
         : row-pointer.has-hover ? Palette.control-background : transparent;
@@ -144,57 +249,77 @@ component ArchiveListRow inherits Rectangle {
         toggled => { root.toggle(root.row-index); }
     }
 
-    Text {
+    name-text := Text {
         x: 40px;
-        width: root.content-width * 0.28 - 4px;
+        width: root.name-column-width - 4px;
         height: parent.height;
         text: root.entry.name;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
         font-weight: root.entry.is-folder ? 600 : 400;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.entry.name}");
+        }
     }
 
-    Text {
-        x: 36px + root.content-width * 0.28 + 6px;
-        width: root.content-width * 0.12 - 12px;
+    size-text := Text {
+        x: 36px + root.name-column-width + 6px;
+        width: root.size-column-width - 12px;
         height: parent.height;
         text: root.entry.size;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
         horizontal-alignment: right;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.entry.size}");
+        }
     }
 
-    Text {
-        x: 36px + root.content-width * 0.40 + 6px;
-        width: root.content-width * 0.12 - 12px;
+    packed-text := Text {
+        x: 36px + root.name-column-width + root.size-column-width + 6px;
+        width: root.packed-column-width - 12px;
         height: parent.height;
         text: root.entry.packed;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
         horizontal-alignment: right;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.entry.packed}");
+        }
     }
 
-    Text {
-        x: 36px + root.content-width * 0.52 + 8px;
-        width: root.content-width * 0.18 - 16px;
+    modified-text := Text {
+        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + 8px;
+        width: root.modified-column-width - 16px;
         height: parent.height;
         text: root.entry.modified;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.entry.modified}");
+        }
     }
 
-    Text {
-        x: 36px + root.content-width * 0.70 + 8px;
-        width: root.content-width * 0.30 - 16px;
+    path-text := Text {
+        x: 36px + root.name-column-width + root.size-column-width + root.packed-column-width + root.modified-column-width + 8px;
+        width: root.path-column-width - 16px;
         height: parent.height;
         text: root.entry.path;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
         vertical-alignment: center;
         overflow: elide;
+
+        if self.preferred-width > self.width : Tooltip {
+            text: @markdown("\{root.entry.path}");
+        }
     }
 
     row-pointer := TouchArea {
@@ -278,11 +403,13 @@ export component AppWindow inherits Window {
     in-out property <bool> progress-visible;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
+    in-out property <string> progress-file-percent;
     in-out property <string> progress-percent;
     in-out property <string> progress-elapsed;
     in-out property <string> progress-remaining;
     in-out property <string> progress-total;
     in-out property <string> progress-detail;
+    in-out property <float> progress-file-value;
     in-out property <float> progress-value;
 
     in-out property <bool> conflict-visible;
@@ -313,6 +440,7 @@ export component AppWindow inherits Window {
     in-out property <string> context-menu-state;
 
     callback open-requested();
+    callback close-archive-requested();
     callback up-requested();
     callback toggle-selection(int);
     callback select-all-requested(bool);
@@ -325,7 +453,7 @@ export component AppWindow inherits Window {
     callback prepare-create-requested();
     callback choose-create-files-requested();
     callback choose-create-folder-requested();
-    callback create-requested(int, int, int, string);
+    callback create-requested(int, int, int, string, string);
     callback test-requested();
     callback cancel-requested();
     callback conflict-response(int);
@@ -440,6 +568,13 @@ export component AppWindow inherits Window {
                         }
 
                         IconToolButton {
+                            glyph: "\u{E8BB}";
+                            label: root.language-selection == 1 ? "압축파일 닫기" : root.language-selection == 2 ? "アーカイブを閉じる" : "Close archive";
+                            enabled: root.has-archive && !root.busy && !root.password-visible;
+                            clicked => { root.close-archive-requested(); }
+                        }
+
+                        IconToolButton {
                             glyph: "\u{E896}";
                             label: root.language-selection == 1 ? "압축 풀기" : root.language-selection == 2 ? "展開" : "Extract";
                             enabled: root.has-archive && !root.busy;
@@ -455,13 +590,6 @@ export component AppWindow inherits Window {
                             label: root.language-selection == 1 ? "압축하기" : root.language-selection == 2 ? "圧縮" : "Compress";
                             enabled: !root.busy;
                             clicked => { root.prepare-create-requested(); }
-                        }
-
-                        IconToolButton {
-                            glyph: "\u{E73E}";
-                            label: root.language-selection == 1 ? "테스트" : root.language-selection == 2 ? "テスト" : "Test";
-                            enabled: root.has-archive && !root.busy;
-                            clicked => { root.test-requested(); }
                         }
 
                         Rectangle { horizontal-stretch: 1; }
@@ -611,7 +739,7 @@ export component AppWindow inherits Window {
                             VerticalLayout {
                                 spacing: 0px;
 
-                                ArchiveTableHeader {
+                                archive-header := ArchiveTableHeader {
                                     sort(column) => { root.sort-requested(column); }
                                 }
 
@@ -625,6 +753,11 @@ export component AppWindow inherits Window {
                                         entry: row;
                                         row-index: index;
                                         language-index: root.language-selection;
+                                        name-column-width: archive-header.name-column-width;
+                                        size-column-width: archive-header.size-column-width;
+                                        packed-column-width: archive-header.packed-column-width;
+                                        modified-column-width: archive-header.modified-column-width;
+                                        path-column-width: archive-header.path-column-width;
                                         context-menu-enabled: !root.busy;
                                         toggle(row-index) => { root.toggle-selection(row-index); }
                                         activate(row-index) => { root.activate-row(row-index); }
@@ -738,9 +871,9 @@ export component AppWindow inherits Window {
         thread-selection: root.create-thread-selection;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
-        accepted(format-index, level, thread-index, password) => {
+        accepted(format-index, level, thread-index, password, password-confirmation) => {
             root.create-visible = false;
-            root.create-requested(format-index, level, thread-index, password);
+            root.create-requested(format-index, level, thread-index, password, password-confirmation);
         }
         cancelled => { root.create-visible = false; }
     }
@@ -748,11 +881,13 @@ export component AppWindow inherits Window {
     if root.progress-visible : ProgressOverlay {
         operation-title: root.progress-title;
         current-file: root.progress-file;
+        progress-file-percent: root.progress-file-percent;
         progress-percent: root.progress-percent;
         progress-elapsed: root.progress-elapsed;
         progress-remaining: root.progress-remaining;
         progress-total: root.progress-total;
         detail: root.progress-detail;
+        file-value: root.progress-file-value;
         value: root.progress-value;
         cancelled => { root.cancel-requested(); }
     }

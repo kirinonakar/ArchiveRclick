@@ -19,7 +19,7 @@ mod platform_impl {
 
     use std::{
         cell::Cell,
-        collections::{HashSet, VecDeque},
+        collections::{BTreeMap, HashSet, VecDeque},
         env,
         ffi::c_void,
         fs::{self, File, OpenOptions},
@@ -48,6 +48,7 @@ mod platform_impl {
 
     use crate::tasks::{CancellationToken, ProgressPhase, ProgressSnapshot, ThrottledProgress};
 
+    use super::super::encoding;
     use super::super::libarchive::LibArchiveEngine;
     use super::super::{
         ArchiveEngine, ArchiveEntry, ArchiveEntryKind, ArchiveError, ArchiveListing, ArchiveResult,
@@ -272,6 +273,7 @@ mod platform_impl {
     unsafe extern "system" {
         fn SysAllocString(value: *const u16) -> *mut u16;
         fn SysFreeString(value: *mut u16);
+        fn SysStringByteLen(value: *const u16) -> u32;
     }
 
     #[repr(C)]
@@ -374,6 +376,17 @@ mod platform_impl {
             Some(String::from_utf16_lossy(units))
         }
 
+        fn as_guid(&self) -> Option<Guid> {
+            if self.vt != VT_BSTR || self.payload == 0 {
+                return None;
+            }
+            // GetHandlerProperty2 returns the class ID as a binary BSTR, so
+            // it may contain embedded NULs and cannot use `as_bstr`.
+            let length = unsafe { SysStringByteLen(self.payload as *const u16) } as usize;
+            (length >= mem::size_of::<Guid>())
+                .then(|| unsafe { ptr::read_unaligned(self.payload as *const Guid) })
+        }
+
         fn as_filetime_seconds(&self) -> Option<i64> {
             (self.vt == VT_FILETIME).then(|| filetime_to_unix_seconds(self.payload))
         }
@@ -395,6 +408,33 @@ mod platform_impl {
         wide.push(0);
         // SAFETY: `wide` is NUL-terminated and stays alive for the call.
         unsafe { SysAllocString(wide.as_ptr()) }
+    }
+
+    /// Supplies a password to 7-Zip's `ICryptoGetTextPassword` callback.
+    ///
+    /// A missing password must be reported as a failed callback, not as a
+    /// successful callback containing an empty BSTR.  Returning `S_OK` with
+    /// an empty string makes 7-Zip continue as if an empty password had been
+    /// supplied; encrypted archives can then re-enter the callback/error
+    /// path in native code and destabilize the host process.  `E_ABORT` is the
+    /// HRESULT used by the 7-Zip SDK examples when no password is available.
+    fn write_password_bstr(password: *mut *mut u16, value: Option<&str>) -> i32 {
+        if password.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: the caller supplied a valid out-parameter.
+        unsafe { *password = ptr::null_mut() };
+
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            return E_ABORT;
+        };
+        let allocated = sys_alloc_string(value);
+        if allocated.is_null() {
+            return E_FAIL;
+        }
+        // SAFETY: `allocated` is a valid BSTR returned by SysAllocString.
+        unsafe { *password = allocated };
+        S_OK
     }
 
     fn unix_seconds_to_filetime(seconds: i64) -> u64 {
@@ -1075,10 +1115,6 @@ mod platform_impl {
         this: *mut c_void,
         password: *mut *mut u16,
     ) -> i32 {
-        if password.is_null() {
-            return E_INVALIDARG;
-        }
-        unsafe { *password = ptr::null_mut() };
         let base = unsafe {
             this.cast::<u8>()
                 .sub(mem::offset_of!(OpenCallback, crypto_vtbl))
@@ -1091,8 +1127,7 @@ mod platform_impl {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
-        unsafe { *password = sys_alloc_string(value.as_deref().unwrap_or("")) };
-        S_OK
+        write_password_bstr(password, value.as_deref())
     }
 
     /// `this` points at the `crypto_vtbl` field of the owning ExtractCallback.
@@ -1102,10 +1137,6 @@ mod platform_impl {
         this: *mut c_void,
         password: *mut *mut u16,
     ) -> i32 {
-        if password.is_null() {
-            return E_INVALIDARG;
-        }
-        unsafe { *password = ptr::null_mut() };
         let base = unsafe {
             this.cast::<u8>()
                 .sub(mem::offset_of!(ExtractCallback, crypto_vtbl))
@@ -1119,8 +1150,7 @@ mod platform_impl {
         context.password_requested = true;
         let value = context.password.clone();
         drop(context);
-        unsafe { *password = sys_alloc_string(value.as_deref().unwrap_or("")) };
-        S_OK
+        write_password_bstr(password, value.as_deref())
     }
 
     // --- IArchiveExtractCallback + ICryptoGetTextPassword ---------------
@@ -1211,6 +1241,7 @@ mod platform_impl {
         conflicts: &'static dyn ConflictResolver,
         password: Option<String>,
         password_requested: bool,
+        current_file_base_bytes: u64,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         pending: VecDeque<PendingFile>,
@@ -1291,7 +1322,17 @@ mod platform_impl {
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            context.snapshot.bytes_processed = unsafe { *complete };
+            let bytes_processed = unsafe { *complete };
+            context.snapshot.bytes_processed = bytes_processed;
+            let current_file_bytes = if bytes_processed >= context.current_file_base_bytes {
+                bytes_processed - context.current_file_base_bytes
+            } else {
+                bytes_processed
+            };
+            context.snapshot.current_file_bytes_processed = context
+                .snapshot
+                .current_file_total_bytes
+                .map_or(current_file_bytes, |total| current_file_bytes.min(total));
             context.snapshot.clone()
         };
         callback.progress.report(snapshot, false);
@@ -1332,6 +1373,9 @@ mod platform_impl {
             return S_OK;
         };
         context.snapshot.current_file.clone_from(&item.display_path);
+        context.snapshot.current_file_total_bytes = if item.is_dir { Some(0) } else { item.size };
+        context.snapshot.current_file_bytes_processed = 0;
+        context.current_file_base_bytes = context.snapshot.bytes_processed;
         if context.test_mode {
             return S_OK;
         }
@@ -1524,6 +1568,8 @@ mod platform_impl {
         context.summary.entries_processed += 1;
         context.summary.bytes_processed =
             context.summary.bytes_processed.saturating_add(pending.size);
+        context.snapshot.current_file_total_bytes = Some(pending.size);
+        context.snapshot.current_file_bytes_processed = pending.size;
         context.snapshot.entries_processed = context.summary.entries_processed;
         context.snapshot.bytes_processed = context.summary.bytes_processed;
         let snapshot = context.snapshot.clone();
@@ -1594,6 +1640,7 @@ mod platform_impl {
     struct UpdateContext {
         total_bytes: u64,
         password: Option<String>,
+        current_file_base_bytes: u64,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         error: Option<ArchiveError>,
@@ -1673,6 +1720,15 @@ mod platform_impl {
             // OperationSummary.
             let bytes_processed = unsafe { (*complete).min(context.total_bytes) };
             context.snapshot.bytes_processed = bytes_processed;
+            let current_file_bytes = if bytes_processed >= context.current_file_base_bytes {
+                bytes_processed - context.current_file_base_bytes
+            } else {
+                bytes_processed
+            };
+            context.snapshot.current_file_bytes_processed = context
+                .snapshot
+                .current_file_total_bytes
+                .map_or(current_file_bytes, |total| current_file_bytes.min(total));
             context.summary.bytes_processed = context.summary.bytes_processed.max(bytes_processed);
             context.snapshot.clone()
         };
@@ -1694,6 +1750,16 @@ mod platform_impl {
         let Some(item) = callback.items.get(index as usize) else {
             return E_INVALIDARG;
         };
+        {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            context.snapshot.current_file.clone_from(&item.archive_name);
+            context.snapshot.current_file_total_bytes = Some(item.size);
+            context.snapshot.current_file_bytes_processed = 0;
+            context.current_file_base_bytes = context.snapshot.bytes_processed;
+        }
         unsafe {
             *new_data = i32::from(item.kind == SourceKind::File);
             *new_properties = 1;
@@ -1753,6 +1819,9 @@ mod platform_impl {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             context.snapshot.current_file.clone_from(&item.archive_name);
+            context.snapshot.current_file_total_bytes = Some(item.size);
+            context.snapshot.current_file_bytes_processed = 0;
+            context.current_file_base_bytes = context.snapshot.bytes_processed;
         }
         if item.kind == SourceKind::Directory {
             return S_OK;
@@ -1810,6 +1879,8 @@ mod platform_impl {
             return E_ABORT;
         }
         context.summary.entries_processed += 1;
+        context.snapshot.current_file_bytes_processed =
+            context.snapshot.current_file_total_bytes.unwrap_or(0);
         context.snapshot.entries_processed = context.summary.entries_processed;
         let snapshot = context.snapshot.clone();
         drop(context);
@@ -1964,17 +2035,62 @@ mod platform_impl {
     // ------------------------------------------------------------------
     type CreateObjectFn =
         unsafe extern "system" fn(*const Guid, *const Guid, *mut *mut c_void) -> i32;
+    type GetNumberOfFormatsFn = unsafe extern "system" fn(*mut u32) -> i32;
+    type GetHandlerProperty2Fn = unsafe extern "system" fn(u32, u32, *mut PropVariant) -> i32;
+
+    const HANDLER_PROPERTY_NAME: u32 = 0;
+    const HANDLER_PROPERTY_CLASS_ID: u32 = 1;
 
     struct Api {
         _library: DynamicLibrary,
         create_object: CreateObjectFn,
+        zip_clsid: Guid,
         zip_reader_available: bool,
         zip_writer_available: bool,
+    }
+
+    fn discover_handler_clsid(library: &DynamicLibrary, expected_name: &str) -> Option<Guid> {
+        let number_address = library.symbol(b"GetNumberOfFormats\0")?;
+        let property_address = library.symbol(b"GetHandlerProperty2\0")?;
+        // SAFETY: both symbols are the documented 7-Zip plugin API exports.
+        let get_number: GetNumberOfFormatsFn = unsafe { mem::transmute(number_address) };
+        let get_property: GetHandlerProperty2Fn = unsafe { mem::transmute(property_address) };
+        let mut count = 0u32;
+        if unsafe { get_number(&mut count) } != S_OK || count > 1024 {
+            return None;
+        }
+
+        for index in 0..count {
+            let mut name = PropVariant::empty();
+            let name_result = unsafe { get_property(index, HANDLER_PROPERTY_NAME, &mut name) };
+            let matches = name_result == S_OK
+                && name
+                    .as_bstr()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(expected_name));
+            name.clear();
+            if !matches {
+                continue;
+            }
+
+            let mut class_id = PropVariant::empty();
+            let result = unsafe { get_property(index, HANDLER_PROPERTY_CLASS_ID, &mut class_id) };
+            let value = (result == S_OK).then(|| class_id.as_guid()).flatten();
+            class_id.clear();
+            if value.is_some() {
+                return value;
+            }
+        }
+        None
     }
 
     impl Api {
         fn from_library(library: DynamicLibrary) -> ArchiveResult<Self> {
             let create_object = required_symbol!(library, "CreateObject", CreateObjectFn);
+            // The format IDs are normally stable, but 7-Zip explicitly
+            // exposes the registered class IDs through its plugin API.  Use
+            // that value so the same 7z.dll build is used for ZIP as for 7z,
+            // including builds whose handler ordering or IDs differ.
+            let zip_clsid = discover_handler_clsid(&library, "zip").unwrap_or(CLSID_C_FORMAT_ZIP);
             // Probe the handler: CreateObject must return a live 7z reader.
             let mut probe: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
@@ -1994,9 +2110,8 @@ mod platform_impl {
             let mut zip_reader_probe: *mut c_void = ptr::null_mut();
             // ZIP reading is optional for development builds that stage a
             // reduced 7z-only DLL. The bundled runtime exposes both readers.
-            let zip_reader_hr = unsafe {
-                create_object(&CLSID_C_FORMAT_ZIP, &IID_IIN_ARCHIVE, &mut zip_reader_probe)
-            };
+            let zip_reader_hr =
+                unsafe { create_object(&zip_clsid, &IID_IIN_ARCHIVE, &mut zip_reader_probe) };
             let zip_reader_available = zip_reader_hr == S_OK && !zip_reader_probe.is_null();
             if zip_reader_available {
                 // SAFETY: the probe is a live IInArchive interface returned
@@ -2007,8 +2122,7 @@ mod platform_impl {
             let mut zip_probe: *mut c_void = ptr::null_mut();
             // ZIP creation is optional because development builds may stage a
             // 7z-only DLL.  The normal bundled runtime is the full DLL.
-            let zip_hr =
-                unsafe { create_object(&CLSID_C_FORMAT_ZIP, &IID_IOUT_ARCHIVE, &mut zip_probe) };
+            let zip_hr = unsafe { create_object(&zip_clsid, &IID_IOUT_ARCHIVE, &mut zip_probe) };
             let zip_writer_available = zip_hr == S_OK && !zip_probe.is_null();
             if zip_writer_available {
                 // SAFETY: the probe is a live IOutArchive interface returned
@@ -2019,6 +2133,7 @@ mod platform_impl {
             Ok(Self {
                 _library: library,
                 create_object,
+                zip_clsid,
                 zip_reader_available,
                 zip_writer_available,
             })
@@ -2027,7 +2142,7 @@ mod platform_impl {
         fn create_in_archive(&self, format: CreateFormat) -> ArchiveResult<RawInArchive> {
             let clsid = match format {
                 CreateFormat::SevenZip => &CLSID_C_FORMAT_7Z,
-                CreateFormat::Zip => &CLSID_C_FORMAT_ZIP,
+                CreateFormat::Zip => &self.zip_clsid,
                 _ => {
                     return Err(ArchiveError::UnsupportedOption(format!(
                         "7z.dll cannot read {} archives",
@@ -2053,7 +2168,7 @@ mod platform_impl {
         fn create_out_archive(&self, format: CreateFormat) -> ArchiveResult<RawOutArchive> {
             let clsid = match format {
                 CreateFormat::SevenZip => &CLSID_C_FORMAT_7Z,
-                CreateFormat::Zip => &CLSID_C_FORMAT_ZIP,
+                CreateFormat::Zip => &self.zip_clsid,
                 _ => {
                     return Err(ArchiveError::UnsupportedOption(format!(
                         "7z.dll cannot create {} archives",
@@ -2140,10 +2255,11 @@ mod platform_impl {
         path: &Path,
         format: CreateFormat,
         password: Option<&str>,
+        pathname_codepage: u32,
         throttled: &ThrottledProgress,
         cancel: &CancellationToken,
     ) -> ArchiveResult<(OpenArchive, Vec<ArchiveEntry>)> {
-        let open_archive = open_for_read(api, path, format, password, cancel)?;
+        let open_archive = open_for_read(api, path, format, password, pathname_codepage, cancel)?;
         let entries = read_entries(
             &open_archive.in_archive,
             ProgressPhase::Opening,
@@ -2159,6 +2275,7 @@ mod platform_impl {
         archive: &Path,
         format: CreateFormat,
         password: Option<&str>,
+        pathname_codepage: u32,
         root: PathBuf,
         items: Arc<Vec<ExtractItem>>,
         selected: Arc<HashSet<u32>>,
@@ -2171,7 +2288,8 @@ mod platform_impl {
         policy: RuntimePolicy,
         assume_targets_missing: bool,
     ) -> ArchiveResult<OperationSummary> {
-        let open_archive = open_for_read(api, archive, format, password, &cancel)?;
+        let open_archive =
+            open_for_read(api, archive, format, password, pathname_codepage, &cancel)?;
         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
         snapshot.total_entries = Some(total_entries);
         snapshot.total_bytes = total_bytes;
@@ -2185,6 +2303,7 @@ mod platform_impl {
             conflicts,
             password: password.map(str::to_owned),
             password_requested: false,
+            current_file_base_bytes: 0,
             snapshot,
             summary: OperationSummary::default(),
             pending: VecDeque::new(),
@@ -2229,6 +2348,12 @@ mod platform_impl {
         // files left in the pending queue by cancellation or failure.
         cleanup_pending_temp_files(&callback);
 
+        // If 7-Zip requested a password while none was supplied, preserve the
+        // retryable password error even when the native callback also reported
+        // a generic extraction error.
+        if password_requested && !password.is_some_and(|value| !value.is_empty()) {
+            return Err(ArchiveError::PasswordRequired);
+        }
         if let Some(error) = error {
             return Err(error);
         }
@@ -2251,6 +2376,7 @@ mod platform_impl {
         api: Arc<Api>,
         archive: &Path,
         password: Option<&str>,
+        pathname_codepage: u32,
         root: PathBuf,
         items: Arc<Vec<ExtractItem>>,
         indices: &[u32],
@@ -2275,6 +2401,7 @@ mod platform_impl {
                 archive,
                 CreateFormat::Zip,
                 password,
+                pathname_codepage,
                 root,
                 items,
                 Arc::new(indices.iter().copied().collect()),
@@ -2307,6 +2434,7 @@ mod platform_impl {
                     &archive,
                     CreateFormat::Zip,
                     password.as_deref(),
+                    pathname_codepage,
                     root,
                     items,
                     selected,
@@ -2376,7 +2504,7 @@ mod platform_impl {
             &self,
             path: &Path,
             password: Option<&str>,
-            _pathname_codepage: u32,
+            pathname_codepage: u32,
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
@@ -2393,8 +2521,23 @@ mod platform_impl {
                     "7z.dll could not identify the archive format".to_owned(),
                 )
             })?;
-            let (open_archive, mut entries) =
-                read_all_entries(&self.api, path, format, password, &throttled, cancel)?;
+            let zip_name_records = if format == CreateFormat::Zip {
+                read_zip_name_records(path)?
+            } else {
+                None
+            };
+            let pathname_codepage =
+                effective_zip_codepage(format, pathname_codepage, zip_name_records.as_deref());
+            let (open_archive, mut entries) = read_all_entries(
+                &self.api,
+                path,
+                format,
+                password,
+                pathname_codepage,
+                &throttled,
+                cancel,
+            )?;
+            apply_zip_name_records(&mut entries, zip_name_records.as_deref(), pathname_codepage)?;
             let mut archive_encrypted = false;
             let mut archive_prop = PropVariant::empty();
             let hr = open_archive
@@ -2475,20 +2618,32 @@ mod platform_impl {
                     "7z.dll could not identify the archive format".to_owned(),
                 )
             })?;
+            let zip_name_records = if format == CreateFormat::Zip {
+                read_zip_name_records(archive)?
+            } else {
+                None
+            };
+            let pathname_codepage = effective_zip_codepage(
+                format,
+                options.pathname_codepage,
+                zip_name_records.as_deref(),
+            );
             let open_archive = open_for_read(
                 &self.api,
                 archive,
                 format,
                 options.password.as_deref(),
+                pathname_codepage,
                 cancel,
             )?;
-            let entries = read_entries(
+            let mut entries = read_entries(
                 &open_archive.in_archive,
                 ProgressPhase::Extracting,
                 &throttled,
                 cancel,
                 false,
             )?;
+            apply_zip_name_records(&mut entries, zip_name_records.as_deref(), pathname_codepage)?;
             open_archive.in_archive.close_now();
             drop(open_archive);
 
@@ -2562,6 +2717,7 @@ mod platform_impl {
                         Arc::clone(&self.api),
                         archive,
                         options.password.as_deref(),
+                        pathname_codepage,
                         root,
                         Arc::clone(&items),
                         &indices,
@@ -2577,6 +2733,7 @@ mod platform_impl {
                         archive,
                         format,
                         options.password.as_deref(),
+                        pathname_codepage,
                         root,
                         items,
                         selected,
@@ -2701,6 +2858,7 @@ mod platform_impl {
                         let context = Arc::new(Mutex::new(UpdateContext {
                             total_bytes,
                             password: options.password.clone(),
+                            current_file_base_bytes: 0,
                             snapshot,
                             summary: OperationSummary::default(),
                             error: None,
@@ -2804,7 +2962,7 @@ mod platform_impl {
                     "7z.dll could not identify the archive format".to_owned(),
                 )
             })?;
-            let open_archive = open_for_read(&self.api, archive, format, password, cancel)?;
+            let open_archive = open_for_read(&self.api, archive, format, password, 0, cancel)?;
             let entries = read_entries(
                 &open_archive.in_archive,
                 ProgressPhase::Testing,
@@ -2843,6 +3001,7 @@ mod platform_impl {
                 conflicts: resolver,
                 password: password.map(str::to_owned),
                 password_requested: false,
+                current_file_base_bytes: 0,
                 snapshot,
                 summary: OperationSummary::default(),
                 pending: VecDeque::new(),
@@ -2851,7 +3010,7 @@ mod platform_impl {
             }));
             let callback = ExtractCallback {
                 vtbl: &EXTRACT_VTBL,
-                crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD_VTBL,
+                crypto_vtbl: &EXTRACT_CRYPTO_VTBL,
                 refs: AtomicU32::new(1),
                 items,
                 selected,
@@ -2874,6 +3033,9 @@ mod platform_impl {
             let mut snapshot = context.snapshot.clone();
             drop(context);
             open_archive.in_archive.close_now();
+            if password_requested && !password.is_some_and(|value| !value.is_empty()) {
+                return Err(ArchiveError::PasswordRequired);
+            }
             if let Some(error) = error {
                 return Err(error);
             }
@@ -2911,7 +3073,8 @@ mod platform_impl {
 
     // ------------------------------------------------------------------
     // Composite engine: 7z/ZIP read and creation -> 7z.dll when available;
-    // libarchive handles ZIP as a fallback and all other formats.
+    // libarchive handles all other formats and remains the fallback when the
+    // optional 7z DLL is unavailable.
     // ------------------------------------------------------------------
     pub struct CompositeEngine {
         libarchive: LibArchiveEngine,
@@ -3062,6 +3225,335 @@ mod platform_impl {
         None
     }
 
+    const ZIP_EOCD_SIGNATURE: u32 = 0x0605_4B50;
+    const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4B50;
+    const ZIP64_LOCATOR_SIGNATURE: u32 = 0x0706_4B50;
+    const ZIP_CENTRAL_SIGNATURE: u32 = 0x0201_4B50;
+    const ZIP_EOCD_SIZE: usize = 22;
+    const ZIP_MAX_COMMENT_SIZE: u64 = 65_535;
+
+    struct ZipNameRecord {
+        raw_name: Vec<u8>,
+        flags: u16,
+        unicode_name: Option<String>,
+    }
+
+    struct ZipDirectoryLayout {
+        entries: u64,
+        offset: u64,
+        size: u64,
+    }
+
+    /// Determines the code page used for legacy ZIP names.  The ZIP format
+    /// does not declare a code page for names without the UTF-8 flag, so
+    /// automatic mode samples the raw central-directory names with the
+    /// detector shared by the libarchive backend.
+    fn effective_zip_codepage(
+        format: CreateFormat,
+        requested: u32,
+        records: Option<&[ZipNameRecord]>,
+    ) -> u32 {
+        if format != CreateFormat::Zip || requested != 0 {
+            return requested;
+        }
+        records.map(detect_zip_codepage).unwrap_or(0)
+    }
+
+    fn detect_zip_codepage(records: &[ZipNameRecord]) -> u32 {
+        let mut weights = BTreeMap::<u32, u64>::new();
+        for record in records {
+            if record.flags & 0x0800 != 0 || record.unicode_name.is_some() {
+                continue;
+            }
+            let detected = encoding::detect(&record.raw_name);
+            if matches!(
+                detected,
+                encoding::DetectedEncoding::Utf8
+                    | encoding::DetectedEncoding::Utf16Le
+                    | encoding::DetectedEncoding::Utf16Be
+            ) {
+                continue;
+            }
+            let weight = record
+                .raw_name
+                .iter()
+                .filter(|byte| **byte >= 0x80)
+                .count()
+                .max(1) as u64;
+            *weights.entry(detected.codepage()).or_default() += weight;
+        }
+
+        weights
+            .into_iter()
+            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
+            .map(|(codepage, _)| codepage)
+            .unwrap_or(0)
+    }
+
+    fn read_zip_name_records(path: &Path) -> ArchiveResult<Option<Vec<ZipNameRecord>>> {
+        let mut file = File::open(path).map_err(|error| ArchiveError::io(path, error))?;
+        let file_length = file
+            .metadata()
+            .map_err(|error| ArchiveError::io(path, error))?
+            .len();
+        if file_length < ZIP_EOCD_SIZE as u64 {
+            return Ok(None);
+        }
+
+        let tail_length = file_length.min(ZIP_EOCD_SIZE as u64 + ZIP_MAX_COMMENT_SIZE);
+        file.seek(SeekFrom::Start(file_length - tail_length))
+            .map_err(|error| ArchiveError::io(path, error))?;
+        let mut tail = Vec::with_capacity(tail_length as usize);
+        file.read_to_end(&mut tail)
+            .map_err(|error| ArchiveError::io(path, error))?;
+        let Some(eocd_index) = find_zip_eocd(&tail) else {
+            return Ok(None);
+        };
+        let eocd_offset = file_length - tail_length + eocd_index as u64;
+        let Some(layout) =
+            zip_directory_layout(&mut file, file_length, eocd_offset, &tail[eocd_index..])?
+        else {
+            return Ok(None);
+        };
+        if layout.entries > MAX_LIST_ENTRIES
+            || layout
+                .offset
+                .checked_add(layout.size)
+                .is_none_or(|end| end > file_length)
+        {
+            return Ok(None);
+        }
+
+        file.seek(SeekFrom::Start(layout.offset))
+            .map_err(|error| ArchiveError::io(path, error))?;
+        let mut records = Vec::with_capacity(layout.entries as usize);
+        let mut consumed = 0u64;
+        for _ in 0..layout.entries {
+            if layout.size.saturating_sub(consumed) < 46 {
+                return Ok(None);
+            }
+            let mut header = [0u8; 46];
+            file.read_exact(&mut header)
+                .map_err(|error| ArchiveError::io(path, error))?;
+            consumed += 46;
+            if read_u32(&header, 0) != Some(ZIP_CENTRAL_SIGNATURE) {
+                return Ok(None);
+            }
+
+            let flags = read_u16(&header, 8).unwrap_or(0);
+            let name_length = u64::from(read_u16(&header, 28).unwrap_or(0));
+            let extra_length = u64::from(read_u16(&header, 30).unwrap_or(0));
+            let comment_length = u64::from(read_u16(&header, 32).unwrap_or(0));
+            let variable_length = name_length
+                .checked_add(extra_length)
+                .and_then(|length| length.checked_add(comment_length))
+                .ok_or_else(|| {
+                    ArchiveError::LimitExceeded("ZIP central-directory length overflow".to_owned())
+                })?;
+            if variable_length > layout.size.saturating_sub(consumed) {
+                return Ok(None);
+            }
+
+            let mut raw_name = vec![0u8; name_length as usize];
+            file.read_exact(&mut raw_name)
+                .map_err(|error| ArchiveError::io(path, error))?;
+            let mut extra = vec![0u8; extra_length as usize];
+            file.read_exact(&mut extra)
+                .map_err(|error| ArchiveError::io(path, error))?;
+            if comment_length > 0 {
+                file.seek(SeekFrom::Current(comment_length as i64))
+                    .map_err(|error| ArchiveError::io(path, error))?;
+            }
+            consumed += variable_length;
+            records.push(ZipNameRecord {
+                unicode_name: unicode_path_extra(&raw_name, &extra),
+                raw_name,
+                flags,
+            });
+        }
+
+        Some(records)
+            .filter(|records| records.len() as u64 == layout.entries)
+            .map_or(Ok(None), |records| Ok(Some(records)))
+    }
+
+    fn decode_zip_name(record: &ZipNameRecord, codepage: u32) -> Option<String> {
+        if let Some(unicode_name) = &record.unicode_name {
+            return Some(unicode_name.clone());
+        }
+        if record.flags & 0x0800 != 0 {
+            return Some(String::from_utf8_lossy(&record.raw_name).into_owned());
+        }
+        encoding::decode_name_with_codepage(&record.raw_name, codepage)
+    }
+
+    fn apply_zip_name_records(
+        entries: &mut [ArchiveEntry],
+        records: Option<&[ZipNameRecord]>,
+        codepage: u32,
+    ) -> ArchiveResult<()> {
+        let Some(records) = records.filter(|records| records.len() == entries.len()) else {
+            return Ok(());
+        };
+
+        let mut total_path_bytes = 0u64;
+        for (entry, record) in entries.iter_mut().zip(records) {
+            let Some(display_path) = decode_zip_name(record, codepage) else {
+                continue;
+            };
+            let Ok(path) = build_path(&display_path) else {
+                continue;
+            };
+            total_path_bytes = checked_add_with_limit(
+                total_path_bytes,
+                (display_path.encode_utf16().count() as u64).saturating_mul(2),
+                MAX_LIST_PATH_BYTES,
+                "7z ZIP listing pathname metadata",
+            )?;
+            entry.path = path;
+            entry.display_path = display_path;
+        }
+        Ok(())
+    }
+
+    fn find_zip_eocd(tail: &[u8]) -> Option<usize> {
+        if tail.len() < ZIP_EOCD_SIZE {
+            return None;
+        }
+        (0..=tail.len() - ZIP_EOCD_SIZE).rev().find(|&index| {
+            read_u32(tail, index) == Some(ZIP_EOCD_SIGNATURE)
+                && read_u16(tail, index + 20).is_some_and(|comment_length| {
+                    index + ZIP_EOCD_SIZE + usize::from(comment_length) <= tail.len()
+                })
+        })
+    }
+
+    fn zip_directory_layout(
+        file: &mut File,
+        file_length: u64,
+        eocd_offset: u64,
+        eocd: &[u8],
+    ) -> ArchiveResult<Option<ZipDirectoryLayout>> {
+        if eocd.len() < ZIP_EOCD_SIZE {
+            return Ok(None);
+        }
+        let disk = read_u16(eocd, 4).unwrap_or(u16::MAX);
+        let central_disk = read_u16(eocd, 6).unwrap_or(u16::MAX);
+        let entries_on_disk = read_u16(eocd, 8).unwrap_or(u16::MAX);
+        let entries = read_u16(eocd, 10).unwrap_or(u16::MAX);
+        let size = u64::from(read_u32(eocd, 12).unwrap_or(u32::MAX));
+        let offset = u64::from(read_u32(eocd, 16).unwrap_or(u32::MAX));
+        let needs_zip64 = disk == u16::MAX
+            || central_disk == u16::MAX
+            || entries_on_disk == u16::MAX
+            || entries == u16::MAX
+            || size == u64::from(u32::MAX)
+            || offset == u64::from(u32::MAX);
+        if !needs_zip64 {
+            return Ok(Some(ZipDirectoryLayout {
+                entries: u64::from(entries),
+                offset,
+                size,
+            }));
+        }
+
+        if eocd_offset < 20 {
+            return Ok(None);
+        }
+        let mut locator = [0u8; 20];
+        file.seek(SeekFrom::Start(eocd_offset - 20))
+            .map_err(|error| ArchiveError::io("ZIP64 locator", error))?;
+        file.read_exact(&mut locator)
+            .map_err(|error| ArchiveError::io("ZIP64 locator", error))?;
+        if read_u32(&locator, 0) != Some(ZIP64_LOCATOR_SIGNATURE)
+            || read_u32(&locator, 4) != Some(0)
+        {
+            return Ok(None);
+        }
+        let Some(zip64_offset) = read_u64(&locator, 8) else {
+            return Ok(None);
+        };
+        if zip64_offset
+            .checked_add(56)
+            .is_none_or(|end| end > file_length)
+        {
+            return Ok(None);
+        }
+        let mut record = [0u8; 56];
+        file.seek(SeekFrom::Start(zip64_offset))
+            .map_err(|error| ArchiveError::io("ZIP64 end record", error))?;
+        file.read_exact(&mut record)
+            .map_err(|error| ArchiveError::io("ZIP64 end record", error))?;
+        if read_u32(&record, 0) != Some(ZIP64_EOCD_SIGNATURE)
+            || read_u64(&record, 4).is_none_or(|size| size < 44)
+        {
+            return Ok(None);
+        }
+        Ok(Some(ZipDirectoryLayout {
+            entries: read_u64(&record, 32).unwrap_or(0),
+            size: read_u64(&record, 40).unwrap_or(0),
+            offset: read_u64(&record, 48).unwrap_or(0),
+        }))
+    }
+
+    fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+        bytes
+            .get(offset..offset.checked_add(2)?)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+        bytes
+            .get(offset..offset.checked_add(4)?)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+        bytes.get(offset..offset.checked_add(8)?).map(|bytes| {
+            u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])
+        })
+    }
+
+    fn unicode_path_extra(raw_name: &[u8], extra: &[u8]) -> Option<String> {
+        let mut offset = 0usize;
+        while offset.checked_add(4).is_some_and(|end| end <= extra.len()) {
+            let id = read_u16(extra, offset).unwrap_or(0);
+            let length = usize::from(read_u16(extra, offset + 2).unwrap_or(0));
+            let data_start = offset + 4;
+            let Some(data_end) = data_start.checked_add(length) else {
+                return None;
+            };
+            if data_end > extra.len() {
+                return None;
+            }
+            if id == 0x7075
+                && length >= 5
+                && extra[data_start] == 1
+                && crc32(raw_name) == read_u32(extra, data_start + 1).unwrap_or(0)
+            {
+                return std::str::from_utf8(&extra[data_start + 5..data_end])
+                    .ok()
+                    .map(str::to_owned);
+            }
+            offset = data_end;
+        }
+        None
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
     struct OpenArchive {
         in_archive: RawInArchive,
         /// The input stream handed to 7-Zip. Its reference count includes one
@@ -3076,6 +3568,7 @@ mod platform_impl {
         path: &Path,
         format: CreateFormat,
         password: Option<&str>,
+        _pathname_codepage: u32,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OpenArchive> {
         let in_archive = api.create_in_archive(format)?;
@@ -3703,6 +4196,29 @@ mod platform_impl {
         #[test]
         fn create_options_default_to_auto_threads() {
             assert_eq!(CreateOptions::default().threads, ThreadCount::Auto);
+        }
+
+        #[test]
+        fn missing_password_is_not_reported_as_an_empty_password() {
+            let mut password = 1usize as *mut u16;
+            assert_eq!(
+                super::write_password_bstr(&mut password, None),
+                super::E_ABORT
+            );
+            assert!(password.is_null());
+            assert_eq!(
+                super::write_password_bstr(&mut password, Some("")),
+                super::E_ABORT
+            );
+            assert!(password.is_null());
+
+            assert_eq!(
+                super::write_password_bstr(&mut password, Some("secret")),
+                super::S_OK
+            );
+            assert!(!password.is_null());
+            // SAFETY: the helper allocated this BSTR with SysAllocString.
+            unsafe { super::SysFreeString(password) };
         }
 
         #[test]

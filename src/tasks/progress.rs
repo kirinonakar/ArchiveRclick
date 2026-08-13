@@ -32,6 +32,8 @@ impl ProgressPhase {
 pub struct ProgressSnapshot {
     pub phase: ProgressPhase,
     pub current_file: String,
+    pub current_file_bytes_processed: u64,
+    pub current_file_total_bytes: Option<u64>,
     pub entries_processed: u64,
     pub total_entries: Option<u64>,
     pub bytes_processed: u64,
@@ -46,6 +48,8 @@ impl ProgressSnapshot {
         Self {
             phase,
             current_file: String::new(),
+            current_file_bytes_processed: 0,
+            current_file_total_bytes: None,
             entries_processed: 0,
             total_entries: None,
             bytes_processed: 0,
@@ -70,6 +74,19 @@ impl ProgressSnapshot {
             0.0
         }
     }
+
+    /// Returns the current file's progress when its size is known. A missing
+    /// total means the caller should display an indeterminate bar.
+    pub fn current_file_fraction(&self) -> Option<f32> {
+        if self.phase == ProgressPhase::Finished {
+            return Some(1.0);
+        }
+        let total = self.current_file_total_bytes?;
+        if total == 0 {
+            return Some(1.0);
+        }
+        Some((self.current_file_bytes_processed as f64 / total as f64).clamp(0.0, 1.0) as f32)
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +109,18 @@ mod tests {
         snapshot.bytes_processed = 250;
 
         assert!((snapshot.fraction() - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn current_file_progress_is_independent_of_overall_progress() {
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
+        snapshot.bytes_processed = 900;
+        snapshot.total_bytes = Some(1_000);
+        snapshot.current_file_bytes_processed = 25;
+        snapshot.current_file_total_bytes = Some(100);
+
+        assert!((snapshot.fraction() - 0.9).abs() < f32::EPSILON);
+        assert!((snapshot.current_file_fraction().unwrap() - 0.25).abs() < f32::EPSILON);
     }
 }
 

@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -191,6 +192,37 @@ fn bundled_zip_create_extract_round_trip() {
 }
 
 #[test]
+fn legacy_zip_codepage_is_applied_by_7z_for_list_and_extract() {
+    let work = Work::new();
+    let archive = work.0.join("legacy-korean.zip");
+    write_legacy_zip(&archive, b"\xC7\xD1\xB1\xDB.txt", b"legacy ZIP\n");
+
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    let listing = engine
+        .list(&archive, None, 0, &quiet, &cancel)
+        .expect("list legacy-name ZIP archive");
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].display_path, "한글.txt");
+
+    let output = work.0.join("out");
+    engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions::default(),
+            &quiet,
+            &Overwrite,
+            &cancel,
+        )
+        .expect("extract legacy-name ZIP archive");
+    assert_eq!(
+        fs::read(output.join("한글.txt")).unwrap(),
+        b"legacy ZIP\n"
+    );
+}
+
+#[test]
 fn bundled_zip_many_files_extracts_with_parallel_workers() {
     let work = Work::new();
     let input = work.0.join("payload");
@@ -233,6 +265,69 @@ fn bundled_zip_many_files_extracts_with_parallel_workers() {
         fs::read(output.join("payload").join("file-0511.bin")).unwrap(),
         [0xFF_u8; 4096]
     );
+}
+
+fn write_legacy_zip(path: &Path, name: &[u8], contents: &[u8]) {
+    let crc = crc32(contents);
+    let name_length = u16::try_from(name.len()).unwrap();
+    let size = u32::try_from(contents.len()).unwrap();
+    let mut file = fs::File::create(path).unwrap();
+
+    file.write_all(&0x0403_4B50u32.to_le_bytes()).unwrap();
+    file.write_all(&20u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&crc.to_le_bytes()).unwrap();
+    file.write_all(&size.to_le_bytes()).unwrap();
+    file.write_all(&size.to_le_bytes()).unwrap();
+    file.write_all(&name_length.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(name).unwrap();
+    file.write_all(contents).unwrap();
+
+    let central_offset = 30u32 + u32::try_from(name.len()).unwrap() + size;
+    let central_size = 46u32 + u32::try_from(name.len()).unwrap();
+    file.write_all(&0x0201_4B50u32.to_le_bytes()).unwrap();
+    file.write_all(&20u16.to_le_bytes()).unwrap();
+    file.write_all(&20u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&crc.to_le_bytes()).unwrap();
+    file.write_all(&size.to_le_bytes()).unwrap();
+    file.write_all(&size.to_le_bytes()).unwrap();
+    file.write_all(&name_length.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u32.to_le_bytes()).unwrap();
+    file.write_all(&0u32.to_le_bytes()).unwrap();
+    file.write_all(name).unwrap();
+
+    file.write_all(&0x0605_4B50u32.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&1u16.to_le_bytes()).unwrap();
+    file.write_all(&1u16.to_le_bytes()).unwrap();
+    file.write_all(&central_size.to_le_bytes()).unwrap();
+    file.write_all(&central_offset.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 #[test]

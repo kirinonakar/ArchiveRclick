@@ -4,7 +4,8 @@
 //! the menu items from the selected paths and displays the real names, e.g.
 //! "보고서.zip으로 압축하기", "보고서.7z로 압축하기" and "보고서\ 에 풀기".
 //! IContextMenu feeds the classic menu and Windows 11's "추가 옵션 표시";
-//! IExplorerCommand shows the same verbs in the Windows 11 default menu.
+//! separate IExplorerCommand classes show the same verbs as top-level items in
+//! the Windows 11 default menu.
 //! Invoking an item launches archive-rclick.exe directly with Unicode
 //! arguments (no PowerShell, no cmd), and the app shows its progress window.
 #![cfg(windows)]
@@ -45,11 +46,10 @@ use windows::{
         },
         UI::{
             Shell::{
-                CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, ECF_HASSUBCOMMANDS,
-                ECS_ENABLED, ECS_HIDDEN, ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl,
-                IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
-                IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl, IShellItem,
-                IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
+                CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, ECS_ENABLED, ECS_HIDDEN,
+                ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl, IEnumExplorerCommand,
+                IExplorerCommand, IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl,
+                IShellItem, IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
                 SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{
@@ -76,6 +76,24 @@ const CLSID_SHELL_EXT: GUID = GUID {
     data3: 0x4F5A,
     data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
 };
+const CLSID_EXTRACT_COMMAND: GUID = GUID {
+    data1: 0x6B2B1C4B,
+    data2: 0x9D3E,
+    data3: 0x4F5A,
+    data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
+const CLSID_ZIP_COMMAND: GUID = GUID {
+    data1: 0x6B2B1C4C,
+    data2: 0x9D3E,
+    data3: 0x4F5A,
+    data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
+const CLSID_SEVENZIP_COMMAND: GUID = GUID {
+    data1: 0x6B2B1C4D,
+    data2: 0x9D3E,
+    data3: 0x4F5A,
+    data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
 
 const ARCHIVE_EXTENSIONS: &[&str] = &[
     ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".lha", ".lzh",
@@ -84,8 +102,20 @@ const ARCHIVE_EXTENSIONS: &[&str] = &[
 const EXE_NAME: &str = "archive-rclick.exe";
 const SETTINGS_KEY: &str = r"Software\ArchiveRclick";
 const EXE_PATH_VALUE: &str = "ExePath";
-const MODERN_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclick";
-const MODERN_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\ArchiveRclick";
+const LEGACY_MODERN_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclick";
+const LEGACY_MODERN_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\ArchiveRclick";
+const MODERN_EXTRACT_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickExtract";
+const MODERN_EXTRACT_DIRECTORY_MENU_KEY: &str =
+    r"Software\Classes\Directory\shell\ArchiveRclickExtract";
+const MODERN_ZIP_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickZip";
+const MODERN_ZIP_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\ArchiveRclickZip";
+const MODERN_SEVENZIP_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickSevenZip";
+const MODERN_SEVENZIP_DIRECTORY_MENU_KEY: &str =
+    r"Software\Classes\Directory\shell\ArchiveRclickSevenZip";
+const LEGACY_CONTEXT_MENU_KEY: &str =
+    r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick";
+const LEGACY_DIRECTORY_CONTEXT_MENU_KEY: &str =
+    r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick";
 const EXPLORER_COMMAND_HANDLER_VALUE: &str = "ExplorerCommandHandler";
 
 // IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
@@ -124,7 +154,7 @@ fn decrement_live_objects() {
     });
 }
 
-#[implement(IShellExtInit, IContextMenu, IExplorerCommand)]
+#[implement(IShellExtInit, IContextMenu)]
 struct ArchiveContextMenu {
     paths: Mutex<Vec<OsString>>,
     active_verbs: Mutex<Vec<Verb>>,
@@ -342,79 +372,8 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IExplorerCommand: the Windows 11 default menu reads this interface from the
-// same CLSID. The root item hosts a cascade whose children carry the verbs,
-// so the per-file labels ("보고서.zip으로 압축하기" ...) appear in the new
-// menu as well.
-// ---------------------------------------------------------------------------
-
-impl IExplorerCommand_Impl for ArchiveContextMenu_Impl {
-    fn GetTitle(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        wide_alloc("ArchiveRclick").ok_or_else(|| E_OUTOFMEMORY.into())
-    }
-
-    fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        let Some(exe) = find_exe_path() else {
-            return Err(E_NOTIMPL.into());
-        };
-        // Explorer resolves "path,index" against the executable's icon
-        // resources, so the Windows 11 default menu shows the app icon.
-        wide_alloc(&format!("{},0", exe.to_string_lossy())).ok_or_else(|| E_OUTOFMEMORY.into())
-    }
-
-    fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        wide_alloc("ArchiveRclick: archive or extract the selected items")
-            .ok_or_else(|| E_OUTOFMEMORY.into())
-    }
-
-    fn GetCanonicalName(&self) -> WinResult<GUID> {
-        Err(E_NOTIMPL.into())
-    }
-
-    fn GetState(
-        &self,
-        psiitemarray: Ref<'_, IShellItemArray>,
-        _foktobeslow: BOOL,
-    ) -> WinResult<u32> {
-        let visible = psiitemarray
-            .as_ref()
-            .is_some_and(|array| !item_array_paths(array).is_empty());
-        Ok(if visible {
-            ECS_ENABLED.0 as u32
-        } else {
-            ECS_HIDDEN.0 as u32
-        })
-    }
-
-    fn Invoke(
-        &self,
-        _psiitemarray: Ref<'_, IShellItemArray>,
-        _pbc: Ref<'_, IBindCtx>,
-    ) -> WinResult<()> {
-        // The root item only hosts the cascade; each verb invokes the app.
-        Ok(())
-    }
-
-    fn GetFlags(&self) -> WinResult<u32> {
-        Ok(ECF_HASSUBCOMMANDS.0 as u32)
-    }
-
-    fn EnumSubCommands(&self) -> WinResult<IEnumExplorerCommand> {
-        let commands: Vec<IExplorerCommand> = [Verb::Extract, Verb::Zip, Verb::SevenZip]
-            .into_iter()
-            .map(|verb| {
-                increment_live_objects();
-                ArchiveVerbCommand::new(verb).into()
-            })
-            .collect();
-        increment_live_objects();
-        Ok(VerbEnumerator::new(commands).into())
-    }
-}
-
 /// The three actions the shell extension can run on a selection.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Extract,
     Zip,
@@ -463,29 +422,37 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
             )]
         } else {
             // 여러 압축파일을 선택하면 각각 자기 이름의 폴더에 푼다.
-            vec![(Verb::Extract, "각각의 폴더에 풀기".to_owned())]
+            let mut verbs = vec![(Verb::Extract, "각각의 폴더에 풀기".to_owned())];
+            // 압축파일만 여러 개 선택한 경우에도 새 압축파일로 묶을 수
+            // 있도록 압축 메뉴를 함께 표시한다.
+            verbs.extend(compression_verbs(paths));
+            verbs
         }
     } else {
-        // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
-        let zip_name = unique_path(&cli_archive_destination(paths, CreateFormat::Zip))
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "archive.zip".to_owned());
-        let seven_name = unique_path(&cli_archive_destination(paths, CreateFormat::SevenZip))
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "archive.7z".to_owned());
-        vec![
-            (
-                Verb::Zip,
-                format!("{}으로 압축하기", shorten_menu_name(&zip_name)),
-            ),
-            (
-                Verb::SevenZip,
-                format!("{}로 압축하기", shorten_menu_name(&seven_name)),
-            ),
-        ]
+        compression_verbs(paths)
     }
+}
+
+fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
+    let zip_name = unique_path(&cli_archive_destination(paths, CreateFormat::Zip))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive.zip".to_owned());
+    let seven_name = unique_path(&cli_archive_destination(paths, CreateFormat::SevenZip))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive.7z".to_owned());
+    vec![
+        (
+            Verb::Zip,
+            format!("{}으로 압축하기", shorten_menu_name(&zip_name)),
+        ),
+        (
+            Verb::SevenZip,
+            format!("{}로 압축하기", shorten_menu_name(&seven_name)),
+        ),
+    ]
 }
 
 /// Maximum number of characters shown for a file name in the context menu.
@@ -520,7 +487,7 @@ fn archive_suffix(name: &str) -> Option<&str> {
     (dot > 0).then(|| &name[dot..])
 }
 
-/// One IExplorerCommand subcommand ("압축하기"/"풀기"). Explorer asks for the
+/// One top-level IExplorerCommand ("압축하기"/"풀기"). Explorer asks for the
 /// title before it can display the item, so the selection is captured there
 /// and reused by Invoke; Invoke also re-reads its own argument as a fallback.
 #[implement(IExplorerCommand)]
@@ -641,85 +608,26 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     }
 }
 
-#[implement(IEnumExplorerCommand)]
-struct VerbEnumerator {
-    commands: Vec<IExplorerCommand>,
-    cursor: Mutex<usize>,
-}
-
-impl VerbEnumerator {
-    fn new(commands: Vec<IExplorerCommand>) -> Self {
-        Self {
-            commands,
-            cursor: Mutex::new(0),
-        }
-    }
-}
-
-impl Drop for VerbEnumerator {
-    fn drop(&mut self) {
-        decrement_live_objects();
-    }
-}
-
-impl IEnumExplorerCommand_Impl for VerbEnumerator_Impl {
-    fn Next(
-        &self,
-        celt: u32,
-        puicommand: *mut Option<IExplorerCommand>,
-        pceltfetched: *mut u32,
-    ) -> windows::core::HRESULT {
-        if puicommand.is_null() {
-            return E_POINTER;
-        }
-        let Ok(mut cursor) = self.cursor.lock() else {
-            return E_FAIL;
-        };
-        let mut fetched = 0u32;
-        while fetched < celt {
-            let Some(command) = self.commands.get(*cursor).cloned() else {
-                break;
-            };
-            // SAFETY: puicommand points to writable storage for celt interface
-            // pointers and fetched is always below celt here.
-            unsafe { puicommand.add(fetched as usize).write(Some(command)) };
-            *cursor += 1;
-            fetched += 1;
-        }
-        if !pceltfetched.is_null() {
-            // SAFETY: pceltfetched is the out-parameter provided by the caller.
-            unsafe { *pceltfetched = fetched };
-        }
-        if fetched == celt { S_OK } else { S_FALSE }
-    }
-
-    fn Skip(&self, celt: u32) -> WinResult<()> {
-        let Ok(mut cursor) = self.cursor.lock() else {
-            return Err(E_FAIL.into());
-        };
-        *cursor = cursor.saturating_add(celt as usize);
-        Ok(())
-    }
-
-    fn Reset(&self) -> WinResult<()> {
-        let Ok(mut cursor) = self.cursor.lock() else {
-            return Err(E_FAIL.into());
-        };
-        *cursor = 0;
-        Ok(())
-    }
-
-    fn Clone(&self) -> WinResult<IEnumExplorerCommand> {
-        Err(E_NOTIMPL.into())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Class factory
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+enum FactoryKind {
+    Classic,
+    ExplorerCommand(Verb),
+}
+
 #[implement(IClassFactory)]
-struct ShellExtFactory;
+struct ShellExtFactory {
+    kind: FactoryKind,
+}
+
+impl ShellExtFactory {
+    fn new(kind: FactoryKind) -> Self {
+        Self { kind }
+    }
+}
 
 impl Drop for ShellExtFactory {
     fn drop(&mut self) {
@@ -743,13 +651,27 @@ impl IClassFactory_Impl for ShellExtFactory_Impl {
         // Count the COM object from creation until its final Release/Drop.
         // This keeps DllCanUnloadNow from unloading the DLL underneath it.
         increment_live_objects();
-        let handler: IContextMenu = ArchiveContextMenu::new().into();
-        // SAFETY: riid/ppvobj are out-parameters provided by the caller and
-        // the object's vtable starts with the standard IUnknown methods.
-        unsafe {
-            let object = handler.as_raw() as *mut c_void;
-            let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-            ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+        match self.kind {
+            FactoryKind::Classic => {
+                let handler: IContextMenu = ArchiveContextMenu::new().into();
+                // SAFETY: riid/ppvobj are out-parameters provided by the caller and
+                // the object's vtable starts with the standard IUnknown methods.
+                unsafe {
+                    let object = handler.as_raw() as *mut c_void;
+                    let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
+                    ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+                }
+            }
+            FactoryKind::ExplorerCommand(verb) => {
+                let handler: IExplorerCommand = ArchiveVerbCommand::new(verb).into();
+                // SAFETY: riid/ppvobj are out-parameters provided by the caller and
+                // the object's vtable starts with the standard IUnknown methods.
+                unsafe {
+                    let object = handler.as_raw() as *mut c_void;
+                    let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
+                    ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+                }
+            }
         }
     }
 
@@ -779,14 +701,18 @@ pub unsafe extern "system" fn DllGetClassObject(
         return E_POINTER;
     }
     // SAFETY: rclsid was validated non-null above.
-    if unsafe { *rclsid } != CLSID_SHELL_EXT {
-        return CLASS_E_CLASSNOTAVAILABLE;
-    }
+    let kind = match unsafe { *rclsid } {
+        CLSID_SHELL_EXT => FactoryKind::Classic,
+        CLSID_EXTRACT_COMMAND => FactoryKind::ExplorerCommand(Verb::Extract),
+        CLSID_ZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::Zip),
+        CLSID_SEVENZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZip),
+        _ => return CLASS_E_CLASSNOTAVAILABLE,
+    };
     // The class factory itself is a live COM object too.  If it is omitted
     // from the count, DllCanUnloadNow may return S_OK while Explorer still
     // holds the factory and later call into an unloaded DLL.
     increment_live_objects();
-    let factory: IClassFactory = ShellExtFactory.into();
+    let factory: IClassFactory = ShellExtFactory::new(kind).into();
     // SAFETY: riid/ppv are out-parameters provided by the caller and the
     // object's vtable starts with the standard IUnknown methods.
     unsafe {
@@ -1121,61 +1047,73 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "could not resolve the shell extension directory".to_owned())?;
     let exe = directory.join(EXE_NAME);
-    let guid = guid_string();
-    let clsid = format!(r"Software\Classes\CLSID\{guid}");
-    let inproc = format!(r"Software\Classes\CLSID\{guid}\InprocServer32");
-    // Keep a description on the CLSID itself.  Explorer uses the CLSID as the
-    // ExplorerCommandHandler target on Windows 11, while the legacy handler
-    // below uses the same class through ContextMenuHandlers.
-    set_registry_string(
+    // Register only the dedicated IExplorerCommand entries below. Older
+    // versions registered the same operation through IContextMenu as well,
+    // which makes Windows 11 show a second, duplicate Extract item.
+    for key in [
+        LEGACY_CONTEXT_MENU_KEY,
+        LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
+        LEGACY_MODERN_MENU_KEY,
+        LEGACY_MODERN_DIRECTORY_MENU_KEY,
+    ] {
+        delete_registry_tree(HKEY_CURRENT_USER, key)?;
+    }
+    // The old CLSID was only used by those legacy ContextMenuHandlers entries.
+    delete_registry_tree(
         HKEY_CURRENT_USER,
-        &clsid,
-        None,
-        "ArchiveRclick Explorer commands",
+        &format!(r"Software\Classes\CLSID\{}", guid_string_for(CLSID_SHELL_EXT)),
     )?;
-    set_registry_string(
-        HKEY_CURRENT_USER,
-        &inproc,
-        None,
-        &dll_path.to_string_lossy(),
-    )?;
-    set_registry_string(
-        HKEY_CURRENT_USER,
-        &inproc,
-        Some("ThreadingModel"),
-        "Apartment",
-    )?;
-    set_registry_string(
-        HKEY_CURRENT_USER,
-        r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick",
-        None,
-        &guid,
-    )?;
-    set_registry_string(
-        HKEY_CURRENT_USER,
-        r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick",
-        None,
-        &guid,
-    )?;
-    // Windows 11 does not promote a legacy ContextMenuHandlers entry into its
-    // default menu.  Register the same COM class as an ExplorerCommandHandler
-    // under `shell` so the IExplorerCommand root (and its Extract child) is
-    // available without going through "Show more options".  Keep the legacy
-    // entries above for Windows 10 and the classic menu.
+    for (command_clsid, description) in [
+        (CLSID_EXTRACT_COMMAND, "ArchiveRclick extract command"),
+        (CLSID_ZIP_COMMAND, "ArchiveRclick ZIP command"),
+        (CLSID_SEVENZIP_COMMAND, "ArchiveRclick 7z command"),
+    ] {
+        let command_guid = guid_string_for(command_clsid);
+        let command_clsid_key = format!(r"Software\Classes\CLSID\{command_guid}");
+        let command_inproc = format!(r"{command_clsid_key}\InprocServer32");
+        set_registry_string(HKEY_CURRENT_USER, &command_clsid_key, None, description)?;
+        set_registry_string(
+            HKEY_CURRENT_USER,
+            &command_inproc,
+            None,
+            &dll_path.to_string_lossy(),
+        )?;
+        set_registry_string(
+            HKEY_CURRENT_USER,
+            &command_inproc,
+            Some("ThreadingModel"),
+            "Apartment",
+        )?;
+    }
     let icon = format!("{},0", exe.to_string_lossy());
-    for key in [MODERN_MENU_KEY, MODERN_DIRECTORY_MENU_KEY] {
+    for (key, command_clsid) in [
+        (MODERN_EXTRACT_MENU_KEY, CLSID_EXTRACT_COMMAND),
+        (MODERN_ZIP_MENU_KEY, CLSID_ZIP_COMMAND),
+        (MODERN_SEVENZIP_MENU_KEY, CLSID_SEVENZIP_COMMAND),
+    ] {
+        let command_guid = guid_string_for(command_clsid);
         set_registry_string(
             HKEY_CURRENT_USER,
             key,
             Some(EXPLORER_COMMAND_HANDLER_VALUE),
-            &guid,
+            &command_guid,
         )?;
+        set_registry_string(HKEY_CURRENT_USER, key, Some("CommandStateSync"), "")?;
+        set_registry_string(HKEY_CURRENT_USER, key, Some("Icon"), &icon)?;
+    }
+    for (key, command_clsid) in [
+        (MODERN_EXTRACT_DIRECTORY_MENU_KEY, CLSID_EXTRACT_COMMAND),
+        (MODERN_ZIP_DIRECTORY_MENU_KEY, CLSID_ZIP_COMMAND),
+        (MODERN_SEVENZIP_DIRECTORY_MENU_KEY, CLSID_SEVENZIP_COMMAND),
+    ] {
+        let command_guid = guid_string_for(command_clsid);
         set_registry_string(
             HKEY_CURRENT_USER,
             key,
-            Some("CommandStateSync"),
-            "",
+            Some(EXPLORER_COMMAND_HANDLER_VALUE),
+            &command_guid,
         )?;
+        set_registry_string(HKEY_CURRENT_USER, key, Some("CommandStateSync"), "")?;
         set_registry_string(HKEY_CURRENT_USER, key, Some("Icon"), &icon)?;
     }
     set_registry_string(
@@ -1192,20 +1130,31 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
 /// `Software\ArchiveRclick` key itself is kept because it also holds the app's
 /// settings; only the recorded executable path is deleted.
 pub fn unregister_context_menu() -> Result<(), String> {
-    delete_registry_tree(
-        HKEY_CURRENT_USER,
-        &format!(r"Software\Classes\CLSID\{}", guid_string()),
-    )?;
-    delete_registry_tree(
-        HKEY_CURRENT_USER,
-        r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick",
-    )?;
-    delete_registry_tree(
-        HKEY_CURRENT_USER,
-        r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick",
-    )?;
-    delete_registry_tree(HKEY_CURRENT_USER, MODERN_MENU_KEY)?;
-    delete_registry_tree(HKEY_CURRENT_USER, MODERN_DIRECTORY_MENU_KEY)?;
+    for clsid in [
+        CLSID_SHELL_EXT,
+        CLSID_EXTRACT_COMMAND,
+        CLSID_ZIP_COMMAND,
+        CLSID_SEVENZIP_COMMAND,
+    ] {
+        delete_registry_tree(
+            HKEY_CURRENT_USER,
+            &format!(r"Software\Classes\CLSID\{}", guid_string_for(clsid)),
+        )?;
+    }
+    for key in [
+        LEGACY_MODERN_MENU_KEY,
+        LEGACY_MODERN_DIRECTORY_MENU_KEY,
+        MODERN_EXTRACT_MENU_KEY,
+        MODERN_EXTRACT_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_MENU_KEY,
+        MODERN_ZIP_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_MENU_KEY,
+        MODERN_SEVENZIP_DIRECTORY_MENU_KEY,
+        LEGACY_CONTEXT_MENU_KEY,
+        LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
+    ] {
+        delete_registry_tree(HKEY_CURRENT_USER, key)?;
+    }
     delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
     notify_shell_change();
     Ok(())
@@ -1220,10 +1169,41 @@ fn notify_shell_change() {
 
 /// Whether the context-menu handler is currently registered for this user.
 pub fn is_context_menu_registered() -> bool {
-    registry_key_exists(
-        HKEY_CURRENT_USER,
-        &format!(r"Software\Classes\CLSID\{}\InprocServer32", guid_string()),
-    )
+    let classes_registered = [
+        CLSID_EXTRACT_COMMAND,
+        CLSID_ZIP_COMMAND,
+        CLSID_SEVENZIP_COMMAND,
+    ]
+    .into_iter()
+    .all(|clsid| {
+        registry_key_exists(
+            HKEY_CURRENT_USER,
+            &format!(
+                r"Software\Classes\CLSID\{}\InprocServer32",
+                guid_string_for(clsid)
+            ),
+        )
+    });
+    let modern_entries_present = [
+        MODERN_EXTRACT_MENU_KEY,
+        MODERN_EXTRACT_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_MENU_KEY,
+        MODERN_ZIP_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_MENU_KEY,
+        MODERN_SEVENZIP_DIRECTORY_MENU_KEY,
+    ]
+    .into_iter()
+    .all(|key| registry_key_exists(HKEY_CURRENT_USER, key));
+    let old_cascade_present = registry_key_exists(HKEY_CURRENT_USER, LEGACY_MODERN_MENU_KEY)
+        || registry_key_exists(HKEY_CURRENT_USER, LEGACY_MODERN_DIRECTORY_MENU_KEY);
+    let old_legacy_handler_present =
+        registry_key_exists(HKEY_CURRENT_USER, LEGACY_CONTEXT_MENU_KEY)
+            || registry_key_exists(HKEY_CURRENT_USER, LEGACY_DIRECTORY_CONTEXT_MENU_KEY);
+
+    classes_registered
+        && modern_entries_present
+        && !old_cascade_present
+        && !old_legacy_handler_present
 }
 
 fn registry_key_exists(hive: HKEY, key_path: &str) -> bool {
@@ -1310,8 +1290,7 @@ fn delete_registry_value(hive: HKEY, key_path: &str, value_name: &str) -> Result
     }
 }
 
-fn guid_string() -> String {
-    let guid = CLSID_SHELL_EXT;
+fn guid_string_for(guid: GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
         guid.data1,
@@ -1426,7 +1405,7 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{build_args, shorten_menu_name};
+    use super::{Verb, build_args, menu_verbs, shorten_menu_name};
 
     #[test]
     fn command_line_quoting_keeps_a_root_folder_argument_intact() {
@@ -1479,5 +1458,31 @@ mod tests {
         let shortened = shorten_menu_name(&long);
         assert_eq!(shortened, extension);
         assert!(shortened.ends_with(&extension));
+    }
+
+    #[test]
+    fn multiple_archives_show_extract_and_compress_actions() {
+        let root =
+            std::env::temp_dir().join(format!("archive-rclick-shell-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temporary shell-extension test folder");
+        let first = root.join("one.zip");
+        let second = root.join("two.7z");
+        std::fs::File::create(&first).expect("create first archive placeholder");
+        std::fs::File::create(&second).expect("create second archive placeholder");
+
+        let single = menu_verbs(std::slice::from_ref(&first));
+        assert_eq!(
+            single.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Extract]
+        );
+
+        let multiple = menu_verbs(&[first, second]);
+        assert_eq!(
+            multiple.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Extract, Verb::Zip, Verb::SevenZip]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
