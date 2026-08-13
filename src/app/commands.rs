@@ -69,6 +69,43 @@ fn theme_registry_key(index: i32) -> &'static str {
     }
 }
 
+const LANGUAGE_OPTIONS: &[(&str, &str)] = &[("English", "en"), ("한국어", "ko"), ("日本語", "ja")];
+
+const CODEPAGE_OPTIONS: &[(&str, u32)] = &[
+    ("Auto", 0),
+    ("UTF-8", 65001),
+    ("CP949 — Korean", 949),
+    ("CP932 — Japanese", 932),
+    ("CP936 — Simplified Chinese", 936),
+    ("CP950 — Traditional Chinese", 950),
+    ("CP1361 — Johab", 1361),
+    ("CP50220 — ISO-2022-JP", 50220),
+    ("CP54936 — GB18030", 54936),
+    ("UTF-16 LE", 1200),
+    ("UTF-16 BE", 1201),
+];
+
+fn language_selection_index(preference: &str) -> i32 {
+    LANGUAGE_OPTIONS
+        .iter()
+        .position(|(_, key)| *key == preference)
+        .unwrap_or(0) as i32
+}
+
+fn language_registry_key(index: i32) -> &'static str {
+    LANGUAGE_OPTIONS
+        .get(index.max(0) as usize)
+        .map(|(_, key)| *key)
+        .unwrap_or("en")
+}
+
+fn pathname_codepage(index: i32) -> u32 {
+    CODEPAGE_OPTIONS
+        .get(index.max(0) as usize)
+        .map(|(_, codepage)| *codepage)
+        .unwrap_or(0)
+}
+
 pub fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
     let command = args.next();
@@ -131,9 +168,8 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                             .to_owned(),
                     );
                 }
-                SevenZipEngine::load().map_err(|error| {
-                    format!("The bundled 7z.dll could not be loaded: {error}")
-                })?;
+                SevenZipEngine::load()
+                    .map_err(|error| format!("The bundled 7z.dll could not be loaded: {error}"))?;
                 return Ok(());
             }
             _ => {}
@@ -144,7 +180,14 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 
     if let Some(path) = startup_argument.map(PathBuf::from) {
         if path.is_file() {
-            start_listing(&ui, Rc::clone(&state), Arc::clone(&engine), path, None);
+            start_listing(
+                &ui,
+                Rc::clone(&state),
+                Arc::clone(&engine),
+                path,
+                None,
+                pathname_codepage(ui.get_encoding_selection()),
+            );
         } else {
             ui.set_status_text(format!("Not a file: {}", path.display()).into());
         }
@@ -159,6 +202,12 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
+    if let Some(geometry) = platform::load_window_geometry() {
+        ui.window()
+            .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+        ui.window()
+            .set_position(slint::PhysicalPosition::new(geometry.x, geometry.y));
+    }
     let state = Rc::new(AppState::new());
 
     ui.set_archive_rows(ModelRc::from(Rc::clone(&state.rows)));
@@ -191,6 +240,25 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
         ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
     );
     ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
+    ui.set_language_options(ModelRc::from(
+        LANGUAGE_OPTIONS
+            .iter()
+            .map(|(label, _)| slint::SharedString::from(*label))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    ));
+    ui.set_language_selection(language_selection_index(
+        &platform::load_language_preference(),
+    ));
+    ui.set_encoding_options(ModelRc::from(
+        CODEPAGE_OPTIONS
+            .iter()
+            .map(|(label, _)| slint::SharedString::from(*label))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    ));
+    ui.set_encoding_selection(0);
+    ui.set_selection_state(0);
     let writable_formats = engine.writable_formats();
     if writable_formats.is_empty() {
         return Err(
@@ -223,11 +291,33 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
         }),
     );
 
+    // Save the last normal bounds when the main window is closed.  Avoid
+    // replacing them with a maximized/minimized work area, so the next launch
+    // restores the user's normal window instead of an unusable off-screen
+    // rectangle.
+    let weak_for_close = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = weak_for_close.upgrade()
+            && !ui.window().is_maximized()
+            && !ui.window().is_minimized()
+        {
+            let size = ui.window().size();
+            let position = ui.window().position();
+            let _ = platform::save_window_geometry(&platform::WindowGeometry {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+            });
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+
     ui.show()
         .map_err(|error| format!("Could not show the UI: {error}"))?;
+    platform::apply_window_theme(ui.window(), ui.get_theme_selection());
     Ok((ui, state, engine, writable_formats))
 }
-
 
 // ---------------------------------------------------------------------------
 // Explorer context-menu operations. The shell extension launches the app with
@@ -282,7 +372,14 @@ fn run_gui_create(args: &[OsString], format: CreateFormat) -> Result<(), String>
         ..CreateOptions::default()
     };
     let (ui, state) = open_progress_window()?;
-    start_create_window(&ui, &state, Arc::clone(&engine), destination, sources, options);
+    start_create_window(
+        &ui,
+        &state,
+        Arc::clone(&engine),
+        destination,
+        sources,
+        options,
+    );
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
@@ -439,7 +536,14 @@ fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths
         ui.set_status_text("The drop did not contain a file or folder".into());
         return;
     };
-    start_listing(ui, Rc::clone(state), Arc::clone(engine), path, None);
+    start_listing(
+        ui,
+        Rc::clone(state),
+        Arc::clone(engine),
+        path,
+        None,
+        pathname_codepage(ui.get_encoding_selection()),
+    );
 }
 
 fn wire_callbacks(
@@ -455,7 +559,14 @@ fn wire_callbacks(
         ui.on_open_requested(move || match platform::pick_archive() {
             Ok(Some(path)) => {
                 if let Some(ui) = weak.upgrade() {
-                    start_listing(&ui, Rc::clone(&state), Arc::clone(&engine), path, None);
+                    start_listing(
+                        &ui,
+                        Rc::clone(&state),
+                        Arc::clone(&engine),
+                        path,
+                        None,
+                        pathname_codepage(ui.get_encoding_selection()),
+                    );
                 }
             }
             Ok(None) => {}
@@ -471,15 +582,31 @@ fn wire_callbacks(
             state.rows.clear_selection();
             state.rebuild_display();
             update_folder_ui(&weak, &state);
+            update_selection_ui(&weak, &state);
         });
     }
 
     {
+        let weak = ui.as_weak();
         let state = Rc::clone(&state);
         ui.on_toggle_selection(move |row| {
             if row >= 0 {
                 state.rows.toggle(row as usize);
+                update_selection_ui(&weak, &state);
             }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_select_all_requested(move |select_all| {
+            if select_all {
+                state.rows.select_all_visible();
+            } else {
+                state.rows.clear_selection();
+            }
+            update_selection_ui(&weak, &state);
         });
     }
 
@@ -495,6 +622,7 @@ fn wire_callbacks(
                 state.rows.clear_selection();
                 state.rebuild_display();
                 update_folder_ui(&weak, &state);
+                update_selection_ui(&weak, &state);
             }
         });
     }
@@ -513,6 +641,42 @@ fn wire_callbacks(
         });
     }
 
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        let engine = Arc::clone(&engine);
+        ui.on_encoding_selection_changed(move |selection| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            ui.set_encoding_selection(selection.max(0));
+            if ui.get_busy() || !ui.get_has_archive() {
+                return;
+            }
+            let Some(path) = state
+                .listing
+                .borrow()
+                .as_ref()
+                .map(|listing| listing.archive_path.clone())
+            else {
+                return;
+            };
+            let password = state
+                .open_password
+                .lock()
+                .expect("password mutex poisoned")
+                .clone();
+            start_listing(
+                &ui,
+                Rc::clone(&state),
+                Arc::clone(&engine),
+                path,
+                password,
+                pathname_codepage(selection),
+            );
+        });
+    }
+
     ui.on_show_extract_requested(|| {});
 
     {
@@ -524,6 +688,9 @@ fn wire_callbacks(
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
                 );
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
+                ui.set_language_selection(language_selection_index(
+                    &platform::load_language_preference(),
+                ));
                 ui.set_settings_visible(true);
             }
         });
@@ -572,35 +739,43 @@ fn wire_callbacks(
 
     {
         let weak = ui.as_weak();
-        ui.on_settings_applied(move |font_selection, thread_selection, theme_selection| {
-            let preference = FONT_OPTIONS
-                .get(font_selection.max(0) as usize)
-                .map(|(_, key)| *key)
-                .unwrap_or("auto");
-            let mut failure: Option<String> = None;
-            if let Err(error) = platform::save_font_preference(preference) {
-                failure = Some(format!("Could not save settings: {error}"));
-            } else if let Err(error) = platform::save_thread_preference(
-                ThreadCount::from_ui_index(thread_selection).registry_key(),
-            ) {
-                failure = Some(format!("Could not save settings: {error}"));
-            } else if let Err(error) =
-                platform::save_theme_preference(theme_registry_key(theme_selection))
-            {
-                failure = Some(format!("Could not save settings: {error}"));
-            }
-            if let Some(message) = failure {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_status_text(message.into());
+        ui.on_settings_applied(
+            move |font_selection, thread_selection, theme_selection, language_selection| {
+                let preference = FONT_OPTIONS
+                    .get(font_selection.max(0) as usize)
+                    .map(|(_, key)| *key)
+                    .unwrap_or("auto");
+                let mut failure: Option<String> = None;
+                if let Err(error) = platform::save_font_preference(preference) {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) = platform::save_thread_preference(
+                    ThreadCount::from_ui_index(thread_selection).registry_key(),
+                ) {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) =
+                    platform::save_theme_preference(theme_registry_key(theme_selection))
+                {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) =
+                    platform::save_language_preference(language_registry_key(language_selection))
+                {
+                    failure = Some(format!("Could not save settings: {error}"));
                 }
-                return;
-            }
-            let family = platform::resolve_font_family(preference);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_font_family(family.into());
-                ui.set_theme_selection(theme_selection);
-            }
-        });
+                if let Some(message) = failure {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_status_text(message.into());
+                    }
+                    return;
+                }
+                let family = platform::resolve_font_family(preference);
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_font_family(family.into());
+                    ui.set_theme_selection(theme_selection);
+                    ui.set_language_selection(language_selection);
+                    platform::apply_window_theme(ui.window(), theme_selection);
+                }
+            },
+        );
     }
 
     {
@@ -645,6 +820,10 @@ fn wire_callbacks(
                 } else {
                     ExtractSelection::All
                 };
+                let pathname_codepage = weak
+                    .upgrade()
+                    .map(|ui| pathname_codepage(ui.get_encoding_selection()))
+                    .unwrap_or(0);
 
                 let options = ExtractOptions {
                     selection,
@@ -654,6 +833,7 @@ fn wire_callbacks(
                         2 => InitialConflictPolicy::SkipAll,
                         _ => InitialConflictPolicy::Ask,
                     },
+                    pathname_codepage,
                     ..ExtractOptions::default()
                 };
                 if let Some(ui) = weak.upgrade() {
@@ -850,6 +1030,7 @@ fn wire_callbacks(
                 Arc::clone(&engine),
                 path,
                 Some(password),
+                pathname_codepage(ui.get_encoding_selection()),
             );
         });
     }
@@ -928,7 +1109,14 @@ fn wire_callbacks(
                 return;
             }
             if let Some(ui) = weak.upgrade() {
-                start_listing(&ui, Rc::clone(&state), Arc::clone(&engine), path, None);
+                start_listing(
+                    &ui,
+                    Rc::clone(&state),
+                    Arc::clone(&engine),
+                    path,
+                    None,
+                    pathname_codepage(ui.get_encoding_selection()),
+                );
             }
         });
     }
@@ -940,6 +1128,7 @@ fn start_listing(
     engine: Engine,
     path: PathBuf,
     password: Option<String>,
+    pathname_codepage: u32,
 ) {
     let cancel = begin_operation(ui, &state, "Opening archive", &path.display().to_string());
     let open_password = Arc::clone(&state.open_password);
@@ -949,7 +1138,13 @@ fn start_listing(
     let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
     std::thread::spawn(move || {
         let result = engine
-            .list(&path, password.as_deref(), &progress, &cancel)
+            .list(
+                &path,
+                password.as_deref(),
+                pathname_codepage,
+                &progress,
+                &cancel,
+            )
             .map(super::ArchiveRowModel::prepare_listing);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             finish_operation(&ui);
@@ -977,6 +1172,7 @@ fn start_listing(
                         );
                         return;
                     }
+                    ui.set_selection_state(0);
                     ui.set_archive_title(archive_name.into());
                     ui.set_current_folder("".into());
                     ui.set_has_archive(true);
@@ -1178,10 +1374,7 @@ fn update_progress_window(weak: &slint::Weak<ProgressWindow>, snapshot: Progress
 
 /// Like [`update_progress_window`], but keeps the operation title so that a
 /// batch operation can show "Extracting archive 2/3" while entries stream in.
-fn update_progress_window_details(
-    weak: &slint::Weak<ProgressWindow>,
-    snapshot: ProgressSnapshot,
-) {
+fn update_progress_window_details(weak: &slint::Weak<ProgressWindow>, snapshot: ProgressSnapshot) {
     let weak = weak.clone();
     let _ = weak.upgrade_in_event_loop(move |ui| apply_progress_window(&ui, &snapshot));
 }
@@ -1530,6 +1723,24 @@ fn update_folder_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
     }
 }
 
+fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
+    let display = state.display.borrow();
+    let selected = state.selected.borrow();
+    let state_value = if display.is_empty() || selected.is_empty() {
+        0
+    } else if display
+        .iter()
+        .all(|entry| selected.contains(&entry.relative_path))
+    {
+        2
+    } else {
+        1
+    };
+    if let Some(ui) = weak.upgrade() {
+        ui.set_selection_state(state_value);
+    }
+}
+
 /// Human-readable state of the Explorer context-menu registration.
 fn context_menu_state_text() -> &'static str {
     if platform::shell_ext::is_context_menu_registered() {
@@ -1687,15 +1898,13 @@ mod tests {
             PathBuf::from("data/photos/a.jpg"),
             PathBuf::from("data/photos/2025/b.jpg"),
         ];
-        assert_eq!(
-            common_parent_folder(&sources),
-            PathBuf::from("data/photos")
-        );
+        assert_eq!(common_parent_folder(&sources), PathBuf::from("data/photos"));
     }
 
     #[test]
     fn unique_path_appends_suffix_when_name_taken() {
-        let dir = std::env::temp_dir().join(format!("archive-rclick-unique-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("archive-rclick-unique-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
 

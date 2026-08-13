@@ -114,7 +114,7 @@ fn prioritized_creation_formats_round_trip() {
             .unwrap_or_else(|error| panic!("creating {} failed: {error}", format.label()));
 
         let listing = engine
-            .list(&archive, None, &quiet_progress, &cancel)
+            .list(&archive, None, 0, &quiet_progress, &cancel)
             .unwrap_or_else(|error| panic!("listing {} failed: {error}", format.label()));
         assert!(
             listing

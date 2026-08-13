@@ -42,6 +42,9 @@ pub struct ExtractOptions {
     pub selection: ExtractSelection,
     pub password: Option<String>,
     pub conflict_policy: InitialConflictPolicy,
+    /// Windows code page used to decode legacy archive pathnames. Zero keeps
+    /// the automatic detector.
+    pub pathname_codepage: u32,
     /// Optional selected-entry total from an already-loaded listing.
     pub total_entries_hint: Option<u64>,
     /// Optional selected uncompressed-byte total from an already-loaded listing.
@@ -58,6 +61,7 @@ impl fmt::Debug for ExtractOptions {
             .field("selection", &self.selection)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("conflict_policy", &self.conflict_policy)
+            .field("pathname_codepage", &self.pathname_codepage)
             .field("total_entries_hint", &self.total_entries_hint)
             .field("total_bytes_hint", &self.total_bytes_hint)
             .field("max_entries", &self.max_entries)
@@ -73,6 +77,7 @@ impl Default for ExtractOptions {
             selection: ExtractSelection::All,
             password: None,
             conflict_policy: InitialConflictPolicy::Ask,
+            pathname_codepage: 0,
             total_entries_hint: None,
             total_bytes_hint: None,
             max_entries: 1_000_000,
@@ -137,27 +142,33 @@ impl CreateFormat {
 pub enum ThreadCount {
     Auto,
     Four,
+    Six,
     Eight,
+    Ten,
     Sixteen,
     All,
 }
 
 impl ThreadCount {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Auto,
         Self::Four,
+        Self::Six,
         Self::Eight,
+        Self::Ten,
         Self::Sixteen,
         Self::All,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "자동",
+            Self::Auto => "Auto",
             Self::Four => "4",
+            Self::Six => "6",
             Self::Eight => "8",
+            Self::Ten => "10",
             Self::Sixteen => "16",
-            Self::All => "전체",
+            Self::All => "All",
         }
     }
 
@@ -179,7 +190,9 @@ impl ThreadCount {
         match self {
             Self::Auto => "auto",
             Self::Four => "4",
+            Self::Six => "6",
             Self::Eight => "8",
+            Self::Ten => "10",
             Self::Sixteen => "16",
             Self::All => "all",
         }
@@ -188,7 +201,9 @@ impl ThreadCount {
     pub fn from_registry_key(key: &str) -> Self {
         match key {
             "4" => Self::Four,
+            "6" => Self::Six,
             "8" => Self::Eight,
+            "10" => Self::Ten,
             "16" => Self::Sixteen,
             "all" => Self::All,
             _ => Self::Auto,
@@ -202,7 +217,9 @@ impl ThreadCount {
         match self {
             Self::Auto | Self::All => None,
             Self::Four => Some(4),
+            Self::Six => Some(6),
             Self::Eight => Some(8),
+            Self::Ten => Some(10),
             Self::Sixteen => Some(16),
         }
     }

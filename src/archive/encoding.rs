@@ -84,6 +84,24 @@ pub fn decode_name(bytes: &[u8]) -> Option<String> {
     decode_to_utf8(bytes, detect(bytes))
 }
 
+/// Decodes a raw archive pathname using an explicit Windows code page.
+///
+/// A zero code page keeps the automatic detector used by [`decode_name`].
+/// Explicit selection is intentionally applied even when the byte sequence
+/// also happens to be valid UTF-8; that is what makes the UI override useful
+/// for archives whose legacy names were misidentified.
+pub fn decode_name_with_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
+    if codepage == 0 {
+        return decode_name(bytes);
+    }
+    match codepage {
+        65001 => Some(String::from_utf8_lossy(bytes).into_owned()),
+        1200 => decode_utf16(bytes, true),
+        1201 => decode_utf16(bytes, false),
+        _ => decode_codepage(bytes, codepage),
+    }
+}
+
 /// Detects the encoding of `bytes` with the EncodingConverter algorithm.
 pub fn detect(bytes: &[u8]) -> DetectedEncoding {
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
@@ -138,9 +156,8 @@ pub fn detect(bytes: &[u8]) -> DetectedEncoding {
             return DetectedEncoding::Sjis;
         }
 
-        let chinese_score_is_winning = max_score == gbk_score
-            || max_score == gb18030_score
-            || max_score == big5_score;
+        let chinese_score_is_winning =
+            max_score == gbk_score || max_score == gb18030_score || max_score == big5_score;
         if chinese_score_is_winning {
             if should_prefer_johab_over_chinese_scores(
                 bytes,
@@ -453,7 +470,9 @@ fn get_big5_score(bytes: &[u8]) -> i32 {
         let b2 = bytes[i + 1];
         // Big5 (CP950) double-byte range: first byte 0xA1-0xF9, second byte
         // 0x40-0x7E or 0xA1-0xFE.
-        if (0xA1..=0xF9).contains(&b1) && ((0x40..=0x7E).contains(&b2) || (0xA1..=0xFE).contains(&b2)) {
+        if (0xA1..=0xF9).contains(&b1)
+            && ((0x40..=0x7E).contains(&b2) || (0xA1..=0xFE).contains(&b2))
+        {
             // Big5 Level 1 (common Traditional Chinese characters).
             if (0xA4..=0xC6).contains(&b1) {
                 if (0x40..=0x7E).contains(&b2) {
@@ -642,9 +661,8 @@ fn decode_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
         return Some(String::new());
     }
     // SAFETY: read-only conversion; the caller bounds the input length.
-    let wide_len = unsafe {
-        MultiByteToWideChar(codepage, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None)
-    };
+    let wide_len =
+        unsafe { MultiByteToWideChar(codepage, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
     if wide_len <= 0 {
         // The bytes are not representable in this codepage at all; fall back
         // to a lossy copy so a single odd entry cannot fail the whole archive.
@@ -652,8 +670,14 @@ fn decode_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
     }
     let mut wide = vec![0u16; wide_len as usize];
     // SAFETY: `wide` has exactly the size the API requested.
-    let written =
-        unsafe { MultiByteToWideChar(codepage, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut wide)) };
+    let written = unsafe {
+        MultiByteToWideChar(
+            codepage,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            Some(&mut wide),
+        )
+    };
     if written <= 0 {
         return None;
     }

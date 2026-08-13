@@ -1,8 +1,8 @@
+#[cfg(windows)]
+pub mod encoding;
 mod engine;
 mod entry;
 mod error;
-#[cfg(windows)]
-pub mod encoding;
 pub mod libarchive;
 mod options;
 mod path_safety;
@@ -15,5 +15,5 @@ pub use options::{
     ConflictChoice, CreateFormat, CreateOptions, ExtractOptions, ExtractSelection,
     InitialConflictPolicy, ThreadCount,
 };
-pub use sevenzip::{CompositeEngine, SevenZipEngine};
 pub(crate) use path_safety::{ensure_no_reparse_ancestors, safe_relative_path};
+pub use sevenzip::{CompositeEngine, SevenZipEngine};

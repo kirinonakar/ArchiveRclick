@@ -6,6 +6,7 @@ pub mod settings;
 pub mod shell;
 #[cfg(windows)]
 pub mod shell_ext;
+pub mod titlebar;
 #[cfg(not(windows))]
 pub mod shell_ext {
     //! Fallback for platforms without Explorer shell integration.
@@ -28,8 +29,10 @@ pub mod windows;
 pub use associations::{register_file_associations, unregister_file_associations};
 pub use drop_target::install_file_drop_handler;
 pub use settings::{
-    load_font_preference, load_theme_preference, load_thread_preference, resolve_font_family,
-    save_font_preference, save_theme_preference, save_thread_preference,
+    WindowGeometry, load_font_preference, load_language_preference, load_theme_preference,
+    load_thread_preference, load_window_geometry, resolve_font_family, save_font_preference,
+    save_language_preference, save_theme_preference, save_thread_preference, save_window_geometry,
 };
 pub use shell::reveal_in_explorer;
+pub use titlebar::apply_window_theme;
 pub use windows::{pick_archive, pick_files, pick_folder, save_archive, show_error, show_info};

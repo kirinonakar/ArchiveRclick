@@ -246,6 +246,7 @@ name = "archive-rclick"
 version = "0.1.0"
 dependencies = [
  "embed-resource",
+ "raw-window-handle",
  "sha2",
  "slint",
  "slint-build",

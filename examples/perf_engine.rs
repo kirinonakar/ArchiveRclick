@@ -45,7 +45,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let list_started = Instant::now();
-    let listing = engine.list(&archive, None, &progress, &cancellation)?;
+    let listing = engine.list(&archive, None, 0, &progress, &cancellation)?;
     let list_ms = list_started.elapsed().as_secs_f64() * 1000.0;
 
     let model_started = Instant::now();

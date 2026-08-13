@@ -8,6 +8,7 @@ import {
 } from "std-widgets.slint";
 
 export component ExtractOverlay inherits Rectangle {
+    in property <int> language-index;
     in property <string> archive-name;
 
     callback accepted(int, int, string, bool);
@@ -15,72 +16,82 @@ export component ExtractOverlay inherits Rectangle {
 
     background: #00000080;
     accessible-role: region;
-    accessible-label: "Extract archive";
+    accessible-label: root.language-index == 1 ? "압축 풀기" : root.language-index == 2 ? "アーカイブを展開" : "Extract archive";
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 398px;
+        width: 480px;
+        height: 360px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
-        border-radius: 6px;
+        border-radius: 12px;
+        drop-shadow-blur: 22px;
+        drop-shadow-color: #00000055;
+        drop-shadow-offset-y: 6px;
 
         VerticalLayout {
             padding: 18px;
-            spacing: 10px;
+            spacing: 8px;
 
             Text {
-                text: "Extract";
-                font-size: 20px;
-                font-weight: 600;
+                text: root.language-index == 1 ? "압축 풀기" : root.language-index == 2 ? "展開" : "Extract";
+                font-size: 21px;
+                font-weight: 700;
                 color: Palette.foreground;
             }
 
             Text {
                 text: root.archive-name;
                 color: Palette.foreground;
+                opacity: 0.72;
                 overflow: elide;
             }
 
             Text {
-                text: "Destination";
+                text: root.language-index == 1 ? "대상 폴더" : root.language-index == 2 ? "展開先" : "Destination";
                 color: Palette.foreground;
+                font-weight: 600;
             }
 
             destination := ComboBox {
-                model: [
-                    "Choose a directory…",
-                    "Current directory",
-                    "Archive-name directory"
-                ];
+                model: root.language-index == 1
+                    ? ["폴더 선택…", "현재 폴더", "압축파일 이름 폴더"]
+                    : root.language-index == 2
+                        ? ["フォルダーを選択…", "現在のフォルダー", "アーカイブ名フォルダー"]
+                        : ["Choose a directory…", "Current directory", "Archive-name directory"];
                 current-index: 2;
             }
 
             Text {
-                text: "Existing files";
+                text: root.language-index == 1 ? "기존 파일" : root.language-index == 2 ? "既存ファイル" : "Existing files";
                 color: Palette.foreground;
+                font-weight: 600;
             }
 
             conflict-policy := ComboBox {
-                model: ["Ask for each conflict", "Overwrite", "Skip"];
+                model: root.language-index == 1
+                    ? ["충돌마다 묻기", "덮어쓰기", "건너뛰기"]
+                    : root.language-index == 2
+                        ? ["毎回確認", "上書き", "スキップ"]
+                        : ["Ask for each conflict", "Overwrite", "Skip"];
                 current-index: 0;
             }
 
-            Text {
-                text: "Password (if required)";
-                color: Palette.foreground;
-            }
+            HorizontalLayout {
+                spacing: 8px;
 
-            password := LineEdit {
-                input-type: InputType.password;
-                placeholder-text: "Leave empty when not needed";
-            }
+                password := LineEdit {
+                    horizontal-stretch: 1;
+                    input-type: InputType.password;
+                    placeholder-text: root.language-index == 1 ? "필요할 때만 암호 입력" : root.language-index == 2 ? "必要な場合のみ入力" : "Leave empty when not needed";
+                }
 
-            selected-only := CheckBox {
-                text: "Extract selected entries only";
-                checked: false;
+                selected-only := CheckBox {
+                    text: root.language-index == 1 ? "선택 항목만" : root.language-index == 2 ? "選択項目のみ" : "Selected only";
+                    checked: false;
+                }
             }
 
             Rectangle { vertical-stretch: 1; }
@@ -91,12 +102,12 @@ export component ExtractOverlay inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
 
                 Button {
-                    text: "Cancel";
+                    text: root.language-index == 1 ? "취소" : root.language-index == 2 ? "キャンセル" : "Cancel";
                     clicked => { root.cancelled(); }
                 }
 
                 Button {
-                    text: "Extract";
+                    text: root.language-index == 1 ? "압축 풀기" : root.language-index == 2 ? "展開" : "Extract";
                     primary: true;
                     clicked => {
                         root.accepted(
@@ -112,46 +123,8 @@ export component ExtractOverlay inherits Rectangle {
     }
 }
 
-component CpuThreadOption inherits Rectangle {
-    in property <string> option-text;
-    in property <bool> is-selected;
-    callback selected();
-
-    height: 26px;
-    background: is-selected ? Palette.accent-background : Palette.background;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: is-selected ? Palette.accent-background : Palette.border;
-
-    TouchArea {
-        clicked => { root.selected(); }
-        Rectangle {
-            width: 12px;
-            height: 12px;
-            x: 8px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 6px;
-            border-width: 1.5px;
-            border-color: is-selected ? Palette.accent-background : Palette.border;
-            Rectangle {
-                x: 3px;
-                y: 3px;
-                width: 6px;
-                height: 6px;
-                border-radius: 3px;
-                background: is-selected ? Palette.accent-background : transparent;
-            }
-        }
-        Text {
-            x: 26px;
-            vertical-alignment: center;
-            text: root.option-text;
-            color: Palette.foreground;
-        }
-    }
-}
-
 export component CreateOverlay inherits Rectangle {
+    in property <int> language-index;
     in property <string> source-summary;
     in property <string> destination;
     in property <[string]> available-formats;
@@ -167,45 +140,50 @@ export component CreateOverlay inherits Rectangle {
 
     background: #00000080;
     accessible-role: region;
-    accessible-label: "Create archive";
+    accessible-label: root.language-index == 1 ? "압축파일 만들기" : root.language-index == 2 ? "アーカイブを作成" : "Create archive";
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 500px;
-        height: 548px;
+        height: 470px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
-        border-radius: 6px;
+        border-radius: 12px;
+        drop-shadow-blur: 22px;
+        drop-shadow-color: #00000055;
+        drop-shadow-offset-y: 6px;
 
         VerticalLayout {
             padding: 18px;
-            spacing: 10px;
+            spacing: 8px;
 
             Text {
-                text: "Create archive";
-                font-size: 20px;
-                font-weight: 600;
+                text: root.language-index == 1 ? "압축파일 만들기" : root.language-index == 2 ? "アーカイブを作成" : "Create archive";
+                font-size: 21px;
+                font-weight: 700;
                 color: Palette.foreground;
             }
 
             Text {
                 text: root.source-summary;
                 color: Palette.foreground;
+                opacity: 0.72;
                 wrap: word-wrap;
+                overflow: elide;
             }
 
             HorizontalLayout {
                 spacing: 8px;
 
                 Button {
-                    text: "Choose files…";
+                    text: root.language-index == 1 ? "파일 선택…" : root.language-index == 2 ? "ファイルを選択…" : "Choose files…";
                     clicked => { root.choose-files(); }
                 }
 
                 Button {
-                    text: "Choose folder…";
+                    text: root.language-index == 1 ? "폴더 선택…" : root.language-index == 2 ? "フォルダーを選択…" : "Choose folder…";
                     clicked => { root.choose-folder(); }
                 }
 
@@ -213,13 +191,15 @@ export component CreateOverlay inherits Rectangle {
             }
 
             Text {
-                text: "Destination";
+                text: root.language-index == 1 ? "저장 위치" : root.language-index == 2 ? "保存先" : "Destination";
                 color: Palette.foreground;
+                font-weight: 600;
             }
 
             Text {
                 text: root.destination;
                 color: Palette.foreground;
+                opacity: 0.72;
                 overflow: elide;
             }
 
@@ -227,12 +207,13 @@ export component CreateOverlay inherits Rectangle {
                 spacing: 12px;
 
                 VerticalLayout {
-                    spacing: 5px;
+                    spacing: 4px;
                     horizontal-stretch: 2;
 
                     Text {
-                        text: "Format";
+                        text: root.language-index == 1 ? "형식" : root.language-index == 2 ? "形式" : "Format";
                         color: Palette.foreground;
+                        font-weight: 600;
                     }
 
                     format := ComboBox {
@@ -242,12 +223,13 @@ export component CreateOverlay inherits Rectangle {
                 }
 
                 VerticalLayout {
-                    spacing: 5px;
+                    spacing: 4px;
                     horizontal-stretch: 1;
 
                     Text {
-                        text: "Level";
+                        text: root.language-index == 1 ? "압축률" : root.language-index == 2 ? "レベル" : "Level";
                         color: Palette.foreground;
+                        font-weight: 600;
                     }
 
                     level := SpinBox {
@@ -260,51 +242,34 @@ export component CreateOverlay inherits Rectangle {
             }
 
             Text {
-                text: "CPU 스레드 (7z 압축)";
+                text: root.language-index == 1 ? "CPU 스레드 (7z 압축)" : root.language-index == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
                 color: Palette.foreground;
+                font-weight: 600;
+            }
+
+            thread-picker := ComboBox {
+                model: root.language-index == 1
+                    ? ["자동", "4", "6", "8", "10", "16", "전체"]
+                    : root.language-index == 2
+                        ? ["自動", "4", "6", "8", "10", "16", "すべて"]
+                        : ["Auto", "4", "6", "8", "10", "16", "All"];
+                current-index: root.thread-index;
+                changed current-index => { root.thread-index = self.current-index; }
             }
 
             HorizontalLayout {
                 spacing: 8px;
 
-                CpuThreadOption {
-                    option-text: "자동";
-                    is-selected: thread-index == 0;
-                    selected => { thread-index = 0; }
-                }
-                CpuThreadOption {
-                    option-text: "4";
-                    is-selected: thread-index == 1;
-                    selected => { thread-index = 1; }
-                }
-                CpuThreadOption {
-                    option-text: "8";
-                    is-selected: thread-index == 2;
-                    selected => { thread-index = 2; }
-                }
-                CpuThreadOption {
-                    option-text: "16";
-                    is-selected: thread-index == 3;
-                    selected => { thread-index = 3; }
-                }
-                CpuThreadOption {
-                    option-text: "전체";
-                    is-selected: thread-index == 4;
-                    selected => { thread-index = 4; }
+                password := LineEdit {
+                    horizontal-stretch: 1;
+                    input-type: InputType.password;
+                    enabled: format.current-value == "ZIP" || format.current-value == "7z";
+                    placeholder-text: format.current-value == "ZIP" || format.current-value == "7z"
+                        ? (root.language-index == 1 ? "암호 (선택)" : root.language-index == 2 ? "パスワード（任意）" : "Password (optional)")
+                        : (root.language-index == 1 ? "ZIP/7z만 지원" : root.language-index == 2 ? "ZIP/7zのみ対応" : "ZIP / 7z only");
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-            }
-
-            Text {
-                text: "Password (supported formats only)";
-                color: Palette.foreground;
-            }
-
-            password := LineEdit {
-                input-type: InputType.password;
-                enabled: format.current-value == "ZIP" || format.current-value == "7z";
-                placeholder-text: format.current-value == "ZIP" || format.current-value == "7z" ? "Optional" : "ZIP / 7z only";
             }
 
             Rectangle { vertical-stretch: 1; }
@@ -315,16 +280,16 @@ export component CreateOverlay inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
 
                 Button {
-                    text: "Cancel";
+                    text: root.language-index == 1 ? "취소" : root.language-index == 2 ? "キャンセル" : "Cancel";
                     clicked => { root.cancelled(); }
                 }
 
                 Button {
-                    text: "Create";
+                    text: root.language-index == 1 ? "만들기" : root.language-index == 2 ? "作成" : "Create";
                     primary: true;
                     enabled: root.has-sources && root.available-formats.length > 0;
                     clicked => {
-                        root.accepted(format.current-index, level.value, thread-index, password.text);
+                        root.accepted(format.current-index, level.value, root.thread-index, password.text);
                     }
                 }
             }
@@ -337,25 +302,28 @@ export component SettingsOverlay inherits Rectangle {
     in property <int> font-selection;
     in property <int> thread-selection;
     in property <int> theme-selection;
+    in property <[string]> language-options;
+    in property <int> language-selection;
     in property <string> context-menu-state;
 
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
+    private property <int> selected-language: root.language-selection;
 
-    callback accepted(int, int, int);
+    callback accepted(int, int, int, int);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
 
     background: #00000080;
     accessible-role: region;
-    accessible-label: "Settings";
+    accessible-label: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 560px;
-        height: 620px;
+        width: 480px;
+        height: 440px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -365,145 +333,138 @@ export component SettingsOverlay inherits Rectangle {
         drop-shadow-offset-y: 8px;
 
         VerticalLayout {
-            padding: 22px;
-            spacing: 10px;
+            padding: 20px;
+            spacing: 8px;
 
             Text {
-                text: "Settings";
+                text: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
                 font-size: 22px;
                 font-weight: 700;
                 color: Palette.foreground;
             }
 
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.language-selection == 1 ? "언어" : root.language-selection == 2 ? "言語" : "Language";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+                language := ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.language-options;
+                    current-index: root.selected-language;
+                    changed current-index => { root.selected-language = self.current-index; }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.language-selection == 1 ? "인터페이스 글꼴" : root.language-selection == 2 ? "インターフェースフォント" : "Interface font";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+                font := ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.font-options;
+                    current-index: root.font-selection;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.language-selection == 1 ? "CPU 스레드 (7z)" : root.language-selection == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+                thread-picker := ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.language-selection == 1
+                        ? ["자동", "4", "6", "8", "10", "16", "전체"]
+                        : root.language-selection == 2
+                            ? ["自動", "4", "6", "8", "10", "16", "すべて"]
+                            : ["Auto", "4", "6", "8", "10", "16", "All"];
+                    current-index: root.thread-index;
+                    changed current-index => { root.thread-index = self.current-index; }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.language-selection == 1 ? "테마" : root.language-selection == 2 ? "テーマ" : "Theme";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+                theme := ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.language-selection == 1
+                        ? ["시스템", "라이트", "다크"]
+                        : root.language-selection == 2
+                            ? ["システム", "ライト", "ダーク"]
+                            : ["System", "Light", "Dark"];
+                    current-index: root.theme-index;
+                    changed current-index => { root.theme-index = self.current-index; }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
             Text {
-                text: "Interface font";
-                color: Palette.foreground;
+                text: root.language-selection == 1 ? "Explorer 우클릭 메뉴" : root.language-selection == 2 ? "Explorer 右クリックメニュー" : "Explorer right-click menu";
                 font-weight: 600;
-            }
-
-            font := ComboBox {
-                model: root.font-options;
-                current-index: root.font-selection;
-            }
-
-            Text {
-                text: "Auto picks Noto Sans JP when installed, otherwise Yu Gothic.";
                 color: Palette.foreground;
-                font-size: 12px;
-                opacity: 0.75;
-                wrap: word-wrap;
-            }
-
-            Text {
-                text: "CPU 스레드 (7z 압축)";
-                color: Palette.foreground;
-                font-weight: 600;
             }
 
             HorizontalLayout {
                 spacing: 8px;
 
-                CpuThreadOption {
-                    option-text: "자동";
-                    is-selected: thread-index == 0;
-                    selected => { thread-index = 0; }
+                Text {
+                    text: root.context-menu-state;
+                    color: Palette.foreground;
+                    font-size: 12px;
+                    opacity: 0.72;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
                 }
-                CpuThreadOption {
-                    option-text: "4";
-                    is-selected: thread-index == 1;
-                    selected => { thread-index = 1; }
-                }
-                CpuThreadOption {
-                    option-text: "8";
-                    is-selected: thread-index == 2;
-                    selected => { thread-index = 2; }
-                }
-                CpuThreadOption {
-                    option-text: "16";
-                    is-selected: thread-index == 3;
-                    selected => { thread-index = 3; }
-                }
-                CpuThreadOption {
-                    option-text: "전체";
-                    is-selected: thread-index == 4;
-                    selected => { thread-index = 4; }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-            }
-
-            Text {
-                text: "테마";
-                color: Palette.foreground;
-                font-weight: 600;
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
-
-                CpuThreadOption {
-                    option-text: "시스템";
-                    is-selected: theme-index == 0;
-                    selected => { theme-index = 0; }
-                }
-                CpuThreadOption {
-                    option-text: "라이트";
-                    is-selected: theme-index == 1;
-                    selected => { theme-index = 1; }
-                }
-                CpuThreadOption {
-                    option-text: "다크";
-                    is-selected: theme-index == 2;
-                    selected => { theme-index = 2; }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-            }
-
-            Text {
-                text: "Explorer right-click menu";
-                font-weight: 600;
-                color: Palette.foreground;
-            }
-
-            Text {
-                text: root.context-menu-state;
-                color: Palette.foreground;
-                font-size: 12px;
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
 
                 Button {
-                    text: "Register";
+                    text: root.language-selection == 1 ? "등록" : root.language-selection == 2 ? "登録" : "Register";
                     clicked => { root.register-context-menu(); }
                 }
 
                 Button {
-                    text: "Remove";
+                    text: root.language-selection == 1 ? "제거" : root.language-selection == 2 ? "削除" : "Remove";
                     clicked => { root.unregister-context-menu(); }
                 }
-
-                Rectangle { horizontal-stretch: 1; }
             }
 
             Rectangle { vertical-stretch: 1; }
 
             HorizontalLayout {
                 spacing: 8px;
-
                 Rectangle { horizontal-stretch: 1; }
-
                 Button {
-                    text: "Cancel";
+                    text: root.language-selection == 1 ? "취소" : root.language-selection == 2 ? "キャンセル" : "Cancel";
                     clicked => { root.cancelled(); }
                 }
-
                 Button {
-                    text: "OK";
+                    text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(font.current-index, thread-index, theme-index); }
+                    clicked => { root.accepted(font.current-index, root.thread-index, root.theme-index, root.selected-language); }
                 }
             }
         }

@@ -32,6 +32,7 @@ pub trait ArchiveEngine: Send + Sync {
         &self,
         path: &Path,
         password: Option<&str>,
+        pathname_codepage: u32,
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
     ) -> ArchiveResult<ArchiveListing>;

@@ -45,8 +45,7 @@ mod platform_impl {
         ArchiveEngine, ArchiveEntry, ArchiveEntryKind, ArchiveError, ArchiveListing, ArchiveResult,
         ConflictChoice, ConflictResolver, CreateFormat, CreateOptions, ExtractOptions,
         InitialConflictPolicy, OperationSummary, ProgressSink, encoding,
-        ensure_no_reparse_ancestors,
-        safe_relative_path,
+        ensure_no_reparse_ancestors, safe_relative_path,
     };
 
     const ARCHIVE_EOF: c_int = 1;
@@ -1076,7 +1075,7 @@ mod platform_impl {
             Ok(reader)
         }
 
-        fn next_entry(&mut self) -> ArchiveResult<Option<RawEntryInfo>> {
+        fn next_entry(&mut self, pathname_codepage: u32) -> ArchiveResult<Option<RawEntryInfo>> {
             let mut retries = 0;
             loop {
                 let mut entry = ptr::null_mut();
@@ -1085,7 +1084,7 @@ mod platform_impl {
                 match status {
                     ARCHIVE_EOF => return Ok(None),
                     ARCHIVE_OK | ARCHIVE_WARN if !entry.is_null() => {
-                        return self.copy_entry(entry).map(Some);
+                        return self.copy_entry(entry, pathname_codepage).map(Some);
                     }
                     ARCHIVE_RETRY if retries < 3 => retries += 1,
                     _ => return Err(self.error("reading archive header")),
@@ -1093,7 +1092,11 @@ mod platform_impl {
             }
         }
 
-        fn copy_entry(&self, entry: *mut RawEntry) -> ArchiveResult<RawEntryInfo> {
+        fn copy_entry(
+            &self,
+            entry: *mut RawEntry,
+            pathname_codepage: u32,
+        ) -> ArchiveResult<RawEntryInfo> {
             // SAFETY: entry is borrowed from the live reader until next_header.
             // Prefer the raw pathname bytes.  libarchive keeps legacy
             // (non-UTF-8) names as raw bytes, while the locale-based wide and
@@ -1109,7 +1112,7 @@ mod platform_impl {
                 )?
             };
             let path = raw
-                .and_then(|raw| encoding::decode_name(&raw))
+                .and_then(|raw| encoding::decode_name_with_codepage(&raw, pathname_codepage))
                 .filter(|name| !name.is_empty())
                 .map(PathBuf::from);
             let path = match path {
@@ -1137,10 +1140,12 @@ mod platform_impl {
                                     )?
                                 }
                                 .map(PathBuf::from)
-                                .ok_or_else(|| ArchiveError::LibArchive {
-                                    operation: "decoding archive pathname",
-                                    message: "entry pathname is missing or cannot be decoded"
-                                        .to_owned(),
+                                .ok_or_else(|| {
+                                    ArchiveError::LibArchive {
+                                        operation: "decoding archive pathname",
+                                        message: "entry pathname is missing or cannot be decoded"
+                                            .to_owned(),
+                                    }
                                 })?
                             }
                             None => {
@@ -1668,6 +1673,7 @@ mod platform_impl {
             &self,
             path: &Path,
             password: Option<&str>,
+            pathname_codepage: u32,
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
@@ -1690,7 +1696,7 @@ mod platform_impl {
 
             while let Some(entry) = {
                 check_cancel(cancel)?;
-                reader.next_entry()?
+                reader.next_entry(pathname_codepage)?
             } {
                 let index = entries.len() as u64;
                 scan.visit_entry()?;
@@ -1713,15 +1719,22 @@ mod platform_impl {
                 }
                 snapshot.current_file.clone_from(&entry.display_path);
                 snapshot.entries_processed = index + 1;
-                reader.drain_current_entry(
-                    &mut buffer,
-                    cancel,
-                    &mut scan,
-                    |_, consumed_input| {
-                        snapshot.bytes_processed = consumed_input.min(total_input);
-                        throttled.report(snapshot.clone(), false);
-                    },
-                )?;
+                // libarchive treats directory entries as header-only.  Some
+                // RAR5 archives reject archive_read_data() for those entries
+                // with "Can't decompress an entry marked as a directory".
+                // Only drain regular-file data while building the listing;
+                // next_header() advances over header-only entries for us.
+                if entry.kind == ArchiveEntryKind::File {
+                    reader.drain_current_entry(
+                        &mut buffer,
+                        cancel,
+                        &mut scan,
+                        |_, consumed_input| {
+                            snapshot.bytes_processed = consumed_input.min(total_input);
+                            throttled.report(snapshot.clone(), false);
+                        },
+                    )?;
+                }
                 snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
                 throttled.report(snapshot.clone(), false);
                 entries.push(ArchiveEntry {
@@ -1797,15 +1810,17 @@ mod platform_impl {
 
             while let Some(entry) = {
                 check_cancel(cancel)?;
-                reader.next_entry()?
+                reader.next_entry(options.pathname_codepage)?
             } {
                 scan.visit_entry()?;
                 let relative = safe_relative_path(&entry.path)?;
                 if !options.selection.includes(&relative) {
                     snapshot.current_file.clone_from(&entry.display_path);
-                    reader.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {
-                        throttled.report(snapshot.clone(), false)
-                    })?;
+                    if entry.kind == ArchiveEntryKind::File {
+                        reader.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {
+                            throttled.report(snapshot.clone(), false)
+                        })?;
+                    }
                     continue;
                 }
                 selected_entries = selected_entries.checked_add(1).ok_or_else(|| {
@@ -1839,18 +1854,6 @@ mod platform_impl {
                 match entry.kind {
                     ArchiveEntryKind::Directory => {
                         let action = prepare_directory(&root, &target, &mut policy, conflicts)?;
-                        let drained = reader.drain_current_entry(
-                            &mut buffer,
-                            cancel,
-                            &mut scan,
-                            |entry_bytes, _| {
-                                snapshot.bytes_processed =
-                                    progress_bytes.saturating_add(entry_bytes);
-                                snapshot.entries_processed = progress_entries;
-                                throttled.report(snapshot.clone(), false);
-                            },
-                        )?;
-                        completed_progress_bytes = completed_progress_bytes.max(drained);
                         match action {
                             ConflictAction::Overwrite => summary.entries_processed += 1,
                             ConflictAction::Skip => summary.entries_skipped += 1,
@@ -2077,7 +2080,7 @@ mod platform_impl {
 
             while let Some(entry) = {
                 check_cancel(cancel)?;
-                reader.next_entry()?
+                reader.next_entry(0)?
             } {
                 enforce_limit(
                     summary.entries_processed.saturating_add(1),
@@ -2085,21 +2088,23 @@ mod platform_impl {
                     "archive test entry count",
                 )?;
                 snapshot.current_file = entry.display_path;
-                loop {
-                    check_cancel(cancel)?;
-                    let amount = reader.read(&mut buffer)?;
-                    if amount == 0 {
-                        break;
+                if entry.kind == ArchiveEntryKind::File {
+                    loop {
+                        check_cancel(cancel)?;
+                        let amount = reader.read(&mut buffer)?;
+                        if amount == 0 {
+                            break;
+                        }
+                        summary.bytes_processed = checked_add_with_limit(
+                            summary.bytes_processed,
+                            amount as u64,
+                            MAX_TEST_OUTPUT_BYTES,
+                            "archive test decompressed data",
+                        )?;
+                        snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
+                        snapshot.entries_processed = summary.entries_processed;
+                        throttled.report(snapshot.clone(), false);
                     }
-                    summary.bytes_processed = checked_add_with_limit(
-                        summary.bytes_processed,
-                        amount as u64,
-                        MAX_TEST_OUTPUT_BYTES,
-                        "archive test decompressed data",
-                    )?;
-                    snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
-                    snapshot.entries_processed = summary.entries_processed;
-                    throttled.report(snapshot.clone(), false);
                 }
                 summary.entries_processed += 1;
                 snapshot.entries_processed = summary.entries_processed;
@@ -2758,9 +2763,8 @@ mod platform_impl {
             MAX_LIST_ENTRIES, MAX_LIST_PATH_BYTES, MAX_SUPPORTED_LIBARCHIVE_VERSION,
             MAX_TEST_OUTPUT_BYTES, RawArchive, ScanBudget, canonical_library_file,
             checked_add_with_limit, copy_c_string_bounded, copy_c_string_bytes_bounded,
-            enforce_limit,
-            ensure_supported_libarchive_abi, looks_like_password_error, probe_supported_formats,
-            system_time_seconds,
+            enforce_limit, ensure_supported_libarchive_abi, looks_like_password_error,
+            probe_supported_formats, system_time_seconds,
         };
         use std::{
             ffi::CString,
@@ -2975,6 +2979,7 @@ mod platform_impl {
             &self,
             _path: &Path,
             _password: Option<&str>,
+            _pathname_codepage: u32,
             _progress: &dyn ProgressSink,
             _cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {

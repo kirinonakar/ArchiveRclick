@@ -1,6 +1,7 @@
 import {
     Button,
     CheckBox,
+    ComboBox,
     LineEdit,
     ListView,
     Palette
@@ -50,9 +51,9 @@ component ArchiveTableHeader inherits Rectangle {
     callback sort(int);
 
     private property <length> content-width: self.width - 36px;
-    height: 32px;
+    height: 30px;
     background: Palette.alternate-background;
-    border-radius: 12px;
+    border-radius: 10px;
     border-bottom-left-radius: 0px;
     border-bottom-right-radius: 0px;
 
@@ -61,7 +62,7 @@ component ArchiveTableHeader inherits Rectangle {
         width: 36px;
         height: parent.height;
         background: Palette.alternate-background;
-        border-radius: 12px;
+        border-radius: 10px;
         border-top-right-radius: 0px;
         border-bottom-left-radius: 0px;
         border-bottom-right-radius: 0px;
@@ -120,7 +121,7 @@ component ArchiveListRow inherits Rectangle {
     callback activate(int);
 
     private property <length> content-width: self.width - 36px;
-    height: 30px;
+    height: 28px;
     background: root.entry.selected ? Palette.selection-background
         : row-pointer.has-hover ? Palette.control-background : transparent;
     border-radius: 6px;
@@ -132,26 +133,17 @@ component ArchiveListRow inherits Rectangle {
 
     CheckBox {
         x: 6px;
-        y: 2px;
+        y: 1px;
         width: 24px;
-        height: parent.height - 4px;
+        height: parent.height - 2px;
         checked: root.entry.selected;
         text: "";
         toggled => { root.toggle(root.row-index); }
     }
 
     Text {
-        x: 42px;
-        width: 14px;
-        height: parent.height;
-        text: root.entry.is-folder ? "▸" : "";
-        color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
-        vertical-alignment: center;
-    }
-
-    Text {
-        x: 60px;
-        width: root.content-width * 0.28 - 24px;
+        x: 40px;
+        width: root.content-width * 0.28 - 4px;
         height: parent.height;
         text: root.entry.name;
         color: root.entry.selected ? Palette.selection-foreground : Palette.foreground;
@@ -212,21 +204,24 @@ component ArchiveListRow inherits Rectangle {
     }
 }
 
-component ToolButton inherits Rectangle {
-    in property <string> text;
+component IconToolButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
     in property <bool> enabled: true;
     in property <bool> primary: false;
     callback clicked;
 
-    height: 34px;
-    border-radius: 8px;
-    background: !root.enabled ? Palette.control-background
-        : root.primary ? (touch.has-hover ? Palette.accent-background : Palette.selection-background)
-        : touch.has-hover ? Palette.control-background : Palette.alternate-background;
-    border-width: root.primary ? 0px : 1px;
-    border-color: Palette.border;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    // Ghost controls stay transparent at rest; hover/focus uses a very light
+    // black wash so the affordance feels slightly darker, never brighter.
+    background: !root.enabled ? transparent
+        : touch.has-hover ? #00000012 : transparent;
+    border-width: 0px;
     accessible-role: button;
-    accessible-label: root.text;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -234,12 +229,17 @@ component ToolButton inherits Rectangle {
         clicked => { root.clicked(); }
 
         Text {
-            text: root.text;
-            color: root.enabled ? (root.primary ? Palette.accent-foreground : Palette.foreground) : Palette.foreground;
-            font-weight: 600;
-            font-size: 13px;
+            text: root.glyph;
+            font-family: "Segoe MDL2 Assets";
+            font-size: 19px;
+            color: root.enabled ? (root.primary ? Palette.accent-background : Palette.foreground) : Palette.foreground;
+            opacity: root.enabled ? 1.0 : 0.38;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+
+        Tooltip {
+            text: @markdown("\{root.label}");
         }
     }
 }
@@ -280,14 +280,21 @@ export component AppWindow inherits Window {
     in-out property <int> font-selection;
     in-out property <int> settings-thread-selection: 0;
     in-out property <int> theme-selection: 0;
+    in-out property <[string]> language-options;
+    in-out property <int> language-selection: 0;
+    in-out property <[string]> encoding-options;
+    in-out property <int> encoding-selection: 0;
+    in-out property <int> selection-state: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
 
     callback open-requested();
     callback up-requested();
     callback toggle-selection(int);
+    callback select-all-requested(bool);
     callback activate-row(int);
     callback sort-requested(int);
+    callback encoding-selection-changed(int);
     callback show-extract-requested();
     callback extract-requested(int, int, string, bool);
     callback prepare-create-requested();
@@ -301,7 +308,7 @@ export component AppWindow inherits Window {
     callback dropped(data-transfer);
 
     callback settings-requested();
-    callback settings-applied(int, int, int);
+    callback settings-applied(int, int, int, int);
     callback settings-cancelled();
     callback context-menu-register-requested();
     callback context-menu-unregister-requested();
@@ -310,17 +317,16 @@ export component AppWindow inherits Window {
 
     title: root.archive-title == "" ? "ArchiveRclick" : root.archive-title + " — ArchiveRclick";
     icon: @image-url("../app.png");
-    // The active interface font is resolved at startup (auto: Noto Sans JP
-    // when installed, otherwise Yu Gothic) and can be changed in Settings.
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
-    preferred-width: 1080px;
-    preferred-height: 720px;
-    min-width: 760px;
-    min-height: 620px;
+    preferred-width: 1040px;
+    preferred-height: 600px;
+    // Keep the compact layout usable on narrow screens.  The flexible path
+    // field yields first, while the fixed controls remain accessible.
+    min-width: 520px;
+    min-height: 400px;
     background: Palette.background;
+
     // Theme selection: 0 = follow the system, 1 = light, 2 = dark.
-    // Slint 1.17 cannot bind Palette.color-scheme directly; apply the scheme
-    // whenever the selection changes (fires at startup when Rust sets it).
     changed theme-selection => {
         Palette.color-scheme = root.theme-selection == 1 ? ColorScheme.light
             : root.theme-selection == 2 ? ColorScheme.dark : ColorScheme.unknown;
@@ -382,72 +388,34 @@ export component AppWindow inherits Window {
                 height: parent.height;
                 spacing: 0px;
 
-                // ---------------- Header ----------------
+                // ---------------- Compact icon toolbar ----------------
                 Rectangle {
-                    height: 52px;
-                    background: Palette.alternate-background;
-                    border-width: 1px;
-                    border-color: Palette.border;
-
-                    HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        spacing: 10px;
-
-                        Image {
-                            width: 26px;
-                            height: 26px;
-                            source: @image-url("../app.png");
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: "ArchiveRclick";
-                            font-size: 16px;
-                            font-weight: 700;
-                            color: Palette.foreground;
-                            vertical-alignment: center;
-                        }
-
-                        Rectangle { horizontal-stretch: 1; }
-
-                        Text {
-                            text: root.busy ? "Working…" : root.status-text;
-                            color: Palette.foreground;
-                            font-size: 12px;
-                            opacity: 0.8;
-                            vertical-alignment: center;
-                            horizontal-alignment: right;
-                            overflow: elide;
-                        }
-                    }
-                }
-
-                // ---------------- Toolbar ----------------
-                Rectangle {
-                    height: 52px;
+                    height: 56px;
                     background: Palette.background;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                    // A soft shadow creates a lighter visual break than a
+                    // full-width border while keeping the toolbar compact.
+                    drop-shadow-blur: 10px;
+                    drop-shadow-color: #00000012;
+                    drop-shadow-offset-y: 2px;
 
                     HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        padding-top: 9px;
-                        padding-bottom: 9px;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 7px;
+                        padding-bottom: 7px;
                         spacing: 8px;
 
-                        ToolButton {
-                            text: "Open";
-                            width: 88px;
+                        IconToolButton {
+                            glyph: "\u{E8E5}";
+                            label: root.language-selection == 1 ? "열기" : root.language-selection == 2 ? "開く" : "Open";
                             primary: true;
                             enabled: !root.busy;
                             clicked => { root.open-requested(); }
                         }
 
-                        ToolButton {
-                            text: "Extract";
-                            width: 88px;
+                        IconToolButton {
+                            glyph: "\u{E896}";
+                            label: root.language-selection == 1 ? "압축 풀기" : root.language-selection == 2 ? "展開" : "Extract";
                             enabled: root.has-archive && !root.busy;
                             clicked => {
                                 root.show-extract-requested();
@@ -455,25 +423,25 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        ToolButton {
-                            text: "Compress";
-                            width: 100px;
+                        IconToolButton {
+                            glyph: "\u{E74E}";
+                            label: root.language-selection == 1 ? "압축하기" : root.language-selection == 2 ? "圧縮" : "Compress";
                             enabled: !root.busy;
                             clicked => { root.prepare-create-requested(); }
                         }
 
-                        ToolButton {
-                            text: "Test";
-                            width: 68px;
+                        IconToolButton {
+                            glyph: "\u{E73E}";
+                            label: root.language-selection == 1 ? "테스트" : root.language-selection == 2 ? "テスト" : "Test";
                             enabled: root.has-archive && !root.busy;
                             clicked => { root.test-requested(); }
                         }
 
                         Rectangle { horizontal-stretch: 1; }
 
-                        ToolButton {
-                            text: "Settings";
-                            width: 96px;
+                        IconToolButton {
+                            glyph: "\u{E713}";
+                            label: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
                             enabled: !root.busy;
                             clicked => { root.settings-requested(); }
                         }
@@ -482,21 +450,27 @@ export component AppWindow inherits Window {
 
                 // ---------------- Path bar ----------------
                 Rectangle {
-                    height: 44px;
+                    height: 42px;
                     background: Palette.background;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                    // Keep this surface visually connected to the toolbar;
+                    // the rounded path field below provides the actual
+                    // control boundary.
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: #0000000a;
+                    drop-shadow-offset-y: 1px;
 
                     HorizontalLayout {
-                        padding-left: 10px;
+                        padding-left: 12px;
                         padding-right: 12px;
-                        padding-top: 5px;
-                        padding-bottom: 5px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
                         spacing: 8px;
 
-                        ToolButton {
-                            text: "Up";
-                            width: 56px;
+                        IconToolButton {
+                            width: 34px;
+                            height: 34px;
+                            glyph: "\u{E74A}";
+                            label: root.language-selection == 1 ? "위로" : root.language-selection == 2 ? "上へ" : "Up";
                             enabled: root.can-go-up && !root.busy;
                             clicked => { root.up-requested(); }
                         }
@@ -513,53 +487,119 @@ export component AppWindow inherits Window {
                                 x: 12px;
                                 width: parent.width - 24px;
                                 height: parent.height;
-                                text: root.has-archive ? (root.current-folder == "" ? "/" : root.current-folder) : "No archive open";
+                                text: root.has-archive
+                                    ? (root.current-folder == "" ? "/" : root.current-folder)
+                                    : (root.language-selection == 1 ? "열린 압축파일 없음" : root.language-selection == 2 ? "アーカイブ未選択" : "No archive open");
                                 color: Palette.foreground;
                                 font-size: 13px;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
                         }
+
+                        Text {
+                            text: "Code page";
+                            width: 62px;
+                            color: Palette.foreground;
+                            opacity: 0.72;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        ComboBox {
+                            // Keep the longest English entry (for example,
+                            // "CP950 — Traditional Chinese") fully visible.
+                            width: 230px;
+                            model: root.encoding-options;
+                            current-index: root.encoding-selection;
+                            accessible-label: "Code page";
+                            changed current-index => {
+                                root.encoding-selection = self.current-index;
+                                root.encoding-selection-changed(self.current-index);
+                            }
+                        }
+
                     }
                 }
 
-                // ---------------- Archive table ----------------
+                // ---------------- Archive contents ----------------
                 if root.has-archive : Rectangle {
                     vertical-stretch: 1;
                     background: Palette.background;
 
-                    Rectangle {
-                        x: 12px;
-                        y: 12px;
-                        width: parent.width - 24px;
-                        height: parent.height - 24px;
-                        background: Palette.background;
-                        border-width: 1px;
-                        border-color: Palette.border;
-                        border-radius: 12px;
-                        clip: true;
-                        drop-shadow-blur: 12px;
-                        drop-shadow-color: #00000033;
-                        drop-shadow-offset-y: 3px;
+                    VerticalLayout {
+                        spacing: 6px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
 
-                        VerticalLayout {
-                            spacing: 0px;
+                        HorizontalLayout {
+                            height: 28px;
+                            spacing: 8px;
 
-                            ArchiveTableHeader {
-                                sort(column) => { root.sort-requested(column); }
+                            CheckBox {
+                                text: root.language-selection == 1 ? "전체 선택" : root.language-selection == 2 ? "すべて選択" : "Select all";
+                                checked: root.selection-state == 2;
+                                enabled: root.archive-rows.length > 0 && !root.busy;
+                                toggled => { root.select-all-requested(self.checked); }
                             }
 
-                            ListView {
-                                vertical-stretch: 1;
-                                accessible-role: list;
-                                accessible-label: "Archive contents";
-                                accessible-item-count: root.archive-rows.length;
+                            Text {
+                                text: root.selection-state == 2
+                                    ? (root.language-selection == 1 ? "현재 폴더의 모든 항목 선택됨" : root.language-selection == 2 ? "現在のフォルダーをすべて選択中" : "All items in this folder selected")
+                                    : root.selection-state == 1
+                                        ? (root.language-selection == 1 ? "일부 항목 선택됨" : root.language-selection == 2 ? "一部の項目を選択中" : "Some items selected")
+                                        : "";
+                                color: Palette.foreground;
+                                opacity: 0.68;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
 
-                                for row[index] in root.archive-rows : ArchiveListRow {
-                                    entry: row;
-                                    row-index: index;
-                                    toggle(row-index) => { root.toggle-selection(row-index); }
-                                    activate(row-index) => { root.activate-row(row-index); }
+                            Rectangle { horizontal-stretch: 1; }
+
+                            IconToolButton {
+                                width: 28px;
+                                height: 28px;
+                                glyph: "\u{E711}";
+                                label: root.language-selection == 1 ? "선택 해제" : root.language-selection == 2 ? "選択解除" : "Clear selection";
+                                enabled: root.selection-state != 0 && !root.busy;
+                                clicked => { root.select-all-requested(false); }
+                            }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            border-radius: 10px;
+                            clip: true;
+                            drop-shadow-blur: 10px;
+                            drop-shadow-color: #00000022;
+                            drop-shadow-offset-y: 2px;
+
+                            VerticalLayout {
+                                spacing: 0px;
+
+                                ArchiveTableHeader {
+                                    sort(column) => { root.sort-requested(column); }
+                                }
+
+                                ListView {
+                                    vertical-stretch: 1;
+                                    accessible-role: list;
+                                    accessible-label: root.language-selection == 1 ? "압축파일 내용" : root.language-selection == 2 ? "アーカイブの内容" : "Archive contents";
+                                    accessible-item-count: root.archive-rows.length;
+
+                                    for row[index] in root.archive-rows : ArchiveListRow {
+                                        entry: row;
+                                        row-index: index;
+                                        toggle(row-index) => { root.toggle-selection(row-index); }
+                                        activate(row-index) => { root.activate-row(row-index); }
+                                    }
                                 }
                             }
                         }
@@ -573,28 +613,13 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         alignment: center;
-                        spacing: 14px;
-                        padding: 24px;
-
-                        Rectangle {
-                            width: 88px;
-                            height: 88px;
-                            border-radius: 44px;
-                            background: Palette.alternate-background;
-                            border-width: 1px;
-                            border-color: Palette.border;
-
-                            Image {
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                width: 44px;
-                                height: 44px;
-                                source: @image-url("../app.png");
-                            }
-                        }
+                        spacing: 10px;
+                        padding: 20px;
 
                         Text {
-                            text: drop-target.has-drag ? "Release to open" : "Open an archive to inspect its contents";
+                            text: drop-target.has-drag
+                                ? (root.language-selection == 1 ? "놓아서 열기" : root.language-selection == 2 ? "ドロップして開く" : "Release to open")
+                                : (root.language-selection == 1 ? "압축파일을 열어 내용을 확인하세요" : root.language-selection == 2 ? "アーカイブを開いて内容を確認" : "Open an archive to inspect its contents");
                             color: Palette.foreground;
                             font-size: 19px;
                             font-weight: 600;
@@ -602,7 +627,11 @@ export component AppWindow inherits Window {
                         }
 
                         Text {
-                            text: "Use Open, Ctrl+O, a command-line path, or drag an archive here.";
+                            text: root.language-selection == 1
+                                ? "열기, Ctrl+O, 명령줄 경로 또는 압축파일을 이곳에 끌어다 놓으세요."
+                                : root.language-selection == 2
+                                    ? "開く、Ctrl+O、コマンドラインパス、またはここへアーカイブをドロップしてください。"
+                                    : "Use Open, Ctrl+O, a command-line path, or drag an archive here.";
                             color: Palette.foreground;
                             font-size: 12px;
                             opacity: 0.7;
@@ -611,7 +640,7 @@ export component AppWindow inherits Window {
                         }
 
                         Button {
-                            text: "Open archive…";
+                            text: root.language-selection == 1 ? "압축파일 열기…" : root.language-selection == 2 ? "アーカイブを開く…" : "Open archive…";
                             primary: true;
                             enabled: !root.busy;
                             clicked => { root.open-requested(); }
@@ -621,7 +650,7 @@ export component AppWindow inherits Window {
 
                 // ---------------- Status bar ----------------
                 Rectangle {
-                    height: 30px;
+                    height: 26px;
                     background: Palette.alternate-background;
                     border-width: 1px;
                     border-color: Palette.border;
@@ -656,6 +685,7 @@ export component AppWindow inherits Window {
     }
 
     if root.extract-visible : ExtractOverlay {
+        language-index: root.language-selection;
         archive-name: root.archive-title;
         accepted(destination-mode, conflict-policy, password, selected-only) => {
             root.extract-visible = false;
@@ -665,6 +695,7 @@ export component AppWindow inherits Window {
     }
 
     if root.create-visible : CreateOverlay {
+        language-index: root.language-selection;
         source-summary: root.create-source-summary;
         destination: root.create-destination;
         available-formats: root.create-formats;
@@ -697,12 +728,14 @@ export component AppWindow inherits Window {
         font-selection: root.font-selection;
         thread-selection: root.settings-thread-selection;
         theme-selection: root.theme-selection;
+        language-options: root.language-options;
+        language-selection: root.language-selection;
         context-menu-state: root.context-menu-state;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
-        accepted(font-selection, thread-index, theme-index) => {
+        accepted(font-selection, thread-index, theme-index, language-index) => {
             root.settings-visible = false;
-            root.settings-applied(font-selection, thread-index, theme-index);
+            root.settings-applied(font-selection, thread-index, theme-index, language-index);
         }
         cancelled => { root.settings-visible = false; }
     }
@@ -710,13 +743,13 @@ export component AppWindow inherits Window {
     if root.password-visible : Rectangle {
         background: #00000094;
         accessible-role: region;
-        accessible-label: "Archive password";
+        accessible-label: root.language-selection == 1 ? "압축파일 암호" : root.language-selection == 2 ? "アーカイブのパスワード" : "Archive password";
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: 480px;
-            height: 240px;
+            width: 440px;
+            height: 220px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -730,7 +763,7 @@ export component AppWindow inherits Window {
                 spacing: 10px;
 
                 Text {
-                    text: "Password required";
+                    text: root.language-selection == 1 ? "암호 필요" : root.language-selection == 2 ? "パスワードが必要です" : "Password required";
                     font-size: 20px;
                     font-weight: 600;
                     color: Palette.foreground;
@@ -745,7 +778,7 @@ export component AppWindow inherits Window {
                 password-entry := LineEdit {
                     input-type: InputType.password;
                     text <=> root.password-value;
-                    placeholder-text: "Archive password";
+                    placeholder-text: root.language-selection == 1 ? "압축파일 암호" : root.language-selection == 2 ? "アーカイブのパスワード" : "Archive password";
                     enabled: true;
                 }
 
@@ -755,11 +788,11 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        text: "Cancel";
+                        text: root.language-selection == 1 ? "취소" : root.language-selection == 2 ? "キャンセル" : "Cancel";
                         clicked => { root.password-response("", false); }
                     }
                     Button {
-                        text: "Continue";
+                        text: root.language-selection == 1 ? "계속" : root.language-selection == 2 ? "続行" : "Continue";
                         primary: true;
                         enabled: password-entry.text != "";
                         clicked => { root.password-response(password-entry.text, true); }

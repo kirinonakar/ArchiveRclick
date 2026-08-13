@@ -10,27 +10,31 @@
 #![cfg(windows)]
 
 use std::{
-    ffi::{c_void, OsString},
+    ffi::{OsString, c_void},
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr,
-    sync::atomic::{AtomicUsize, Ordering},
     sync::Mutex,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::{
-    core::{implement, w, BOOL, IUnknown, Interface, Ref, GUID, HSTRING, PCWSTR, PSTR, PWSTR},
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HMODULE},
-        Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ},
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HGDIOBJ, SelectObject,
+        },
         System::{
             Com::{
-                CoTaskMemAlloc, CoTaskMemFree, FORMATETC, IClassFactory, IClassFactory_Impl,
-                IBindCtx, IDataObject, STGMEDIUM,
+                CoTaskMemAlloc, CoTaskMemFree, FORMATETC, IBindCtx, IClassFactory,
+                IClassFactory_Impl, IDataObject, STGMEDIUM,
             },
             LibraryLoader::{
-                GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
+                GetModuleHandleExW,
             },
             Ole::ReleaseStgMedium,
             Registry::{
@@ -45,17 +49,18 @@ use windows::{
                 ECS_ENABLED, ECS_HIDDEN, ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl,
                 IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
                 IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl, IShellItem,
-                IShellItemArray, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
+                IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
                 SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                DestroyIcon, GetIconInfo, HICON, HMENU, ICONINFO, InsertMenuW, MF_BYPOSITION,
-                MF_STRING, SW_SHOWNORMAL, SetMenuItemBitmaps,
+                DI_NORMAL, DestroyIcon, DrawIconEx, GetSystemMetrics, HICON, HMENU, InsertMenuW,
+                MENUITEMINFOW, MF_BYPOSITION, MF_STRING, MIIM_BITMAP, SM_CXMENUCHECK,
+                SM_CYMENUCHECK, SW_SHOWNORMAL, SetMenuItemInfoW,
             },
         },
     },
+    core::{BOOL, GUID, HSTRING, IUnknown, Interface, PCWSTR, PSTR, PWSTR, Ref, implement, w},
 };
-use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 
 use windows::core::Result as WinResult;
 
@@ -91,7 +96,8 @@ const E_NOINTERFACE: windows::core::HRESULT = windows::core::HRESULT(0x8000_4002
 const E_NOTIMPL: windows::core::HRESULT = windows::core::HRESULT(0x8000_4001u32 as i32);
 const E_FAIL: windows::core::HRESULT = windows::core::HRESULT(0x8000_4005u32 as i32);
 const E_OUTOFMEMORY: windows::core::HRESULT = windows::core::HRESULT(0x8007_000Eu32 as i32);
-const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT = windows::core::HRESULT(0x8004_0111u32 as i32);
+const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT =
+    windows::core::HRESULT(0x8004_0111u32 as i32);
 
 /// Number of COM objects the host still holds, plus IClassFactory locks.
 /// `DllCanUnloadNow` must answer "no" while this is non-zero: saying "yes"
@@ -149,7 +155,10 @@ impl ArchiveContextMenu {
     }
 
     fn selected_paths(&self) -> Vec<OsString> {
-        self.paths.lock().map(|paths| paths.clone()).unwrap_or_default()
+        self.paths
+            .lock()
+            .map(|paths| paths.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -226,24 +235,23 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if let Ok(mut guard) = self.active_verbs.lock() {
             *guard = inserted;
         }
-        // Show the app icon in front of the classic-menu verbs. The bitmap is
-        // kept in the handler (released in Drop, after Explorer destroys the
-        // menu) so the menu never references freed memory.
+        // Show the app icon in front of the classic-menu verbs. SetMenuItem-
+        // Bitmaps only accepts monochrome masks; passing the color bitmap
+        // returned by GetIconInfo makes its transparent pixels render black.
+        // Use MIIM_BITMAP with an alpha-capable DIB instead.
         if let Some(exe) = find_exe_path() {
             if let Some(bitmap) = load_menu_icon_bitmap(&exe) {
                 for offset in 0..count {
                     let item = index_menu.saturating_add(offset);
+                    let mut menu_item = MENUITEMINFOW {
+                        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                        fMask: MIIM_BITMAP,
+                        hbmpItem: bitmap,
+                        ..Default::default()
+                    };
                     // SAFETY: hmenu is valid, `item` is a position we just
                     // inserted at, and the bitmap outlives the menu.
-                    unsafe {
-                        let _ = SetMenuItemBitmaps(
-                            hmenu,
-                            item,
-                            MF_BYPOSITION,
-                            Some(bitmap),
-                            Some(bitmap),
-                        );
-                    }
+                    let _ = unsafe { SetMenuItemInfoW(hmenu, item, true, &mut menu_item) };
                 }
                 if let Ok(mut guard) = self.menu_bitmap.lock() {
                     if let Some(previous) = guard.replace(bitmap) {
@@ -343,7 +351,11 @@ impl IExplorerCommand_Impl for ArchiveContextMenu_Impl {
         let visible = psiitemarray
             .as_ref()
             .is_some_and(|array| !item_array_paths(array).is_empty());
-        Ok(if visible { ECS_ENABLED.0 as u32 } else { ECS_HIDDEN.0 as u32 })
+        Ok(if visible {
+            ECS_ENABLED.0 as u32
+        } else {
+            ECS_HIDDEN.0 as u32
+        })
     }
 
     fn Invoke(
@@ -530,7 +542,11 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
                 item_array_paths(array).iter().map(PathBuf::from).collect();
             !paths_buf.is_empty() && self.label(&paths_buf).is_some()
         });
-        Ok(if visible { ECS_ENABLED.0 as u32 } else { ECS_HIDDEN.0 as u32 })
+        Ok(if visible {
+            ECS_ENABLED.0 as u32
+        } else {
+            ECS_HIDDEN.0 as u32
+        })
     }
 
     fn Invoke(
@@ -611,11 +627,7 @@ impl IEnumExplorerCommand_Impl for VerbEnumerator_Impl {
             // SAFETY: pceltfetched is the out-parameter provided by the caller.
             unsafe { *pceltfetched = fetched };
         }
-        if fetched == celt {
-            S_OK
-        } else {
-            S_FALSE
-        }
+        if fetched == celt { S_OK } else { S_FALSE }
     }
 
     fn Skip(&self, celt: u32) -> WinResult<()> {
@@ -773,7 +785,6 @@ fn is_archive_path(path: &Path) -> bool {
     ARCHIVE_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
 }
 
-
 fn archive_stem(path: &Path) -> String {
     let mut name = path
         .file_name()
@@ -864,7 +875,8 @@ fn read_hdrop(medium: &STGMEDIUM) -> WinResult<Vec<OsString>> {
 }
 
 fn find_exe_path() -> Option<OsString> {
-    if let Some(configured) = read_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE) {
+    if let Some(configured) = read_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)
+    {
         if Path::new(&configured).is_file() {
             return Some(configured);
         }
@@ -875,9 +887,8 @@ fn find_exe_path() -> Option<OsString> {
     candidate.is_file().then(|| candidate.into_os_string())
 }
 
-/// Loads the small app icon from the executable as a 32bpp bitmap for
-/// `SetMenuItemBitmaps`, so the classic Explorer menu shows an icon next to
-/// each ArchiveRclick verb. The caller owns the returned bitmap.
+/// Loads the small app icon from the executable into a transparent 32bpp DIB
+/// for the classic Explorer menu. The caller owns the returned bitmap.
 fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
     let exe_wide = wide(&exe.to_string_lossy())?;
     // LoadImageW with LR_LOADFROMFILE cannot extract icons from .exe files
@@ -885,31 +896,61 @@ fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
     // the shell itself uses to resolve file icons.
     let mut small = HICON(ptr::null_mut());
     // SAFETY: exe_wide is NUL-terminated and phiconsmall is an out-parameter.
-    let count = unsafe {
-        ExtractIconExW(
-            PCWSTR(exe_wide.as_ptr()),
-            0,
-            None,
-            Some(&mut small),
-            1,
-        )
-    };
+    let count = unsafe { ExtractIconExW(PCWSTR(exe_wide.as_ptr()), 0, None, Some(&mut small), 1) };
     if count == 0 || small.0.is_null() {
         return None;
     }
-    let mut info = ICONINFO::default();
-    // SAFETY: info is an out-parameter and small is a live HICON.
-    if unsafe { GetIconInfo(small, &mut info) }.is_ok() {
-        let color = info.hbmColor;
-        // SAFETY: the mask was created by GetIconInfo and is no longer needed.
-        let _ = unsafe { DeleteObject(HGDIOBJ(info.hbmMask.0)) };
-        // SAFETY: the icon handle is no longer needed after GetIconInfo.
+    let width = unsafe { GetSystemMetrics(SM_CXMENUCHECK) }.max(1);
+    let height = unsafe { GetSystemMetrics(SM_CYMENUCHECK) }.max(1);
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            // A top-down DIB keeps DrawIconEx's origin intuitive and avoids
+            // having to reverse the rows before Explorer consumes the bitmap.
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut pixels: *mut c_void = ptr::null_mut();
+    let bitmap =
+        unsafe { CreateDIBSection(None, &bitmap_info, DIB_RGB_COLORS, &mut pixels, None, 0) }
+            .ok()?;
+    if pixels.is_null() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
         let _ = unsafe { DestroyIcon(small) };
-        Some(color)
-    } else {
-        // SAFETY: the icon was extracted successfully above and must be released.
+        return None;
+    }
+    // A DIB section is not required to be zero-initialized. Clear it before
+    // drawing so pixels outside the icon remain fully transparent.
+    let pixel_count = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)?;
+    unsafe { ptr::write_bytes(pixels.cast::<u8>(), 0, pixel_count) };
+
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.0.is_null() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
         let _ = unsafe { DestroyIcon(small) };
+        return None;
+    }
+    let previous = unsafe { SelectObject(dc, HGDIOBJ(bitmap.0)) };
+    let draw_result = unsafe { DrawIconEx(dc, 0, 0, small, width, height, 0, None, DI_NORMAL) };
+    if !previous.0.is_null() {
+        let _ = unsafe { SelectObject(dc, previous) };
+    }
+    let _ = unsafe { DeleteDC(dc) };
+    let _ = unsafe { DestroyIcon(small) };
+    if draw_result.is_err() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
         None
+    } else {
+        Some(bitmap)
     }
 }
 
@@ -920,8 +961,7 @@ fn module_file_name() -> Option<OsString> {
     let mut module = HMODULE::default();
     unsafe {
         GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
-                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             PCWSTR(DllGetClassObject as *const () as *const u16),
             &mut module,
         )
@@ -959,7 +999,16 @@ fn read_registry_string(hive: HKEY, key_path: &str, value: &str) -> Option<OsStr
     }
     let mut size = 0u32;
     // SAFETY: size is an out-parameter for the first probe.
-    let status = unsafe { RegQueryValueExW(raw, PCWSTR(value_name.as_ptr()), None, None, None, Some(&mut size)) };
+    let status = unsafe {
+        RegQueryValueExW(
+            raw,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
     if status != ERROR_SUCCESS || size == 0 {
         // SAFETY: handle came from RegOpenKeyExW.
         let _ = unsafe { RegCloseKey(raw) };
@@ -1007,8 +1056,18 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
     let exe = directory.join(EXE_NAME);
     let guid = guid_string();
     let inproc = format!(r"Software\Classes\CLSID\{guid}\InprocServer32");
-    set_registry_string(HKEY_CURRENT_USER, &inproc, None, &dll_path.to_string_lossy())?;
-    set_registry_string(HKEY_CURRENT_USER, &inproc, Some("ThreadingModel"), "Apartment")?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        &inproc,
+        None,
+        &dll_path.to_string_lossy(),
+    )?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        &inproc,
+        Some("ThreadingModel"),
+        "Apartment",
+    )?;
     set_registry_string(
         HKEY_CURRENT_USER,
         r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick",
@@ -1021,7 +1080,12 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         None,
         &guid,
     )?;
-    set_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, Some(EXE_PATH_VALUE), &exe.to_string_lossy())?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        SETTINGS_KEY,
+        Some(EXE_PATH_VALUE),
+        &exe.to_string_lossy(),
+    )?;
     notify_shell_change();
     Ok(())
 }
@@ -1030,9 +1094,18 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
 /// `Software\ArchiveRclick` key itself is kept because it also holds the app's
 /// settings; only the recorded executable path is deleted.
 pub fn unregister_context_menu() -> Result<(), String> {
-    delete_registry_tree(HKEY_CURRENT_USER, &format!(r"Software\Classes\CLSID\{}", guid_string()))?;
-    delete_registry_tree(HKEY_CURRENT_USER, r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick")?;
-    delete_registry_tree(HKEY_CURRENT_USER, r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick")?;
+    delete_registry_tree(
+        HKEY_CURRENT_USER,
+        &format!(r"Software\Classes\CLSID\{}", guid_string()),
+    )?;
+    delete_registry_tree(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick",
+    )?;
+    delete_registry_tree(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick",
+    )?;
     delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
     notify_shell_change();
     Ok(())
@@ -1066,23 +1139,35 @@ fn registry_key_exists(hive: HKEY, key_path: &str) -> bool {
     true
 }
 
-fn set_registry_string(hive: HKEY, key_path: &str, value_name: Option<&str>, value: &str) -> Result<(), String> {
+fn set_registry_string(
+    hive: HKEY,
+    key_path: &str,
+    value_name: Option<&str>,
+    value: &str,
+) -> Result<(), String> {
     let key_name = HSTRING::from(key_path);
     let mut raw = HKEY(ptr::null_mut());
     // SAFETY: key name stays live and `raw` is an out-parameter.
     let status = unsafe { RegCreateKeyW(hive, &key_name, &mut raw) };
     if status != ERROR_SUCCESS {
-        return Err(format!("could not open registry key {key_path} (error {status:?})"));
+        return Err(format!(
+            "could not open registry key {key_path} (error {status:?})"
+        ));
     }
     let name = value_name.map(HSTRING::from);
-    let name_ptr = name.as_ref().map(|name| PCWSTR(name.as_ptr())).unwrap_or_else(PCWSTR::null);
+    let name_ptr = name
+        .as_ref()
+        .map(|name| PCWSTR(name.as_ptr()))
+        .unwrap_or_else(PCWSTR::null);
     let data = utf16_bytes(value);
     // SAFETY: key is live and data is valid UTF-16 including its terminator.
     let status = unsafe { RegSetValueExW(raw, name_ptr, None, REG_SZ, Some(&data)) };
     // SAFETY: handle came from RegCreateKeyW.
     let _ = unsafe { RegCloseKey(raw) };
     if status != ERROR_SUCCESS {
-        return Err(format!("could not write registry value {key_path} (error {status:?})"));
+        return Err(format!(
+            "could not write registry value {key_path} (error {status:?})"
+        ));
     }
     Ok(())
 }
@@ -1094,7 +1179,9 @@ fn delete_registry_tree(hive: HKEY, key_path: &str) -> Result<(), String> {
     if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
         Ok(())
     } else {
-        Err(format!("could not delete registry key {key_path} (error {status:?})"))
+        Err(format!(
+            "could not delete registry key {key_path} (error {status:?})"
+        ))
     }
 }
 
@@ -1102,9 +1189,12 @@ fn delete_registry_value(hive: HKEY, key_path: &str, value_name: &str) -> Result
     let key_name = HSTRING::from(key_path);
     let mut raw = HKEY(ptr::null_mut());
     // SAFETY: key name stays live and `raw` is an out-parameter.
-    let status = unsafe { RegOpenKeyExW(hive, &key_name, None, KEY_READ | KEY_SET_VALUE, &mut raw) };
+    let status =
+        unsafe { RegOpenKeyExW(hive, &key_name, None, KEY_READ | KEY_SET_VALUE, &mut raw) };
     if status != ERROR_SUCCESS {
-        return Err(format!("could not open registry key {key_path} (error {status:?})"));
+        return Err(format!(
+            "could not open registry key {key_path} (error {status:?})"
+        ));
     }
     let value = HSTRING::from(value_name);
     // SAFETY: key is live and the value name stays live for the call.

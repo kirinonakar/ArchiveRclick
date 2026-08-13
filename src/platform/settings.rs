@@ -1,5 +1,16 @@
 //! User preferences, persisted in the per-user registry.
 
+/// Last normal position and content size of the main window, in physical
+/// screen pixels.  Keeping this separate from the visual settings also lets
+/// the window restore safely when the UI language or theme changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[cfg(windows)]
 mod imp {
     use std::ptr;
@@ -20,6 +31,11 @@ mod imp {
     const FONT_VALUE: &str = "FontFamily";
     const THREAD_VALUE: &str = "CpuThreads";
     const THEME_VALUE: &str = "Theme";
+    const LANGUAGE_VALUE: &str = "Language";
+    const WINDOW_X_VALUE: &str = "WindowX";
+    const WINDOW_Y_VALUE: &str = "WindowY";
+    const WINDOW_WIDTH_VALUE: &str = "WindowWidth";
+    const WINDOW_HEIGHT_VALUE: &str = "WindowHeight";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -64,7 +80,8 @@ mod imp {
         let value = HSTRING::from(FONT_VALUE);
         let data = utf16_bytes(family);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
-        let status = unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
         if status != ERROR_SUCCESS {
             return Err(format!(
                 "Could not write the settings registry value (Windows error {})",
@@ -86,7 +103,7 @@ mod imp {
         }
     }
 
-    /// Persists the CPU-thread preference ("auto", "4", "8", "16", "all").
+    /// Persists the CPU-thread preference ("auto", "4", "6", "8", "10", "16", "all").
     pub fn save_thread_preference(preference: &str) -> Result<(), String> {
         let key_name = HSTRING::from(SETTINGS_KEY);
         let mut raw = HKEY(ptr::null_mut());
@@ -102,9 +119,8 @@ mod imp {
         let value = HSTRING::from(THREAD_VALUE);
         let data = utf16_bytes(preference);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
-        let status = unsafe {
-            RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data))
-        };
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
         if status != ERROR_SUCCESS {
             return Err(format!(
                 "Could not write the settings registry value (Windows error {})",
@@ -141,14 +157,104 @@ mod imp {
         let value = HSTRING::from(THEME_VALUE);
         let data = utf16_bytes(preference);
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
-        let status = unsafe {
-            RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data))
-        };
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
         if status != ERROR_SUCCESS {
             return Err(format!(
                 "Could not write the settings registry value (Windows error {})",
                 status.0
             ));
+        }
+        Ok(())
+    }
+
+    /// Loads the stored interface language; returns "en" when unset.
+    pub fn load_language_preference() -> String {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return "en".to_owned();
+        };
+        match read_string_value(key.0, LANGUAGE_VALUE) {
+            Some(value) if matches!(value.as_str(), "en" | "ko" | "ja") => value,
+            _ => "en".to_owned(),
+        }
+    }
+
+    /// Persists the interface language ("en", "ko", or "ja").
+    pub fn save_language_preference(preference: &str) -> Result<(), String> {
+        let preference = if matches!(preference, "en" | "ko" | "ja") {
+            preference
+        } else {
+            "en"
+        };
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        let value = HSTRING::from(LANGUAGE_VALUE);
+        let data = utf16_bytes(preference);
+        // SAFETY: key is live and data is valid UTF-16 including its terminator.
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the settings registry value (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads the last saved main-window geometry. Invalid or stale values are
+    /// ignored so a monitor/layout change cannot make the app unusable.
+    pub fn load_window_geometry() -> Option<super::WindowGeometry> {
+        let key = open_key(HKEY_CURRENT_USER, SETTINGS_KEY)?;
+        let x = read_string_value(key.0, WINDOW_X_VALUE)?.parse().ok()?;
+        let y = read_string_value(key.0, WINDOW_Y_VALUE)?.parse().ok()?;
+        let width: u32 = read_string_value(key.0, WINDOW_WIDTH_VALUE)?.parse().ok()?;
+        let height: u32 = read_string_value(key.0, WINDOW_HEIGHT_VALUE)?
+            .parse()
+            .ok()?;
+        if !(520..=16_384).contains(&width) || !(400..=16_384).contains(&height) {
+            return None;
+        }
+        if !(-32_768..=32_768).contains(&x) || !(-32_768..=32_768).contains(&y) {
+            return None;
+        }
+        Some(super::WindowGeometry {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    /// Persists the main window's current position and content size.
+    pub fn save_window_geometry(geometry: &super::WindowGeometry) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        for (name, value) in [
+            (WINDOW_X_VALUE, geometry.x.to_string()),
+            (WINDOW_Y_VALUE, geometry.y.to_string()),
+            (WINDOW_WIDTH_VALUE, geometry.width.to_string()),
+            (WINDOW_HEIGHT_VALUE, geometry.height.to_string()),
+        ] {
+            write_string_value(key.0, name, &value)?;
         }
         Ok(())
     }
@@ -239,7 +345,16 @@ mod imp {
         let value = HSTRING::from(value);
         let mut size = 0u32;
         // SAFETY: `size` is a valid out-parameter.
-        let status = unsafe { RegQueryValueExW(key, PCWSTR(value.as_ptr()), None, None, None, Some(&mut size)) };
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                PCWSTR(value.as_ptr()),
+                None,
+                None,
+                None,
+                Some(&mut size),
+            )
+        };
         if status != ERROR_SUCCESS || size == 0 {
             return None;
         }
@@ -280,19 +395,41 @@ mod imp {
             .collect()
     }
 
+    fn write_string_value(key: HKEY, name: &str, value: &str) -> Result<(), String> {
+        let value_name = HSTRING::from(name);
+        let data = utf16_bytes(value);
+        // SAFETY: key is live and data is valid UTF-16 including its
+        // terminator for the REG_SZ value.
+        let status =
+            unsafe { RegSetValueExW(key, PCWSTR(value_name.as_ptr()), None, REG_SZ, Some(&data)) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the window setting {name} (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::value_name_matches;
 
         #[test]
         fn font_value_names_match_by_prefix() {
-            assert!(value_name_matches("Noto Sans JP (TrueType)", "noto sans jp"));
+            assert!(value_name_matches(
+                "Noto Sans JP (TrueType)",
+                "noto sans jp"
+            ));
             assert!(value_name_matches(
                 "Yu Gothic Regular & Yu Gothic UI Semilight (TrueType)",
                 "yu gothic"
             ));
             assert!(!value_name_matches("Meiryo (TrueType)", "noto sans jp"));
-            assert!(!value_name_matches("Noto Sans KR (TrueType)", "noto sans jp"));
+            assert!(!value_name_matches(
+                "Noto Sans KR (TrueType)",
+                "noto sans jp"
+            ));
         }
     }
 }
@@ -323,6 +460,22 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_language_preference() -> String {
+        "en".to_owned()
+    }
+
+    pub fn save_language_preference(_preference: &str) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
+    pub fn load_window_geometry() -> Option<super::WindowGeometry> {
+        None
+    }
+
+    pub fn save_window_geometry(_geometry: &super::WindowGeometry) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn resolve_font_family(preference: &str) -> String {
         if preference.is_empty() || preference == "auto" {
             "Yu Gothic".to_owned()
@@ -333,6 +486,7 @@ mod imp {
 }
 
 pub use imp::{
-    load_font_preference, load_theme_preference, load_thread_preference, resolve_font_family,
-    save_font_preference, save_theme_preference, save_thread_preference,
+    load_font_preference, load_language_preference, load_theme_preference, load_thread_preference,
+    load_window_geometry, resolve_font_family, save_font_preference, save_language_preference,
+    save_theme_preference, save_thread_preference, save_window_geometry,
 };

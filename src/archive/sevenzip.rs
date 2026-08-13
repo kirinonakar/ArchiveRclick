@@ -25,10 +25,7 @@ mod platform_impl {
         fs::{self, File, OpenOptions},
         io::{Read, Seek, SeekFrom, Write},
         mem,
-        os::windows::{
-            ffi::OsStrExt,
-            fs::OpenOptionsExt,
-        },
+        os::windows::{ffi::OsStrExt, fs::OpenOptionsExt},
         path::{Path, PathBuf},
         ptr,
         sync::{
@@ -51,13 +48,13 @@ mod platform_impl {
 
     use crate::tasks::{CancellationToken, ProgressPhase, ProgressSnapshot, ThrottledProgress};
 
+    use super::super::libarchive::LibArchiveEngine;
     use super::super::{
         ArchiveEngine, ArchiveEntry, ArchiveEntryKind, ArchiveError, ArchiveListing, ArchiveResult,
         ConflictChoice, ConflictResolver, CreateFormat, CreateOptions, ExtractOptions,
-        InitialConflictPolicy, OperationSummary, ProgressSink,
-        ensure_no_reparse_ancestors, safe_relative_path,
+        InitialConflictPolicy, OperationSummary, ProgressSink, ensure_no_reparse_ancestors,
+        safe_relative_path,
     };
-    use super::super::libarchive::LibArchiveEngine;
 
     // ------------------------------------------------------------------
     // HRESULT values
@@ -151,24 +148,43 @@ mod platform_impl {
     // 3, and the password group is 5.  (Versions before 24.0 used the
     // 23170F69-40C1-278A-1000-000110XX0000 layout instead.)
     const IID_IUNKNOWN: Guid = guid(0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46);
-    const IID_ISEQUENTIAL_IN_STREAM: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x01, 0, 0);
+    const IID_ISEQUENTIAL_IN_STREAM: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x01, 0, 0);
     const IID_IIN_STREAM: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x03, 0, 0);
-    const IID_ISEQUENTIAL_OUT_STREAM: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x02, 0, 0);
+    const IID_ISEQUENTIAL_OUT_STREAM: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x02, 0, 0);
     const IID_IOUT_STREAM: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 3, 0, 0x04, 0, 0);
     const IID_IPROGRESS: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 0, 0, 0x05, 0, 0);
-    const IID_IARCHIVE_EXTRACT_CALLBACK: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x20, 0, 0);
+    const IID_IARCHIVE_EXTRACT_CALLBACK: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x20, 0, 0);
     const IID_IIN_ARCHIVE: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x60, 0, 0);
-    const IID_IARCHIVE_OPEN_CALLBACK: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x10, 0, 0);
+    const IID_IARCHIVE_OPEN_CALLBACK: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x10, 0, 0);
     const IID_ISET_PROPERTIES: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x03, 0, 0);
     const IID_IOUT_ARCHIVE: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0xA0, 0, 0);
-    const IID_IARCHIVE_UPDATE_CALLBACK: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x80, 0, 0);
-    const IID_ICRYPTO_GET_TEXT_PASSWORD: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 5, 0, 0x10, 0, 0);
-    const IID_ICRYPTO_GET_TEXT_PASSWORD2: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 5, 0, 0x11, 0, 0);
+    const IID_IARCHIVE_UPDATE_CALLBACK: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x80, 0, 0);
+    const IID_ICRYPTO_GET_TEXT_PASSWORD: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 5, 0, 0x10, 0, 0);
+    const IID_ICRYPTO_GET_TEXT_PASSWORD2: Guid =
+        guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 5, 0, 0x11, 0, 0);
 
     // CLSID_CFormat7z keeps the classic layout: {23170F69-40C1-278A-1000-
     // 000110070000} with the format id (7) in Data4[5]; CreateArchiver zeroes
     // Data4[5] and compares the rest against CLSID_CArchiveHandler.
-    const CLSID_C_FORMAT_7Z: Guid = guid(0x2317_0F69, 0x40C1, 0x278A, 0x10, 0, 0, 0x01, 0x10, 0x07, 0, 0);
+    const CLSID_C_FORMAT_7Z: Guid = guid(
+        0x2317_0F69,
+        0x40C1,
+        0x278A,
+        0x10,
+        0,
+        0,
+        0x01,
+        0x10,
+        0x07,
+        0,
+        0,
+    );
 
     // 7z file signature: "7z\xBC\xAF\x27\x1C".
     const SEVENZIP_SIGNATURE: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
@@ -372,7 +388,8 @@ mod platform_impl {
     // ------------------------------------------------------------------
     // Raw vtables of the 7-Zip handler objects (their vtables live in 7z.dll)
     // ------------------------------------------------------------------
-    type QueryInterfaceFn = unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32;
+    type QueryInterfaceFn =
+        unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32;
     type AddRefFn = unsafe extern "system" fn(*mut c_void) -> u32;
     type ReleaseFn = unsafe extern "system" fn(*mut c_void) -> u32;
 
@@ -381,20 +398,26 @@ mod platform_impl {
         query_interface: QueryInterfaceFn,
         add_ref: AddRefFn,
         release: ReleaseFn,
+        open: unsafe extern "system" fn(*mut c_void, *mut c_void, *const u64, *mut c_void) -> i32,
+        close: unsafe extern "system" fn(*mut c_void) -> i32,
         get_number_of_items: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
         get_property: unsafe extern "system" fn(*mut c_void, u32, u32, *mut PropVariant) -> i32,
         extract: unsafe extern "system" fn(*mut c_void, *const u32, u32, i32, *mut c_void) -> i32,
         get_archive_property: unsafe extern "system" fn(*mut c_void, u32, *mut PropVariant) -> i32,
         get_number_of_properties: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
-        get_property_info: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16, *mut u32, *mut u16) -> i32,
+        get_property_info:
+            unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16, *mut u32, *mut u16) -> i32,
         get_number_of_archive_properties: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
-        get_archive_property_info: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16, *mut u32, *mut u16) -> i32,
-        open: unsafe extern "system" fn(*mut c_void, *mut c_void, *const u64, *mut c_void) -> i32,
-        close: unsafe extern "system" fn(*mut c_void) -> i32,
+        get_archive_property_info:
+            unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16, *mut u32, *mut u16) -> i32,
     }
 
     #[repr(C)]
     struct RawInArchive {
+        /// The interface pointer returned by 7-Zip. Calls must use this
+        /// address, not the Rust ownership wrapper below it: the handler has
+        /// private state immediately after its vtable.
+        object: *mut c_void,
         vtbl: *const InArchiveVtbl,
         /// True once `Close` has been issued; the destructor then only
         /// releases the interface reference.
@@ -406,13 +429,14 @@ mod platform_impl {
         /// `pointer` must come from `CreateObject(CLSID_CFormat7z, IID_IInArchive)`.
         unsafe fn from_raw(pointer: *mut c_void) -> Self {
             Self {
+                object: pointer,
                 vtbl: *pointer.cast::<*const InArchiveVtbl>(),
                 closed: Cell::new(false),
             }
         }
 
         fn ptr(&self) -> *mut c_void {
-            (self as *const Self).cast_mut().cast::<c_void>()
+            self.object
         }
 
         fn get_number_of_items(&self, count: *mut u32) -> i32 {
@@ -430,7 +454,13 @@ mod platform_impl {
             unsafe { ((*self.vtbl).get_archive_property)(self.ptr(), prop_id, value) }
         }
 
-        fn extract(&self, indices: *const u32, num_items: u32, test_mode: i32, callback: *mut c_void) -> i32 {
+        fn extract(
+            &self,
+            indices: *const u32,
+            num_items: u32,
+            test_mode: i32,
+            callback: *mut c_void,
+        ) -> i32 {
             // SAFETY: all pointers stay live for the call.
             unsafe { ((*self.vtbl).extract)(self.ptr(), indices, num_items, test_mode, callback) }
         }
@@ -474,6 +504,7 @@ mod platform_impl {
 
     #[repr(C)]
     struct RawOutArchive {
+        object: *mut c_void,
         vtbl: *const OutArchiveVtbl,
     }
 
@@ -482,12 +513,13 @@ mod platform_impl {
         /// `pointer` must come from `CreateObject(CLSID_CFormat7z, IID_IOutArchive)`.
         unsafe fn from_raw(pointer: *mut c_void) -> Self {
             Self {
+                object: pointer,
                 vtbl: *pointer.cast::<*const OutArchiveVtbl>(),
             }
         }
 
         fn ptr(&self) -> *mut c_void {
-            (self as *const Self).cast_mut().cast::<c_void>()
+            self.object
         }
 
         fn query_interface(&self, iid: &Guid) -> Option<*mut c_void> {
@@ -497,7 +529,12 @@ mod platform_impl {
             (hr == S_OK).then_some(out)
         }
 
-        fn update_items(&self, out_stream: *mut c_void, num_items: u32, callback: *mut c_void) -> i32 {
+        fn update_items(
+            &self,
+            out_stream: *mut c_void,
+            num_items: u32,
+            callback: *mut c_void,
+        ) -> i32 {
             // SAFETY: the stream and callback stay live for the call.
             unsafe { ((*self.vtbl).update_items)(self.ptr(), out_stream, num_items, callback) }
         }
@@ -515,11 +552,17 @@ mod platform_impl {
         query_interface: QueryInterfaceFn,
         add_ref: AddRefFn,
         release: ReleaseFn,
-        set_properties: unsafe extern "system" fn(*mut c_void, *const *const u16, *const PropVariant, u32) -> i32,
+        set_properties: unsafe extern "system" fn(
+            *mut c_void,
+            *const *const u16,
+            *const PropVariant,
+            u32,
+        ) -> i32,
     }
 
     #[repr(C)]
     struct RawSetProperties {
+        object: *mut c_void,
         vtbl: *const SetPropertiesVtbl,
     }
 
@@ -529,15 +572,21 @@ mod platform_impl {
         /// `IID_ISetProperties` on a 7z handler object.
         unsafe fn from_raw(pointer: *mut c_void) -> Self {
             Self {
+                object: pointer,
                 vtbl: *pointer.cast::<*const SetPropertiesVtbl>(),
             }
         }
 
         fn ptr(&self) -> *mut c_void {
-            (self as *const Self).cast_mut().cast::<c_void>()
+            self.object
         }
 
-        fn set_properties(&self, names: *const *const u16, values: *const PropVariant, count: u32) -> i32 {
+        fn set_properties(
+            &self,
+            names: *const *const u16,
+            values: *const PropVariant,
+            count: u32,
+        ) -> i32 {
             // SAFETY: the arrays stay live for the call.
             unsafe { ((*self.vtbl).set_properties)(self.ptr(), names, values, count) }
         }
@@ -577,7 +626,11 @@ mod platform_impl {
         file: Mutex<File>,
     }
 
-    unsafe extern "system" fn in_stream_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn in_stream_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         stream_query_interface(this, iid, out, &[IID_ISEQUENTIAL_IN_STREAM, IID_IIN_STREAM])
     }
 
@@ -592,7 +645,12 @@ mod platform_impl {
         remaining
     }
 
-    unsafe extern "system" fn in_stream_read(this: *mut c_void, data: *mut c_void, size: u32, processed: *mut u32) -> i32 {
+    unsafe extern "system" fn in_stream_read(
+        this: *mut c_void,
+        data: *mut c_void,
+        size: u32,
+        processed: *mut u32,
+    ) -> i32 {
         if !processed.is_null() {
             unsafe { *processed = 0 };
         }
@@ -604,7 +662,10 @@ mod platform_impl {
         }
         let stream = unsafe { &*(this as *const InStream) };
         let buffer = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size as usize) };
-        let mut file = stream.file.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut file = stream
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         match file.read(buffer) {
             Ok(amount) => {
                 if !processed.is_null() {
@@ -616,7 +677,12 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn in_stream_seek(this: *mut c_void, offset: i64, origin: u32, new_position: *mut u64) -> i32 {
+    unsafe extern "system" fn in_stream_seek(
+        this: *mut c_void,
+        offset: i64,
+        origin: u32,
+        new_position: *mut u64,
+    ) -> i32 {
         let stream = unsafe { &*(this as *const InStream) };
         let from = match origin {
             SEEK_SET => SeekFrom::Start(offset.max(0) as u64),
@@ -625,7 +691,10 @@ mod platform_impl {
             _ => return E_INVALIDARG,
         };
         let position = {
-            let mut file = stream.file.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut file = stream
+                .file
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             match file.seek(from) {
                 Ok(position) => position,
                 Err(_) => return E_FAIL,
@@ -663,8 +732,17 @@ mod platform_impl {
         file: Arc<Mutex<Option<File>>>,
     }
 
-    unsafe extern "system" fn out_stream_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
-        stream_query_interface(this, iid, out, &[IID_ISEQUENTIAL_OUT_STREAM, IID_IOUT_STREAM])
+    unsafe extern "system" fn out_stream_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        stream_query_interface(
+            this,
+            iid,
+            out,
+            &[IID_ISEQUENTIAL_OUT_STREAM, IID_IOUT_STREAM],
+        )
     }
 
     unsafe extern "system" fn out_stream_release(this: *mut c_void) -> u32 {
@@ -677,7 +755,12 @@ mod platform_impl {
         remaining
     }
 
-    unsafe extern "system" fn out_stream_write(this: *mut c_void, data: *const c_void, size: u32, processed: *mut u32) -> i32 {
+    unsafe extern "system" fn out_stream_write(
+        this: *mut c_void,
+        data: *const c_void,
+        size: u32,
+        processed: *mut u32,
+    ) -> i32 {
         if !processed.is_null() {
             unsafe { *processed = 0 };
         }
@@ -689,7 +772,10 @@ mod platform_impl {
         }
         let stream = unsafe { &*(this as *const OutStream) };
         let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size as usize) };
-        let mut guard = stream.file.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut guard = stream
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(file) = guard.as_mut() else {
             return E_FAIL;
         };
@@ -704,7 +790,12 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn out_stream_seek(this: *mut c_void, offset: i64, origin: u32, new_position: *mut u64) -> i32 {
+    unsafe extern "system" fn out_stream_seek(
+        this: *mut c_void,
+        offset: i64,
+        origin: u32,
+        new_position: *mut u64,
+    ) -> i32 {
         let stream = unsafe { &*(this as *const OutStream) };
         let from = match origin {
             SEEK_SET => SeekFrom::Start(offset.max(0) as u64),
@@ -713,7 +804,10 @@ mod platform_impl {
             _ => return E_INVALIDARG,
         };
         let position = {
-            let mut guard = stream.file.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut guard = stream
+                .file
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let Some(file) = guard.as_mut() else {
                 return E_FAIL;
             };
@@ -730,7 +824,10 @@ mod platform_impl {
 
     unsafe extern "system" fn out_stream_set_size(this: *mut c_void, size: u64) -> i32 {
         let stream = unsafe { &*(this as *const OutStream) };
-        let mut guard = stream.file.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut guard = stream
+            .file
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(file) = guard.as_mut() else {
             return E_FAIL;
         };
@@ -778,8 +875,8 @@ mod platform_impl {
         query_interface: QueryInterfaceFn,
         add_ref: AddRefFn,
         release: ReleaseFn,
-        set_total: unsafe extern "system" fn(*mut c_void, u64) -> i32,
-        set_completed: unsafe extern "system" fn(*mut c_void, *const u64) -> i32,
+        set_total: unsafe extern "system" fn(*mut c_void, *const u64, *const u64) -> i32,
+        set_completed: unsafe extern "system" fn(*mut c_void, *const u64, *const u64) -> i32,
         get_property: unsafe extern "system" fn(*mut c_void, u32, *mut PropVariant) -> i32,
         get_stream: unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> i32,
         set_sub_archive_name: unsafe extern "system" fn(*mut c_void, *const u16) -> i32,
@@ -787,8 +884,8 @@ mod platform_impl {
 
     static OPEN_VTBL: OpenVtbl = OpenVtbl {
         query_interface: open_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
+        add_ref: open_callback_add_ref,
+        release: open_callback_release,
         set_total: open_set_total,
         set_completed: open_set_completed,
         get_property: open_get_property,
@@ -806,8 +903,8 @@ mod platform_impl {
 
     static CRYPTO_GET_TEXT_PASSWORD_VTBL: CryptoGetTextPasswordVtbl = CryptoGetTextPasswordVtbl {
         query_interface: crypto_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
+        add_ref: open_crypto_add_ref,
+        release: open_crypto_release,
         crypto_get_text_password: crypto_get_text_password,
     };
 
@@ -817,8 +914,8 @@ mod platform_impl {
     /// point that reads the password from its own context.
     static EXTRACT_CRYPTO_VTBL: CryptoGetTextPasswordVtbl = CryptoGetTextPasswordVtbl {
         query_interface: crypto_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
+        add_ref: extract_crypto_add_ref,
+        release: extract_crypto_release,
         crypto_get_text_password: extract_crypto_get_text_password,
     };
 
@@ -832,7 +929,11 @@ mod platform_impl {
         cancel: CancellationToken,
     }
 
-    unsafe extern "system" fn open_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn open_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
         }
@@ -858,11 +959,19 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn open_set_total(_this: *mut c_void, _total: u64) -> i32 {
+    unsafe extern "system" fn open_set_total(
+        _this: *mut c_void,
+        _files: *const u64,
+        _bytes: *const u64,
+    ) -> i32 {
         S_OK
     }
 
-    unsafe extern "system" fn open_set_completed(this: *mut c_void, _complete: *const u64) -> i32 {
+    unsafe extern "system" fn open_set_completed(
+        this: *mut c_void,
+        _files: *const u64,
+        _bytes: *const u64,
+    ) -> i32 {
         let callback = unsafe { &*(this as *const OpenCallback) };
         if callback.cancel.is_cancelled() {
             E_ABORT
@@ -871,7 +980,11 @@ mod platform_impl {
         }
     }
 
-    unsafe extern "system" fn open_get_property(_this: *mut c_void, _prop_id: u32, value: *mut PropVariant) -> i32 {
+    unsafe extern "system" fn open_get_property(
+        _this: *mut c_void,
+        _prop_id: u32,
+        value: *mut PropVariant,
+    ) -> i32 {
         if value.is_null() {
             return E_INVALIDARG;
         }
@@ -879,7 +992,11 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn open_get_stream(_this: *mut c_void, _name: *const u16, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn open_get_stream(
+        _this: *mut c_void,
+        _name: *const u16,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() {
             return E_INVALIDARG;
         }
@@ -887,11 +1004,18 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn open_set_sub_archive_name(_this: *mut c_void, _name: *const u16) -> i32 {
+    unsafe extern "system" fn open_set_sub_archive_name(
+        _this: *mut c_void,
+        _name: *const u16,
+    ) -> i32 {
         S_OK
     }
 
-    unsafe extern "system" fn crypto_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn crypto_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
         }
@@ -906,7 +1030,10 @@ mod platform_impl {
     }
 
     /// `this` points at the `crypto_vtbl` field of the owning callback.
-    unsafe extern "system" fn crypto_get_text_password(this: *mut c_void, password: *mut *mut u16) -> i32 {
+    unsafe extern "system" fn crypto_get_text_password(
+        this: *mut c_void,
+        password: *mut *mut u16,
+    ) -> i32 {
         if password.is_null() {
             return E_INVALIDARG;
         }
@@ -944,7 +1071,10 @@ mod platform_impl {
                 .cast::<ExtractCallback>()
         };
         let callback = unsafe { &*base };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         context.password_requested = true;
         let value = context.password.clone();
         drop(context);
@@ -967,8 +1097,8 @@ mod platform_impl {
 
     static EXTRACT_VTBL: ExtractVtbl = ExtractVtbl {
         query_interface: extract_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
+        add_ref: extract_callback_add_ref,
+        release: extract_callback_release,
         set_total: extract_set_total,
         set_completed: extract_set_completed,
         get_stream: extract_get_stream,
@@ -1040,7 +1170,11 @@ mod platform_impl {
         context: Arc<Mutex<ExtractContext>>,
     }
 
-    unsafe extern "system" fn extract_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn extract_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
         }
@@ -1067,13 +1201,19 @@ mod platform_impl {
 
     unsafe extern "system" fn extract_set_total(this: *mut c_void, total: u64) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         context.snapshot.total_bytes = Some(total);
         context.progress.report(context.snapshot.clone(), false);
         S_OK
     }
 
-    unsafe extern "system" fn extract_set_completed(this: *mut c_void, complete: *const u64) -> i32 {
+    unsafe extern "system" fn extract_set_completed(
+        this: *mut c_void,
+        complete: *const u64,
+    ) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
         if callback
             .context
@@ -1087,13 +1227,19 @@ mod platform_impl {
         if complete.is_null() {
             return S_OK;
         }
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         context.snapshot.bytes_processed = unsafe { *complete };
         context.progress.report(context.snapshot.clone(), false);
         S_OK
     }
 
-    unsafe extern "system" fn extract_prepare_operation(_this: *mut c_void, _ask_extract_mode: i32) -> i32 {
+    unsafe extern "system" fn extract_prepare_operation(
+        _this: *mut c_void,
+        _ask_extract_mode: i32,
+    ) -> i32 {
         S_OK
     }
 
@@ -1108,7 +1254,10 @@ mod platform_impl {
         }
         unsafe { *out_stream = ptr::null_mut() };
         let callback = unsafe { &*(this as *const ExtractCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if context.cancel.is_cancelled() {
             return E_ABORT;
         }
@@ -1222,9 +1371,15 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn extract_set_operation_result(this: *mut c_void, operation_result: i32) -> i32 {
+    unsafe extern "system" fn extract_set_operation_result(
+        this: *mut c_void,
+        operation_result: i32,
+    ) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if context.cancel.is_cancelled() {
             return E_ABORT;
         }
@@ -1253,7 +1408,10 @@ mod platform_impl {
             return S_OK;
         };
         {
-            let mut guard = pending.file.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut guard = pending
+                .file
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if let Some(file) = guard.take() {
                 if let Some(seconds) = pending.mtime_unix.filter(|seconds| *seconds >= 0) {
                     let modified = UNIX_EPOCH + Duration::from_secs(seconds as u64);
@@ -1269,7 +1427,8 @@ mod platform_impl {
             return E_ABORT;
         }
         context.summary.entries_processed += 1;
-        context.summary.bytes_processed = context.summary.bytes_processed.saturating_add(pending.size);
+        context.summary.bytes_processed =
+            context.summary.bytes_processed.saturating_add(pending.size);
         context.snapshot.entries_processed = context.summary.entries_processed;
         context.snapshot.bytes_processed = context.summary.bytes_processed;
         context.progress.report(context.snapshot.clone(), false);
@@ -1284,7 +1443,8 @@ mod platform_impl {
         release: ReleaseFn,
         set_total: unsafe extern "system" fn(*mut c_void, u64) -> i32,
         set_completed: unsafe extern "system" fn(*mut c_void, *const u64) -> i32,
-        get_update_item_info: unsafe extern "system" fn(*mut c_void, u32, *mut i32, *mut i32, *mut u32) -> i32,
+        get_update_item_info:
+            unsafe extern "system" fn(*mut c_void, u32, *mut i32, *mut i32, *mut u32) -> i32,
         get_property: unsafe extern "system" fn(*mut c_void, u32, u32, *mut PropVariant) -> i32,
         get_stream: unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32,
         set_operation_result: unsafe extern "system" fn(*mut c_void, i32) -> i32,
@@ -1292,8 +1452,8 @@ mod platform_impl {
 
     static UPDATE_VTBL: UpdateVtbl = UpdateVtbl {
         query_interface: update_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
+        add_ref: update_callback_add_ref,
+        release: update_callback_release,
         set_total: update_set_total,
         set_completed: update_set_completed,
         get_update_item_info: update_get_update_item_info,
@@ -1307,15 +1467,17 @@ mod platform_impl {
         query_interface: QueryInterfaceFn,
         add_ref: AddRefFn,
         release: ReleaseFn,
-        crypto_get_text_password2: unsafe extern "system" fn(*mut c_void, *mut i32, *mut *mut u16) -> i32,
+        crypto_get_text_password2:
+            unsafe extern "system" fn(*mut c_void, *mut i32, *mut *mut u16) -> i32,
     }
 
-    static CRYPTO_GET_TEXT_PASSWORD2_VTBL: CryptoGetTextPassword2Vtbl = CryptoGetTextPassword2Vtbl {
-        query_interface: crypto2_query_interface,
-        add_ref: callback_add_ref,
-        release: callback_release,
-        crypto_get_text_password2: crypto_get_text_password2,
-    };
+    static CRYPTO_GET_TEXT_PASSWORD2_VTBL: CryptoGetTextPassword2Vtbl =
+        CryptoGetTextPassword2Vtbl {
+            query_interface: crypto2_query_interface,
+            add_ref: update_crypto_add_ref,
+            release: update_crypto_release,
+            crypto_get_text_password2: crypto_get_text_password2,
+        };
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum SourceKind {
@@ -1350,7 +1512,11 @@ mod platform_impl {
         context: Arc<Mutex<UpdateContext>>,
     }
 
-    unsafe extern "system" fn update_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn update_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
         }
@@ -1377,7 +1543,10 @@ mod platform_impl {
 
     unsafe extern "system" fn update_set_total(this: *mut c_void, total: u64) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         context.snapshot.total_bytes = Some(total);
         context.progress.report(context.snapshot.clone(), false);
         S_OK
@@ -1397,7 +1566,10 @@ mod platform_impl {
         if complete.is_null() {
             return S_OK;
         }
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         context.snapshot.bytes_processed = unsafe { *complete };
         context.progress.report(context.snapshot.clone(), false);
         S_OK
@@ -1414,7 +1586,10 @@ mod platform_impl {
             return E_INVALIDARG;
         }
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(item) = context.items.get(index as usize) else {
             return E_INVALIDARG;
         };
@@ -1426,12 +1601,20 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn update_get_property(this: *mut c_void, index: u32, prop_id: u32, value: *mut PropVariant) -> i32 {
+    unsafe extern "system" fn update_get_property(
+        this: *mut c_void,
+        index: u32,
+        prop_id: u32,
+        value: *mut PropVariant,
+    ) -> i32 {
         if value.is_null() {
             return E_INVALIDARG;
         }
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let Some(item) = context.items.get(index as usize) else {
             unsafe { *value = PropVariant::empty() };
             return E_INVALIDARG;
@@ -1451,13 +1634,20 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn update_get_stream(this: *mut c_void, index: u32, out_stream: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn update_get_stream(
+        this: *mut c_void,
+        index: u32,
+        out_stream: *mut *mut c_void,
+    ) -> i32 {
         if out_stream.is_null() {
             return E_INVALIDARG;
         }
         unsafe { *out_stream = ptr::null_mut() };
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if context.cancel.is_cancelled() {
             return E_ABORT;
         }
@@ -1488,9 +1678,15 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn update_set_operation_result(this: *mut c_void, operation_result: i32) -> i32 {
+    unsafe extern "system" fn update_set_operation_result(
+        this: *mut c_void,
+        operation_result: i32,
+    ) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let mut context = callback.context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut context = callback
+            .context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if context.cancel.is_cancelled() {
             return E_ABORT;
         }
@@ -1509,7 +1705,11 @@ mod platform_impl {
         S_OK
     }
 
-    unsafe extern "system" fn crypto2_query_interface(this: *mut c_void, iid: *const Guid, out: *mut *mut c_void) -> i32 {
+    unsafe extern "system" fn crypto2_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
         if out.is_null() || iid.is_null() {
             return E_INVALIDARG;
         }
@@ -1559,21 +1759,98 @@ mod platform_impl {
 
     // The callback objects live on the caller's stack, so their Release never
     // deallocates; 7-Zip only uses the reference count for its own bookkeeping
-    // and releases everything before the call returns.
-    unsafe extern "system" fn callback_add_ref(this: *mut c_void) -> u32 {
+    // and releases everything before the call returns. Each secondary crypto
+    // interface points at its own vtable field, so it needs a base-pointer
+    // adjustment before touching the owning callback's reference count.
+    unsafe extern "system" fn open_callback_add_ref(this: *mut c_void) -> u32 {
         let object = unsafe { &*this.cast::<OpenCallback>() };
         object.refs.fetch_add(1, Ordering::AcqRel).saturating_add(1)
     }
 
-    unsafe extern "system" fn callback_release(this: *mut c_void) -> u32 {
+    unsafe extern "system" fn open_callback_release(this: *mut c_void) -> u32 {
         let object = unsafe { &*this.cast::<OpenCallback>() };
         object.refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1)
+    }
+
+    unsafe extern "system" fn open_crypto_add_ref(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(OpenCallback, crypto_vtbl))
+                .cast::<OpenCallback>()
+        };
+        unsafe { open_callback_add_ref(base.cast()) }
+    }
+
+    unsafe extern "system" fn open_crypto_release(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(OpenCallback, crypto_vtbl))
+                .cast::<OpenCallback>()
+        };
+        unsafe { open_callback_release(base.cast()) }
+    }
+
+    unsafe extern "system" fn extract_callback_add_ref(this: *mut c_void) -> u32 {
+        let object = unsafe { &*this.cast::<ExtractCallback>() };
+        object.refs.fetch_add(1, Ordering::AcqRel).saturating_add(1)
+    }
+
+    unsafe extern "system" fn extract_callback_release(this: *mut c_void) -> u32 {
+        let object = unsafe { &*this.cast::<ExtractCallback>() };
+        object.refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1)
+    }
+
+    unsafe extern "system" fn extract_crypto_add_ref(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(ExtractCallback, crypto_vtbl))
+                .cast::<ExtractCallback>()
+        };
+        unsafe { extract_callback_add_ref(base.cast()) }
+    }
+
+    unsafe extern "system" fn extract_crypto_release(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(ExtractCallback, crypto_vtbl))
+                .cast::<ExtractCallback>()
+        };
+        unsafe { extract_callback_release(base.cast()) }
+    }
+
+    unsafe extern "system" fn update_callback_add_ref(this: *mut c_void) -> u32 {
+        let object = unsafe { &*this.cast::<UpdateCallback>() };
+        object.refs.fetch_add(1, Ordering::AcqRel).saturating_add(1)
+    }
+
+    unsafe extern "system" fn update_callback_release(this: *mut c_void) -> u32 {
+        let object = unsafe { &*this.cast::<UpdateCallback>() };
+        object.refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1)
+    }
+
+    unsafe extern "system" fn update_crypto_add_ref(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(UpdateCallback, crypto_vtbl))
+                .cast::<UpdateCallback>()
+        };
+        unsafe { update_callback_add_ref(base.cast()) }
+    }
+
+    unsafe extern "system" fn update_crypto_release(this: *mut c_void) -> u32 {
+        let base = unsafe {
+            this.cast::<u8>()
+                .sub(mem::offset_of!(UpdateCallback, crypto_vtbl))
+                .cast::<UpdateCallback>()
+        };
+        unsafe { update_callback_release(base.cast()) }
     }
 
     // ------------------------------------------------------------------
     // API entry point
     // ------------------------------------------------------------------
-    type CreateObjectFn = unsafe extern "system" fn(*const Guid, *const Guid, *mut *mut c_void) -> i32;
+    type CreateObjectFn =
+        unsafe extern "system" fn(*const Guid, *const Guid, *mut *mut c_void) -> i32;
 
     struct Api {
         _library: DynamicLibrary,
@@ -1608,7 +1885,8 @@ mod platform_impl {
         fn create_in_archive(&self) -> ArchiveResult<RawInArchive> {
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
-            let hr = unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IIN_ARCHIVE, &mut raw) };
+            let hr =
+                unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IIN_ARCHIVE, &mut raw) };
             if hr != S_OK || raw.is_null() {
                 return Err(ArchiveError::SevenZip(format!(
                     "creating the 7z handler failed with HRESULT {:#010x}",
@@ -1622,7 +1900,8 @@ mod platform_impl {
         fn create_out_archive(&self) -> ArchiveResult<RawOutArchive> {
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
-            let hr = unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IOUT_ARCHIVE, &mut raw) };
+            let hr =
+                unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IOUT_ARCHIVE, &mut raw) };
             if hr != S_OK || raw.is_null() {
                 return Err(ArchiveError::SevenZip(format!(
                     "creating the 7z writer failed with HRESULT {:#010x}",
@@ -1656,7 +1935,8 @@ mod platform_impl {
                     "7z.dll path must be absolute".to_owned(),
                 ));
             }
-            let canonical = fs::canonicalize(path).map_err(|error| ArchiveError::io(path, error))?;
+            let canonical =
+                fs::canonicalize(path).map_err(|error| ArchiveError::io(path, error))?;
             let metadata =
                 fs::metadata(&canonical).map_err(|error| ArchiveError::io(&canonical, error))?;
             if !metadata.is_file() {
@@ -1671,7 +1951,6 @@ mod platform_impl {
                 api: Arc::new(Api::from_library(library)?),
             })
         }
-
     }
 
     fn read_all_entries(
@@ -1704,6 +1983,7 @@ mod platform_impl {
             &self,
             path: &Path,
             password: Option<&str>,
+            _pathname_codepage: u32,
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
@@ -1787,7 +2067,8 @@ mod platform_impl {
             let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
             let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
 
-            let open_archive = open_for_read(&self.api, archive, options.password.as_deref(), cancel)?;
+            let open_archive =
+                open_for_read(&self.api, archive, options.password.as_deref(), cancel)?;
             let entries = read_entries(
                 &open_archive.in_archive,
                 ProgressPhase::Extracting,
@@ -1888,7 +2169,9 @@ mod platform_impl {
                 indices_ptr,
                 indices_count,
                 EXTRACT_MODE_EXTRACT,
-                (&callback as *const ExtractCallback).cast_mut().cast::<c_void>(),
+                (&callback as *const ExtractCallback)
+                    .cast_mut()
+                    .cast::<c_void>(),
             );
 
             let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -1957,7 +2240,8 @@ mod platform_impl {
                     ArchiveError::InvalidInput("destination has no parent directory".to_owned())
                 })?;
             fs::create_dir_all(parent).map_err(|error| ArchiveError::io(parent, error))?;
-            let parent = fs::canonicalize(parent).map_err(|error| ArchiveError::io(parent, error))?;
+            let parent =
+                fs::canonicalize(parent).map_err(|error| ArchiveError::io(parent, error))?;
             let file_name = destination.file_name().ok_or_else(|| {
                 ArchiveError::InvalidInput("destination has no file name".to_owned())
             })?;
@@ -2018,7 +2302,9 @@ mod platform_impl {
                     let hr = out_archive.update_items(
                         stream_ptr,
                         item_count,
-                        (&callback as *const UpdateCallback).cast_mut().cast::<c_void>(),
+                        (&callback as *const UpdateCallback)
+                            .cast_mut()
+                            .cast::<c_void>(),
                     );
                     let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
                     let error = context.error.take();
@@ -2027,7 +2313,9 @@ mod platform_impl {
                     drop(context);
                     // 7-Zip released the stream; close the file ourselves
                     // through the Arc we kept.
-                    let mut guard = shared_file.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let mut guard = shared_file
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
                     if let Some(file) = guard.take() {
                         drop(file);
                     }
@@ -2136,7 +2424,9 @@ mod platform_impl {
                 ptr::null(),
                 u32::MAX,
                 EXTRACT_MODE_TEST,
-                (&callback as *const ExtractCallback).cast_mut().cast::<c_void>(),
+                (&callback as *const ExtractCallback)
+                    .cast_mut()
+                    .cast::<c_void>(),
             );
             let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
             let error = context.error.take();
@@ -2217,6 +2507,7 @@ mod platform_impl {
             &self,
             path: &Path,
             password: Option<&str>,
+            pathname_codepage: u32,
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
@@ -2224,9 +2515,10 @@ mod platform_impl {
                 self.sevenzip
                     .as_ref()
                     .ok_or_else(sevenzip_unavailable)?
-                    .list(path, password, progress, cancel)
+                    .list(path, password, pathname_codepage, progress, cancel)
             } else {
-                self.libarchive.list(path, password, progress, cancel)
+                self.libarchive
+                    .list(path, password, pathname_codepage, progress, cancel)
             }
         }
 
@@ -2341,8 +2633,12 @@ mod platform_impl {
             cancel: cancel.clone(),
         };
         let hr = in_archive.open(
-            (stream.as_ref() as *const InStream).cast_mut().cast::<c_void>(),
-            (&callback as *const OpenCallback).cast_mut().cast::<c_void>(),
+            (stream.as_ref() as *const InStream)
+                .cast_mut()
+                .cast::<c_void>(),
+            (&callback as *const OpenCallback)
+                .cast_mut()
+                .cast::<c_void>(),
         );
         if hr != S_OK {
             if callback.password_requested.load(Ordering::Relaxed) {
@@ -2367,7 +2663,10 @@ mod platform_impl {
         cancel: &CancellationToken,
     ) -> ArchiveResult<Vec<ArchiveEntry>> {
         let mut count: u32 = 0;
-        require_hr(in_archive.get_number_of_items(&mut count), "reading 7z item count")?;
+        require_hr(
+            in_archive.get_number_of_items(&mut count),
+            "reading 7z item count",
+        )?;
         if u64::from(count) > MAX_LIST_ENTRIES {
             return Err(ArchiveError::LimitExceeded(format!(
                 "7z archive has more than {MAX_LIST_ENTRIES} entries"
@@ -2451,7 +2750,11 @@ mod platform_impl {
                 encrypted,
             });
             snapshot.entries_processed = u64::from(index) + 1;
-            snapshot.current_file = entries.last().expect("entry was pushed").display_path.clone();
+            snapshot.current_file = entries
+                .last()
+                .expect("entry was pushed")
+                .display_path
+                .clone();
             throttled.report(snapshot.clone(), false);
         }
         Ok(entries)
@@ -2470,7 +2773,10 @@ mod platform_impl {
         Ok(path)
     }
 
-    fn apply_create_properties(out_archive: &RawOutArchive, options: &CreateOptions) -> ArchiveResult<()> {
+    fn apply_create_properties(
+        out_archive: &RawOutArchive,
+        options: &CreateOptions,
+    ) -> ArchiveResult<()> {
         let raw = out_archive
             .query_interface(&IID_ISET_PROPERTIES)
             .ok_or_else(|| {
@@ -2491,7 +2797,10 @@ mod platform_impl {
         };
         // Compression level and method. Level 0 stores without compression,
         // exactly like 7-Zip's -mx0.
-        push("x", PropVariant::u32_value(u32::from(options.compression_level)));
+        push(
+            "x",
+            PropVariant::u32_value(u32::from(options.compression_level)),
+        );
         push(
             "m",
             PropVariant::bstr(if options.compression_level == 0 {
@@ -2510,11 +2819,8 @@ mod platform_impl {
         }
         // The closure borrows the arrays; end that borrow before reading them.
         drop(push);
-        let hr = set_properties.set_properties(
-            name_ptrs.as_ptr(),
-            values.as_ptr(),
-            values.len() as u32,
-        );
+        let hr =
+            set_properties.set_properties(name_ptrs.as_ptr(), values.as_ptr(), values.len() as u32);
         // 7-Zip copied the property values during SetProperties; the BSTRs
         // (and the wide name buffers, which 7-Zip only borrows) are released
         // here.
@@ -2550,7 +2856,12 @@ mod platform_impl {
         }
     }
 
-    fn checked_add_with_limit(total: u64, add: u64, limit: u64, subject: &str) -> ArchiveResult<u64> {
+    fn checked_add_with_limit(
+        total: u64,
+        add: u64,
+        limit: u64,
+        subject: &str,
+    ) -> ArchiveResult<u64> {
         let next = total
             .checked_add(add)
             .ok_or_else(|| ArchiveError::LimitExceeded(format!("{subject} overflow")))?;
@@ -2661,9 +2972,7 @@ mod platform_impl {
                 .is_some_and(|name| {
                     name.eq_ignore_ascii_case("deps") || name.eq_ignore_ascii_case("examples")
                 });
-            if is_cargo_subdirectory
-                && let Some(profile_directory) = directory.parent()
-            {
+            if is_cargo_subdirectory && let Some(profile_directory) = directory.parent() {
                 candidates.push(profile_directory.join("7z.dll"));
             }
         }
@@ -2717,7 +3026,8 @@ mod platform_impl {
                     root.display()
                 )));
             };
-            let metadata = fs::symlink_metadata(root).map_err(|error| ArchiveError::io(root, error))?;
+            let metadata =
+                fs::symlink_metadata(root).map_err(|error| ArchiveError::io(root, error))?;
             // Skip reparse-point inputs (symlinks/junctions).
             if is_reparse(&metadata) {
                 continue;
@@ -2764,7 +3074,8 @@ mod platform_impl {
         while let Some((archive_prefix, directory)) = pending.pop() {
             check_cancel(cancel)?;
             let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
-            let entries = fs::read_dir(&directory).map_err(|error| ArchiveError::io(&directory, error))?;
+            let entries =
+                fs::read_dir(&directory).map_err(|error| ArchiveError::io(&directory, error))?;
             for entry in entries {
                 let entry = entry.map_err(|error| ArchiveError::io(&directory, error))?;
                 let path = entry.path();
@@ -2820,10 +3131,7 @@ mod platform_impl {
     fn metadata_modified_seconds(metadata: &fs::Metadata) -> Option<i64> {
         use std::os::windows::fs::MetadataExt;
         let filetime = i64::try_from(metadata.last_write_time()).ok()?;
-        Some(
-            (filetime / 10_000_000)
-                .saturating_sub(FILETIME_EPOCH_SECONDS),
-        )
+        Some((filetime / 10_000_000).saturating_sub(FILETIME_EPOCH_SECONDS))
     }
 
     #[cfg(test)]
@@ -2840,15 +3148,19 @@ mod platform_impl {
         fn thread_count_options_map_to_sevenzip_mt() {
             assert_eq!(ThreadCount::Auto.sevenzip_threads(), None);
             assert_eq!(ThreadCount::Four.sevenzip_threads(), Some(4));
+            assert_eq!(ThreadCount::Six.sevenzip_threads(), Some(6));
             assert_eq!(ThreadCount::Eight.sevenzip_threads(), Some(8));
+            assert_eq!(ThreadCount::Ten.sevenzip_threads(), Some(10));
             assert_eq!(ThreadCount::Sixteen.sevenzip_threads(), Some(16));
             assert_eq!(ThreadCount::All.sevenzip_threads(), None);
             assert_eq!(ThreadCount::from_registry_key("all"), ThreadCount::All);
+            assert_eq!(ThreadCount::from_registry_key("6"), ThreadCount::Six);
+            assert_eq!(ThreadCount::from_registry_key("10"), ThreadCount::Ten);
             assert_eq!(ThreadCount::from_registry_key("16"), ThreadCount::Sixteen);
             assert_eq!(ThreadCount::from_registry_key("bogus"), ThreadCount::Auto);
-            assert_eq!(ThreadCount::from_ui_index(3), ThreadCount::Sixteen);
+            assert_eq!(ThreadCount::from_ui_index(5), ThreadCount::Sixteen);
             assert_eq!(ThreadCount::Auto.ui_index(), 0);
-            assert_eq!(ThreadCount::All.ui_index(), 4);
+            assert_eq!(ThreadCount::All.ui_index(), 6);
         }
 
         #[test]
@@ -2907,13 +3219,16 @@ mod platform_impl {
                 .expect("test executable has profile directory");
             for candidate in [
                 profile.join("7z.dll"),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime").join("x64").join("7z.dll"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("runtime")
+                    .join("x64")
+                    .join("7z.dll"),
             ] {
                 if !candidate.is_file() {
                     continue;
                 }
-                let engine = SevenZipEngine::load_from_path(&candidate)
-                    .expect("bundled 7z.dll loads");
+                let engine =
+                    SevenZipEngine::load_from_path(&candidate).expect("bundled 7z.dll loads");
                 assert_eq!(engine.writable_formats(), vec![CreateFormat::SevenZip]);
                 return;
             }
@@ -2928,11 +3243,11 @@ mod platform_impl {
 
     use crate::tasks::{CancellationToken, ProgressSnapshot};
 
+    use super::super::libarchive::LibArchiveEngine;
     use super::super::{
         ArchiveEngine, ArchiveError, ArchiveListing, ArchiveResult, ConflictResolver,
         CreateOptions, ExtractOptions, OperationSummary, ProgressSink,
     };
-    use super::super::libarchive::LibArchiveEngine;
 
     #[derive(Clone, Default)]
     pub struct SevenZipEngine;
@@ -2966,6 +3281,7 @@ mod platform_impl {
             &self,
             _path: &Path,
             _password: Option<&str>,
+            _pathname_codepage: u32,
             _progress: &dyn ProgressSink,
             _cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
@@ -3033,10 +3349,12 @@ mod platform_impl {
             &self,
             path: &Path,
             password: Option<&str>,
+            pathname_codepage: u32,
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
-            self.libarchive.list(path, password, progress, cancel)
+            self.libarchive
+                .list(path, password, pathname_codepage, progress, cancel)
         }
 
         fn extract(

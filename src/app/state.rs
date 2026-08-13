@@ -80,6 +80,14 @@ impl ArchiveRowModel {
         self.notify.reset();
     }
 
+    pub(crate) fn select_all_visible(&self) {
+        let display = self.display.borrow();
+        let mut selected = self.selected.borrow_mut();
+        selected.extend(display.iter().map(|entry| entry.relative_path.clone()));
+        drop(selected);
+        self.notify.reset();
+    }
+
     pub(crate) fn prepare_listing(listing: ArchiveListing) -> (ArchiveListing, Vec<DisplayEntry>) {
         let display = build_display_entries(&listing, Path::new(""), ARCHIVE_ORDER, true);
         (listing, display)
