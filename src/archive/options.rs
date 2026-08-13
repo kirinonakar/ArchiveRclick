@@ -210,12 +210,14 @@ impl ThreadCount {
         }
     }
 
-    /// Number of LZMA2 worker threads requested from 7z.dll. `None` lets
-    /// 7-Zip pick its default (all logical processors), which is what both
-    /// "자동" and "전체" resolve to.
+    /// Number of codec worker threads requested from 7z.dll. Automatic and
+    /// "All" explicitly resolve to the process-visible logical CPU count so
+    /// ZIP follows the same `-mmt=on` behavior as the 7-Zip CLI.
     pub fn sevenzip_threads(self) -> Option<u32> {
         match self {
-            Self::Auto | Self::All => None,
+            Self::Auto | Self::All => std::thread::available_parallelism()
+                .ok()
+                .and_then(|count| u32::try_from(count.get()).ok()),
             Self::Four => Some(4),
             Self::Six => Some(6),
             Self::Eight => Some(8),

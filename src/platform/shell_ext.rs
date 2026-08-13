@@ -84,6 +84,9 @@ const ARCHIVE_EXTENSIONS: &[&str] = &[
 const EXE_NAME: &str = "archive-rclick.exe";
 const SETTINGS_KEY: &str = r"Software\ArchiveRclick";
 const EXE_PATH_VALUE: &str = "ExePath";
+const MODERN_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclick";
+const MODERN_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\ArchiveRclick";
+const EXPLORER_COMMAND_HANDLER_VALUE: &str = "ExplorerCommandHandler";
 
 // IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
 // The visible verbs are dynamic, so keep the actual menu order per instance
@@ -1119,7 +1122,17 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         .ok_or_else(|| "could not resolve the shell extension directory".to_owned())?;
     let exe = directory.join(EXE_NAME);
     let guid = guid_string();
+    let clsid = format!(r"Software\Classes\CLSID\{guid}");
     let inproc = format!(r"Software\Classes\CLSID\{guid}\InprocServer32");
+    // Keep a description on the CLSID itself.  Explorer uses the CLSID as the
+    // ExplorerCommandHandler target on Windows 11, while the legacy handler
+    // below uses the same class through ContextMenuHandlers.
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        &clsid,
+        None,
+        "ArchiveRclick Explorer commands",
+    )?;
     set_registry_string(
         HKEY_CURRENT_USER,
         &inproc,
@@ -1144,6 +1157,27 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         None,
         &guid,
     )?;
+    // Windows 11 does not promote a legacy ContextMenuHandlers entry into its
+    // default menu.  Register the same COM class as an ExplorerCommandHandler
+    // under `shell` so the IExplorerCommand root (and its Extract child) is
+    // available without going through "Show more options".  Keep the legacy
+    // entries above for Windows 10 and the classic menu.
+    let icon = format!("{},0", exe.to_string_lossy());
+    for key in [MODERN_MENU_KEY, MODERN_DIRECTORY_MENU_KEY] {
+        set_registry_string(
+            HKEY_CURRENT_USER,
+            key,
+            Some(EXPLORER_COMMAND_HANDLER_VALUE),
+            &guid,
+        )?;
+        set_registry_string(
+            HKEY_CURRENT_USER,
+            key,
+            Some("CommandStateSync"),
+            "",
+        )?;
+        set_registry_string(HKEY_CURRENT_USER, key, Some("Icon"), &icon)?;
+    }
     set_registry_string(
         HKEY_CURRENT_USER,
         SETTINGS_KEY,
@@ -1170,6 +1204,8 @@ pub fn unregister_context_menu() -> Result<(), String> {
         HKEY_CURRENT_USER,
         r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick",
     )?;
+    delete_registry_tree(HKEY_CURRENT_USER, MODERN_MENU_KEY)?;
+    delete_registry_tree(HKEY_CURRENT_USER, MODERN_DIRECTORY_MENU_KEY)?;
     delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
     notify_shell_change();
     Ok(())

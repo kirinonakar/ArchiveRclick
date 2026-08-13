@@ -1,9 +1,9 @@
-//! 7z.dll backend for the 7z format.
+//! 7z.dll backend for the 7z and ZIP formats.
 //!
-//! 7z archives are listed, extracted, tested, and created with the bundled
-//! 7-Zip DLL (`runtime/x64/7z.dll`) so LZMA2 compression can use multiple CPU
-//! cores (`mt` property, controlled by the CPU-thread option). Every other
-//! format continues to use the libarchive backend.
+//! 7z and ZIP archives are listed, extracted, tested, and created with the
+//! bundled 7-Zip DLL (`runtime/x64/7z.dll`) so the format handlers can use
+//! their native multithreaded paths. 7z compression uses LZMA2 and ZIP uses
+//! Deflate; other formats continue to use the libarchive backend.
 //!
 //! The DLL is used through the classic 7-Zip COM-style interface: the
 //! exported `CreateObject` function instantiates the 7z format handler, and
@@ -23,7 +23,7 @@ mod platform_impl {
         env,
         ffi::c_void,
         fs::{self, File, OpenOptions},
-        io::{Read, Seek, SeekFrom, Write},
+        io::{BufReader, Read, Seek, SeekFrom, Write},
         mem,
         os::windows::{ffi::OsStrExt, fs::OpenOptionsExt},
         path::{Path, PathBuf},
@@ -102,6 +102,9 @@ mod platform_impl {
     const MAX_LIST_PATH_BYTES: u64 = 256 * 1024 * 1024;
     const MAX_ARCHIVE_PATH_UNITS: usize = 1024 * 1024;
     const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+    const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
+    const MIN_STREAM_BUFFER_SIZE: usize = 4 * 1024;
+    const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
     // FILETIME epoch (1601-01-01) relative to the Unix epoch, in 100ns units
@@ -182,6 +185,23 @@ mod platform_impl {
         0x01,
         0x10,
         0x07,
+        0,
+        0,
+    );
+
+    // The full 7z.dll also exposes the ZIP handler.  Using it for ZIP keeps
+    // the application on the same multithreaded codec path as 7z.exe instead
+    // of falling back to libarchive's single-threaded deflate writer.
+    const CLSID_C_FORMAT_ZIP: Guid = guid(
+        0x2317_0F69,
+        0x40C1,
+        0x278A,
+        0x10,
+        0,
+        0,
+        0x01,
+        0x10,
+        0x01,
         0,
         0,
     );
@@ -431,7 +451,8 @@ mod platform_impl {
 
     impl RawInArchive {
         /// # Safety
-        /// `pointer` must come from `CreateObject(CLSID_CFormat7z, IID_IInArchive)`.
+        /// `pointer` must come from `CreateObject(CLSID_CFormat7z or
+        /// CLSID_CFormatZip, IID_IInArchive)`.
         unsafe fn from_raw(pointer: *mut c_void) -> Self {
             Self {
                 object: pointer,
@@ -515,7 +536,8 @@ mod platform_impl {
 
     impl RawOutArchive {
         /// # Safety
-        /// `pointer` must come from `CreateObject(CLSID_CFormat7z, IID_IOutArchive)`.
+        /// `pointer` must come from `CreateObject(CLSID_CFormat7z or
+        /// CLSID_CFormatZip, IID_IOutArchive)`.
         unsafe fn from_raw(pointer: *mut c_void) -> Self {
             Self {
                 object: pointer,
@@ -628,7 +650,7 @@ mod platform_impl {
     struct InStream {
         vtbl: &'static InStreamVtbl,
         refs: AtomicU32,
-        file: Mutex<File>,
+        file: Mutex<BufReader<File>>,
     }
 
     unsafe extern "system" fn in_stream_query_interface(
@@ -1136,7 +1158,7 @@ mod platform_impl {
     }
 
     struct PendingFile {
-        temp_path: PathBuf,
+        temp_path: Option<PathBuf>,
         target: PathBuf,
         /// Shared with the OutStream handed to 7-Zip; `None` once the file has
         /// been flushed and closed by SetOperationResult.
@@ -1156,7 +1178,8 @@ mod platform_impl {
         fn drop(&mut self) {
             close_pending_file(self);
             if self.armed {
-                let _ = fs::remove_file(&self.temp_path);
+                let path = self.temp_path.as_deref().unwrap_or(&self.target);
+                let _ = fs::remove_file(path);
             }
         }
     }
@@ -1179,21 +1202,19 @@ mod platform_impl {
     }
 
     struct ExtractContext {
-        items: Vec<ExtractItem>,
         root: PathBuf,
+        prepared_dirs: HashSet<PathBuf>,
+        assume_targets_missing: bool,
         policy: RuntimePolicy,
         // SAFETY invariant: this reference is only valid for the duration of
         // the enclosing extract() call; the callback never outlives it.
         conflicts: &'static dyn ConflictResolver,
         password: Option<String>,
         password_requested: bool,
-        cancel: CancellationToken,
-        progress: Arc<ThrottledProgress<'static>>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         pending: VecDeque<PendingFile>,
         error: Option<ArchiveError>,
-        selected: HashSet<u32>,
         test_mode: bool,
     }
 
@@ -1202,6 +1223,10 @@ mod platform_impl {
         vtbl: *const ExtractVtbl,
         crypto_vtbl: *const CryptoGetTextPasswordVtbl,
         refs: AtomicU32,
+        items: Arc<Vec<ExtractItem>>,
+        selected: Arc<HashSet<u32>>,
+        cancel: CancellationToken,
+        progress: Arc<ThrottledProgress<'static>>,
         context: Arc<Mutex<ExtractContext>>,
     }
 
@@ -1238,12 +1263,15 @@ mod platform_impl {
 
     unsafe extern "system" fn extract_set_total(this: *mut c_void, total: u64) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
-        let mut context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        context.snapshot.total_bytes = Some(total);
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            context.snapshot.total_bytes = Some(total);
+            context.snapshot.clone()
+        };
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
@@ -1252,24 +1280,21 @@ mod platform_impl {
         complete: *const u64,
     ) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
-        if callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .cancel
-            .is_cancelled()
-        {
+        if callback.cancel.is_cancelled() {
             return E_ABORT;
         }
         if complete.is_null() {
             return S_OK;
         }
-        let mut context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        context.snapshot.bytes_processed = unsafe { *complete };
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            context.snapshot.bytes_processed = unsafe { *complete };
+            context.snapshot.clone()
+        };
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
@@ -1291,39 +1316,44 @@ mod platform_impl {
         }
         unsafe { *out_stream = ptr::null_mut() };
         let callback = unsafe { &*(this as *const ExtractCallback) };
+        if callback.cancel.is_cancelled() {
+            return E_ABORT;
+        }
         let mut context = callback
             .context
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if context.cancel.is_cancelled() {
-            return E_ABORT;
-        }
         // Solid-archive items that are not part of the request are decoded and
         // discarded by 7-Zip with kSkip; no output is wanted.
         if ask_extract_mode == EXTRACT_MODE_SKIP {
             return S_OK;
         }
-        let Some(item) = context.items.get(index as usize).cloned() else {
+        let Some(item) = callback.items.get(index as usize).cloned() else {
             return S_OK;
         };
         context.snapshot.current_file.clone_from(&item.display_path);
         if context.test_mode {
             return S_OK;
         }
-        if !context.selected.contains(&item.index) {
+        if !callback.selected.contains(&item.index) {
             return S_OK;
         }
         let target = context.root.join(&item.relative);
-        if let Err(error) = ensure_no_reparse_ancestors(&context.root, &target) {
-            context.error = Some(error);
-            return E_ABORT;
-        }
         if item.is_dir {
-            if let Err(error) = fs::create_dir_all(&target) {
-                context.error = Some(ArchiveError::io(&target, error));
-                return E_ABORT;
+            // A large archive commonly contains thousands of files under the
+            // same few directories. Validate and create each directory once;
+            // file extraction below still rechecks the full ancestor chain.
+            if !context.prepared_dirs.contains(&target) {
+                if let Err(error) = ensure_no_reparse_ancestors(&context.root, &target) {
+                    context.error = Some(error);
+                    return E_ABORT;
+                }
+                if let Err(error) = fs::create_dir_all(&target) {
+                    context.error = Some(ArchiveError::io(&target, error));
+                    return E_ABORT;
+                }
+                context.prepared_dirs.insert(target);
             }
-            context.progress.report(context.snapshot.clone(), false);
             return S_OK;
         }
         let parent = target.parent().ok_or_else(|| {
@@ -1336,55 +1366,81 @@ mod platform_impl {
             Ok(parent) => parent,
             Err(code) => return code,
         };
-        if let Err(error) = fs::create_dir_all(parent) {
-            context.error = Some(ArchiveError::io(parent, error));
+        if !context.prepared_dirs.contains(parent) {
+            if let Err(error) = ensure_no_reparse_ancestors(&context.root, parent) {
+                context.error = Some(error);
+                return E_ABORT;
+            }
+            if let Err(error) = fs::create_dir_all(parent) {
+                context.error = Some(ArchiveError::io(parent, error));
+                return E_ABORT;
+            }
+            context.prepared_dirs.insert(parent.to_path_buf());
+        }
+        // Keep the per-file reparse-point check even when the parent was
+        // prepared earlier. An external junction replacement between files
+        // must not redirect later outputs outside the extraction root.
+        if let Err(error) = ensure_no_reparse_ancestors(&context.root, &target) {
+            context.error = Some(error);
             return E_ABORT;
         }
-        match fs::symlink_metadata(&target) {
-            Ok(_) => {
-                // Resolve the conflict exactly once per file; the "all" answers
-                // latch into the policy so later files are not asked again.
-                let choice = match context.policy {
-                    RuntimePolicy::OverwriteAll => ConflictChoice::Overwrite,
-                    RuntimePolicy::SkipAll => ConflictChoice::Skip,
-                    RuntimePolicy::Ask => context.conflicts.resolve(&target),
-                };
-                match choice {
-                    ConflictChoice::Overwrite => {}
-                    ConflictChoice::OverwriteAll => {
-                        context.policy = RuntimePolicy::OverwriteAll;
-                    }
-                    ConflictChoice::Skip | ConflictChoice::SkipAll => {
-                        if matches!(choice, ConflictChoice::SkipAll) {
-                            context.policy = RuntimePolicy::SkipAll;
-                        }
-                        context.summary.entries_skipped += 1;
-                        context.progress.report(context.snapshot.clone(), false);
-                        return S_OK;
-                    }
-                    ConflictChoice::Cancel => {
-                        context.error = Some(ArchiveError::Cancelled);
+        let mut write_direct = context.assume_targets_missing;
+        if !write_direct {
+            match fs::symlink_metadata(&target) {
+                Ok(metadata) => {
+                    if is_reparse(&metadata) {
+                        context.error = Some(ArchiveError::ReparsePoint(target.clone()));
                         return E_ABORT;
                     }
+                    // Resolve the conflict exactly once per file; the "all" answers
+                    // latch into the policy so later files are not asked again.
+                    let choice = match context.policy {
+                        RuntimePolicy::OverwriteAll => ConflictChoice::Overwrite,
+                        RuntimePolicy::SkipAll => ConflictChoice::Skip,
+                        RuntimePolicy::Ask => context.conflicts.resolve(&target),
+                    };
+                    match choice {
+                        ConflictChoice::Overwrite => {}
+                        ConflictChoice::OverwriteAll => {
+                            context.policy = RuntimePolicy::OverwriteAll;
+                        }
+                        ConflictChoice::Skip | ConflictChoice::SkipAll => {
+                            if matches!(choice, ConflictChoice::SkipAll) {
+                                context.policy = RuntimePolicy::SkipAll;
+                            }
+                            context.summary.entries_skipped += 1;
+                            return S_OK;
+                        }
+                        ConflictChoice::Cancel => {
+                            context.error = Some(ArchiveError::Cancelled);
+                            return E_ABORT;
+                        }
+                    }
                 }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                context.error = Some(ArchiveError::io(&target, error));
-                return E_ABORT;
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // A new target can be created atomically with create_new.
+                    // This avoids the temporary-file rename pair for the
+                    // common case of extracting into an empty directory.
+                    write_direct = true;
+                }
+                Err(error) => {
+                    context.error = Some(ArchiveError::io(&target, error));
+                    return E_ABORT;
+                }
             }
         }
 
-        let temp_path = temporary_path(parent, &target);
+        let temp_path = (!write_direct).then(|| temporary_path(parent, &target));
+        let output_path = temp_path.as_deref().unwrap_or(&target);
         let file = match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .custom_flags(0)
-            .open(&temp_path)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(output_path)
         {
             Ok(file) => file,
             Err(error) => {
-                context.error = Some(ArchiveError::io(&temp_path, error));
+                context.error = Some(ArchiveError::io(output_path, error));
                 return E_ABORT;
             }
         };
@@ -1405,7 +1461,6 @@ mod platform_impl {
             mtime_unix: item.mtime_unix,
             armed: true,
         });
-        context.progress.report(context.snapshot.clone(), false);
         S_OK
     }
 
@@ -1414,13 +1469,13 @@ mod platform_impl {
         operation_result: i32,
     ) -> i32 {
         let callback = unsafe { &*(this as *const ExtractCallback) };
+        if callback.cancel.is_cancelled() {
+            return E_ABORT;
+        }
         let mut context = callback
             .context
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if context.cancel.is_cancelled() {
-            return E_ABORT;
-        }
         if operation_result != OPERATION_RESULT_OK {
             let message = match operation_result {
                 OPERATION_RESULT_UNSUPPORTED_METHOD => "unsupported compression method",
@@ -1441,7 +1496,6 @@ mod platform_impl {
             if context.test_mode {
                 context.summary.entries_processed += 1;
                 context.snapshot.entries_processed = context.summary.entries_processed;
-                context.progress.report(context.snapshot.clone(), false);
             }
             return S_OK;
         };
@@ -1458,11 +1512,13 @@ mod platform_impl {
                 // Dropping the file closes the handle before the rename.
             }
         }
-        if let Err(error) = install_temporary(&context.root, &pending.temp_path, &pending.target) {
-            if context.error.is_none() {
-                context.error = Some(error);
+        if let Some(temp_path) = pending.temp_path.as_deref() {
+            if let Err(error) = install_temporary(&context.root, temp_path, &pending.target) {
+                if context.error.is_none() {
+                    context.error = Some(error);
+                }
+                return E_ABORT;
             }
-            return E_ABORT;
         }
         pending.disarm();
         context.summary.entries_processed += 1;
@@ -1470,7 +1526,9 @@ mod platform_impl {
             context.summary.bytes_processed.saturating_add(pending.size);
         context.snapshot.entries_processed = context.summary.entries_processed;
         context.snapshot.bytes_processed = context.summary.bytes_processed;
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = context.snapshot.clone();
+        drop(context);
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
@@ -1534,10 +1592,8 @@ mod platform_impl {
     }
 
     struct UpdateContext {
-        items: Vec<SourceItem>,
+        total_bytes: u64,
         password: Option<String>,
-        cancel: CancellationToken,
-        progress: Arc<ThrottledProgress<'static>>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         error: Option<ArchiveError>,
@@ -1548,6 +1604,9 @@ mod platform_impl {
         vtbl: *const UpdateVtbl,
         crypto_vtbl: *const CryptoGetTextPassword2Vtbl,
         refs: AtomicU32,
+        items: Arc<Vec<SourceItem>>,
+        cancel: CancellationToken,
+        progress: Arc<ThrottledProgress<'static>>,
         context: Arc<Mutex<UpdateContext>>,
     }
 
@@ -1584,35 +1643,40 @@ mod platform_impl {
 
     unsafe extern "system" fn update_set_total(this: *mut c_void, total: u64) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let mut context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        context.snapshot.total_bytes = Some(total);
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            context.snapshot.total_bytes = Some(total);
+            context.snapshot.clone()
+        };
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
     unsafe extern "system" fn update_set_completed(this: *mut c_void, complete: *const u64) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        if callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .cancel
-            .is_cancelled()
-        {
+        if callback.cancel.is_cancelled() {
             return E_ABORT;
         }
         if complete.is_null() {
             return S_OK;
         }
-        let mut context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        context.snapshot.bytes_processed = unsafe { *complete };
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // Some handlers report a compressed/output-side position here.
+            // Keep progress in the input-byte domain used by the UI and by
+            // OperationSummary.
+            let bytes_processed = unsafe { (*complete).min(context.total_bytes) };
+            context.snapshot.bytes_processed = bytes_processed;
+            context.summary.bytes_processed = context.summary.bytes_processed.max(bytes_processed);
+            context.snapshot.clone()
+        };
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
@@ -1627,11 +1691,7 @@ mod platform_impl {
             return E_INVALIDARG;
         }
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let Some(item) = context.items.get(index as usize) else {
+        let Some(item) = callback.items.get(index as usize) else {
             return E_INVALIDARG;
         };
         unsafe {
@@ -1652,11 +1712,7 @@ mod platform_impl {
             return E_INVALIDARG;
         }
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let Some(item) = context.items.get(index as usize) else {
+        let Some(item) = callback.items.get(index as usize) else {
             unsafe { *value = PropVariant::empty() };
             return E_INVALIDARG;
         };
@@ -1685,23 +1741,33 @@ mod platform_impl {
         }
         unsafe { *out_stream = ptr::null_mut() };
         let callback = unsafe { &*(this as *const UpdateCallback) };
-        let mut context = callback
-            .context
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if context.cancel.is_cancelled() {
+        if callback.cancel.is_cancelled() {
             return E_ABORT;
         }
-        let Some(item) = context.items.get(index as usize).cloned() else {
+        let Some(item) = callback.items.get(index as usize).cloned() else {
             return E_INVALIDARG;
         };
-        context.snapshot.current_file.clone_from(&item.archive_name);
+        {
+            let mut context = callback
+                .context
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            context.snapshot.current_file.clone_from(&item.archive_name);
+        }
         if item.kind == SourceKind::Directory {
             return S_OK;
         }
-        let file = match File::open(&item.source) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(&item.source)
+        {
             Ok(file) => file,
             Err(error) => {
+                let mut context = callback
+                    .context
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
                 if context.error.is_none() {
                     context.error = Some(ArchiveError::io(&item.source, error));
                 }
@@ -1711,7 +1777,10 @@ mod platform_impl {
         let stream = Box::new(InStream {
             vtbl: &IN_STREAM_VTBL,
             refs: AtomicU32::new(1),
-            file: Mutex::new(file),
+            file: Mutex::new(BufReader::with_capacity(
+                stream_buffer_size(item.size),
+                file,
+            )),
         });
         // Ownership of the stream moves to 7-Zip; it releases it after the
         // item has been read.
@@ -1724,13 +1793,13 @@ mod platform_impl {
         operation_result: i32,
     ) -> i32 {
         let callback = unsafe { &*(this as *const UpdateCallback) };
+        if callback.cancel.is_cancelled() {
+            return E_ABORT;
+        }
         let mut context = callback
             .context
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if context.cancel.is_cancelled() {
-            return E_ABORT;
-        }
         if operation_result != OPERATION_RESULT_OK {
             if context.error.is_none() {
                 context.error = Some(ArchiveError::SevenZip(format!(
@@ -1742,7 +1811,9 @@ mod platform_impl {
         }
         context.summary.entries_processed += 1;
         context.snapshot.entries_processed = context.summary.entries_processed;
-        context.progress.report(context.snapshot.clone(), false);
+        let snapshot = context.snapshot.clone();
+        drop(context);
+        callback.progress.report(snapshot, false);
         S_OK
     }
 
@@ -1897,6 +1968,8 @@ mod platform_impl {
     struct Api {
         _library: DynamicLibrary,
         create_object: CreateObjectFn,
+        zip_reader_available: bool,
+        zip_writer_available: bool,
     }
 
     impl Api {
@@ -1918,32 +1991,79 @@ mod platform_impl {
             // reference directly without wrapping it in an owning handle.
             let probe_vtbl = unsafe { *probe.cast::<*const InArchiveVtbl>() };
             unsafe { ((*probe_vtbl).release)(probe) };
+            let mut zip_reader_probe: *mut c_void = ptr::null_mut();
+            // ZIP reading is optional for development builds that stage a
+            // reduced 7z-only DLL. The bundled runtime exposes both readers.
+            let zip_reader_hr = unsafe {
+                create_object(&CLSID_C_FORMAT_ZIP, &IID_IIN_ARCHIVE, &mut zip_reader_probe)
+            };
+            let zip_reader_available = zip_reader_hr == S_OK && !zip_reader_probe.is_null();
+            if zip_reader_available {
+                // SAFETY: the probe is a live IInArchive interface returned
+                // by the DLL and is released exactly once.
+                let zip_vtbl = unsafe { *zip_reader_probe.cast::<*const InArchiveVtbl>() };
+                unsafe { ((*zip_vtbl).release)(zip_reader_probe) };
+            }
+            let mut zip_probe: *mut c_void = ptr::null_mut();
+            // ZIP creation is optional because development builds may stage a
+            // 7z-only DLL.  The normal bundled runtime is the full DLL.
+            let zip_hr =
+                unsafe { create_object(&CLSID_C_FORMAT_ZIP, &IID_IOUT_ARCHIVE, &mut zip_probe) };
+            let zip_writer_available = zip_hr == S_OK && !zip_probe.is_null();
+            if zip_writer_available {
+                // SAFETY: the probe is a live IOutArchive interface returned
+                // by the DLL and is released exactly once.
+                let zip_vtbl = unsafe { *zip_probe.cast::<*const OutArchiveVtbl>() };
+                unsafe { ((*zip_vtbl).release)(zip_probe) };
+            }
             Ok(Self {
                 _library: library,
                 create_object,
+                zip_reader_available,
+                zip_writer_available,
             })
         }
 
-        fn create_in_archive(&self) -> ArchiveResult<RawInArchive> {
+        fn create_in_archive(&self, format: CreateFormat) -> ArchiveResult<RawInArchive> {
+            let clsid = match format {
+                CreateFormat::SevenZip => &CLSID_C_FORMAT_7Z,
+                CreateFormat::Zip => &CLSID_C_FORMAT_ZIP,
+                _ => {
+                    return Err(ArchiveError::UnsupportedOption(format!(
+                        "7z.dll cannot read {} archives",
+                        format.label()
+                    )));
+                }
+            };
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
-            let hr =
-                unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IIN_ARCHIVE, &mut raw) };
+            let hr = unsafe { (self.create_object)(clsid, &IID_IIN_ARCHIVE, &mut raw) };
             if hr != S_OK || raw.is_null() {
                 return Err(ArchiveError::SevenZip(format!(
-                    "creating the 7z handler failed with HRESULT {:#010x}",
+                    "creating the {} reader failed with HRESULT {:#010x}",
+                    format.label(),
                     hr as u32
                 )));
             }
-            // SAFETY: CreateObject returned a live handler for this CLSID.
+            // SAFETY: CreateObject returned a live handler for the selected
+            // format CLSID.
             Ok(unsafe { RawInArchive::from_raw(raw) })
         }
 
-        fn create_out_archive(&self) -> ArchiveResult<RawOutArchive> {
+        fn create_out_archive(&self, format: CreateFormat) -> ArchiveResult<RawOutArchive> {
+            let clsid = match format {
+                CreateFormat::SevenZip => &CLSID_C_FORMAT_7Z,
+                CreateFormat::Zip => &CLSID_C_FORMAT_ZIP,
+                _ => {
+                    return Err(ArchiveError::UnsupportedOption(format!(
+                        "7z.dll cannot create {} archives",
+                        format.label()
+                    )));
+                }
+            };
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
-            let hr =
-                unsafe { (self.create_object)(&CLSID_C_FORMAT_7Z, &IID_IOUT_ARCHIVE, &mut raw) };
+            let hr = unsafe { (self.create_object)(clsid, &IID_IOUT_ARCHIVE, &mut raw) };
             if hr != S_OK || raw.is_null() {
                 return Err(ArchiveError::SevenZip(format!(
                     "creating the 7z writer failed with HRESULT {:#010x}",
@@ -1952,6 +2072,14 @@ mod platform_impl {
             }
             // SAFETY: CreateObject returned a live handler for this CLSID.
             Ok(unsafe { RawOutArchive::from_raw(raw) })
+        }
+
+        fn can_read(&self, format: CreateFormat) -> bool {
+            match format {
+                CreateFormat::SevenZip => true,
+                CreateFormat::Zip => self.zip_reader_available,
+                _ => false,
+            }
         }
     }
 
@@ -1968,6 +2096,18 @@ mod platform_impl {
             Ok(Self {
                 api: Arc::new(Api::from_library(load_7z_library()?)?),
             })
+        }
+
+        pub fn can_create(&self, format: CreateFormat) -> bool {
+            match format {
+                CreateFormat::SevenZip => true,
+                CreateFormat::Zip => self.api.zip_writer_available,
+                _ => false,
+            }
+        }
+
+        pub fn can_read(&self, format: CreateFormat) -> bool {
+            self.api.can_read(format)
         }
 
         /// Loads exactly the 7z.dll at `path`.
@@ -1998,18 +2138,225 @@ mod platform_impl {
     fn read_all_entries(
         api: &Api,
         path: &Path,
+        format: CreateFormat,
         password: Option<&str>,
         throttled: &ThrottledProgress,
         cancel: &CancellationToken,
     ) -> ArchiveResult<(OpenArchive, Vec<ArchiveEntry>)> {
-        let open_archive = open_for_read(api, path, password, cancel)?;
+        let open_archive = open_for_read(api, path, format, password, cancel)?;
         let entries = read_entries(
             &open_archive.in_archive,
             ProgressPhase::Opening,
             throttled,
             cancel,
+            true,
         )?;
         Ok((open_archive, entries))
+    }
+
+    fn run_extract_worker(
+        api: &Api,
+        archive: &Path,
+        format: CreateFormat,
+        password: Option<&str>,
+        root: PathBuf,
+        items: Arc<Vec<ExtractItem>>,
+        selected: Arc<HashSet<u32>>,
+        indices: Vec<u32>,
+        total_entries: u64,
+        total_bytes: Option<u64>,
+        cancel: CancellationToken,
+        progress: Arc<ThrottledProgress<'static>>,
+        conflicts: &'static dyn ConflictResolver,
+        policy: RuntimePolicy,
+        assume_targets_missing: bool,
+    ) -> ArchiveResult<OperationSummary> {
+        let open_archive = open_for_read(api, archive, format, password, &cancel)?;
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
+        snapshot.total_entries = Some(total_entries);
+        snapshot.total_bytes = total_bytes;
+        let mut prepared_dirs = HashSet::new();
+        prepared_dirs.insert(root.clone());
+        let context = Arc::new(Mutex::new(ExtractContext {
+            root,
+            prepared_dirs,
+            assume_targets_missing,
+            policy,
+            conflicts,
+            password: password.map(str::to_owned),
+            password_requested: false,
+            snapshot,
+            summary: OperationSummary::default(),
+            pending: VecDeque::new(),
+            error: None,
+            test_mode: false,
+        }));
+        let callback = ExtractCallback {
+            vtbl: &EXTRACT_VTBL,
+            crypto_vtbl: &EXTRACT_CRYPTO_VTBL,
+            refs: AtomicU32::new(1),
+            items,
+            selected,
+            cancel: cancel.clone(),
+            progress,
+            context: Arc::clone(&context),
+        };
+
+        // 7-Zip extracts everything when indices is NULL with numItems
+        // (u32)-1; with a subset (possibly empty) the explicit list is used.
+        let (indices_ptr, indices_count) = if indices.is_empty() {
+            (ptr::null(), 0)
+        } else {
+            (indices.as_ptr(), indices.len() as u32)
+        };
+        let hr = open_archive.in_archive.extract(
+            indices_ptr,
+            indices_count,
+            EXTRACT_MODE_EXTRACT,
+            (&callback as *const ExtractCallback)
+                .cast_mut()
+                .cast::<c_void>(),
+        );
+
+        let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
+        let error = context.error.take();
+        let password_requested = context.password_requested;
+        let summary = context.summary.clone();
+        drop(context);
+
+        open_archive.in_archive.close_now();
+        // Release 7-Zip's archive/stream references before removing the
+        // files left in the pending queue by cancellation or failure.
+        cleanup_pending_temp_files(&callback);
+
+        if let Some(error) = error {
+            return Err(error);
+        }
+        if cancel.is_cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
+        if hr != S_OK {
+            if password_requested {
+                return Err(ArchiveError::PasswordRequired);
+            }
+            return Err(ArchiveError::SevenZip(format!(
+                "7z extraction failed with HRESULT {:#010x}",
+                hr as u32
+            )));
+        }
+        Ok(summary)
+    }
+
+    fn run_parallel_zip_extract(
+        api: Arc<Api>,
+        archive: &Path,
+        password: Option<&str>,
+        root: PathBuf,
+        items: Arc<Vec<ExtractItem>>,
+        indices: &[u32],
+        total_entries: u64,
+        total_bytes: Option<u64>,
+        cancel: &CancellationToken,
+        progress: Arc<ThrottledProgress<'static>>,
+        conflicts: &'static dyn ConflictResolver,
+    ) -> ArchiveResult<OperationSummary> {
+        const MAX_WORKERS: usize = 8;
+        const MIN_ENTRIES_PER_WORKER: usize = 128;
+        let logical_cpus = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        let worker_count = logical_cpus
+            .min(MAX_WORKERS)
+            .min(indices.len() / MIN_ENTRIES_PER_WORKER)
+            .max(1);
+        if worker_count < 2 {
+            return run_extract_worker(
+                &api,
+                archive,
+                CreateFormat::Zip,
+                password,
+                root,
+                items,
+                Arc::new(indices.iter().copied().collect()),
+                indices.to_vec(),
+                total_entries,
+                total_bytes,
+                cancel.clone(),
+                progress,
+                conflicts,
+                RuntimePolicy::OverwriteAll,
+                true,
+            );
+        }
+
+        let chunk_size = indices.len().div_ceil(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+        for chunk in indices.chunks(chunk_size) {
+            let api = Arc::clone(&api);
+            let archive = archive.to_path_buf();
+            let password = password.map(str::to_owned);
+            let root = root.clone();
+            let items = Arc::clone(&items);
+            let selected = Arc::new(chunk.iter().copied().collect::<HashSet<_>>());
+            let indices = chunk.to_vec();
+            let cancel = cancel.clone();
+            let progress = Arc::clone(&progress);
+            workers.push(std::thread::spawn(move || {
+                run_extract_worker(
+                    &api,
+                    &archive,
+                    CreateFormat::Zip,
+                    password.as_deref(),
+                    root,
+                    items,
+                    selected,
+                    indices,
+                    total_entries,
+                    total_bytes,
+                    cancel,
+                    progress,
+                    conflicts,
+                    RuntimePolicy::OverwriteAll,
+                    true,
+                )
+            }));
+        }
+
+        let mut summary = OperationSummary::default();
+        let mut first_error = None;
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(worker_summary)) => {
+                    summary.entries_processed = summary
+                        .entries_processed
+                        .saturating_add(worker_summary.entries_processed);
+                    summary.entries_skipped = summary
+                        .entries_skipped
+                        .saturating_add(worker_summary.entries_skipped);
+                    summary.bytes_processed = summary
+                        .bytes_processed
+                        .saturating_add(worker_summary.bytes_processed);
+                }
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    cancel.cancel();
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error = Some(ArchiveError::SevenZip(
+                            "parallel ZIP extraction worker panicked".to_owned(),
+                        ));
+                    }
+                    cancel.cancel();
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(summary)
     }
 
     impl ArchiveEngine for SevenZipEngine {
@@ -2018,7 +2365,11 @@ mod platform_impl {
         }
 
         fn writable_formats(&self) -> Vec<CreateFormat> {
-            vec![CreateFormat::SevenZip]
+            let mut formats = vec![CreateFormat::SevenZip];
+            if self.api.zip_writer_available {
+                formats.insert(0, CreateFormat::Zip);
+            }
+            formats
         }
 
         fn list(
@@ -2037,8 +2388,13 @@ mod platform_impl {
             opening.current_file = path.display().to_string();
             throttled.report(opening, true);
 
+            let format = archive_format(path).ok_or_else(|| {
+                ArchiveError::UnsupportedOption(
+                    "7z.dll could not identify the archive format".to_owned(),
+                )
+            })?;
             let (open_archive, mut entries) =
-                read_all_entries(&self.api, path, password, &throttled, cancel)?;
+                read_all_entries(&self.api, path, format, password, &throttled, cancel)?;
             let mut archive_encrypted = false;
             let mut archive_prop = PropVariant::empty();
             let hr = open_archive
@@ -2069,7 +2425,7 @@ mod platform_impl {
             throttled.report(snapshot, true);
             Ok(ArchiveListing {
                 archive_path: path.to_path_buf(),
-                format_name: "7z".to_owned(),
+                format_name: format.label().to_owned(),
                 filter_name: None,
                 entries,
                 total_uncompressed_size: total_uncompressed,
@@ -2086,6 +2442,11 @@ mod platform_impl {
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
             check_cancel(cancel)?;
+            let destination_was_missing = match fs::symlink_metadata(destination) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => return Err(ArchiveError::io(destination, error)),
+            };
             fs::create_dir_all(destination)
                 .map_err(|error| ArchiveError::io(destination, error))?;
             let root = fs::canonicalize(destination)
@@ -2109,14 +2470,27 @@ mod platform_impl {
             let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
             let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
 
-            let open_archive =
-                open_for_read(&self.api, archive, options.password.as_deref(), cancel)?;
+            let format = archive_format(archive).ok_or_else(|| {
+                ArchiveError::UnsupportedOption(
+                    "7z.dll could not identify the archive format".to_owned(),
+                )
+            })?;
+            let open_archive = open_for_read(
+                &self.api,
+                archive,
+                format,
+                options.password.as_deref(),
+                cancel,
+            )?;
             let entries = read_entries(
                 &open_archive.in_archive,
                 ProgressPhase::Extracting,
                 &throttled,
                 cancel,
+                false,
             )?;
+            open_archive.in_archive.close_now();
+            drop(open_archive);
 
             let mut items = Vec::with_capacity(entries.len());
             let mut selected = HashSet::with_capacity(entries.len());
@@ -2165,86 +2539,62 @@ mod platform_impl {
                 }
             }
 
-            let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
-            snapshot.total_entries = options.total_entries_hint.or(Some(items.len() as u64));
-            snapshot.total_bytes = options.total_bytes_hint.or(Some(selected_bytes));
-            let context = Arc::new(Mutex::new(ExtractContext {
-                items,
-                root,
-                policy: RuntimePolicy::from(options.conflict_policy),
-                conflicts,
-                password: options.password.clone(),
-                password_requested: false,
-                cancel: cancel.clone(),
-                progress: Arc::clone(&throttled),
-                snapshot,
-                summary: OperationSummary::default(),
-                pending: VecDeque::new(),
-                error: None,
-                selected,
-                test_mode: false,
-            }));
-            let callback = ExtractCallback {
-                vtbl: &EXTRACT_VTBL,
-                crypto_vtbl: &EXTRACT_CRYPTO_VTBL,
-                refs: AtomicU32::new(1),
-                context: Arc::clone(&context),
-            };
+            // When the destination was just created, every selected target is
+            // absent unless the archive contains duplicate paths. Detect
+            // duplicates once so the hot callback path can skip one metadata
+            // query per file while retaining normal conflict handling for
+            // pre-existing or ambiguous targets.
+            let assume_targets_missing =
+                destination_was_missing && !has_parallel_path_conflict(&items, &selected);
 
-            let indices: Vec<u32> = {
-                let context = context.lock().unwrap_or_else(|poison| poison.into_inner());
-                context
-                    .items
-                    .iter()
-                    .filter(|item| context.selected.contains(&item.index))
-                    .map(|item| item.index)
-                    .collect()
-            };
-            // 7-Zip extracts everything when indices is NULL with numItems
-            // (u32)-1; with a subset (possibly empty) the explicit list is used.
-            let (indices_ptr, indices_count) = if indices.is_empty() {
-                (ptr::null(), 0)
-            } else {
-                (indices.as_ptr(), indices.len() as u32)
-            };
-            let hr = open_archive.in_archive.extract(
-                indices_ptr,
-                indices_count,
-                EXTRACT_MODE_EXTRACT,
-                (&callback as *const ExtractCallback)
-                    .cast_mut()
-                    .cast::<c_void>(),
-            );
-
-            let mut context = context.lock().unwrap_or_else(|poison| poison.into_inner());
-            let error = context.error.take();
-            let password_requested = context.password_requested;
-            let summary = context.summary.clone();
-            let mut snapshot = context.snapshot.clone();
-            drop(context);
-
-            open_archive.in_archive.close_now();
-            // Release 7-Zip's archive/stream references before removing the
-            // files left in the pending queue by cancellation or failure.
-            cleanup_pending_temp_files(&callback);
-
-            if let Some(error) = error {
-                return Err(error);
-            }
-            if cancel.is_cancelled() {
-                return Err(ArchiveError::Cancelled);
-            }
-            if hr != S_OK {
-                if password_requested {
-                    return Err(ArchiveError::PasswordRequired);
-                }
-                return Err(ArchiveError::SevenZip(format!(
-                    "7z extraction failed with HRESULT {:#010x}",
-                    hr as u32
-                )));
-            }
-            snapshot.phase = ProgressPhase::Finished;
+            let items = Arc::new(items);
+            let selected = Arc::new(selected);
+            let indices: Vec<u32> = items
+                .iter()
+                .filter(|item| selected.contains(&item.index))
+                .map(|item| item.index)
+                .collect();
+            let total_entries = options.total_entries_hint.unwrap_or(items.len() as u64);
+            let total_bytes = options.total_bytes_hint.or(Some(selected_bytes));
+            let summary =
+                if format == CreateFormat::Zip && assume_targets_missing && indices.len() >= 256 {
+                    run_parallel_zip_extract(
+                        Arc::clone(&self.api),
+                        archive,
+                        options.password.as_deref(),
+                        root,
+                        Arc::clone(&items),
+                        &indices,
+                        total_entries,
+                        total_bytes,
+                        cancel,
+                        Arc::clone(&throttled),
+                        conflicts,
+                    )?
+                } else {
+                    run_extract_worker(
+                        &self.api,
+                        archive,
+                        format,
+                        options.password.as_deref(),
+                        root,
+                        items,
+                        selected,
+                        indices,
+                        total_entries,
+                        total_bytes,
+                        cancel.clone(),
+                        throttled.clone(),
+                        conflicts,
+                        RuntimePolicy::from(options.conflict_policy),
+                        assume_targets_missing,
+                    )?
+                };
+            let mut snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
+            snapshot.total_entries = Some(total_entries);
+            snapshot.total_bytes = total_bytes;
             snapshot.current_file.clear();
+            snapshot.phase = ProgressPhase::Finished;
             snapshot.entries_processed = options
                 .total_entries_hint
                 .unwrap_or(summary.entries_processed)
@@ -2271,9 +2621,9 @@ mod platform_impl {
                     "select at least one input".to_owned(),
                 ));
             }
-            if options.format != CreateFormat::SevenZip {
+            if !matches!(options.format, CreateFormat::SevenZip | CreateFormat::Zip) {
                 return Err(ArchiveError::UnsupportedOption(format!(
-                    "the 7z backend only writes 7z archives, not {:?}",
+                    "the 7z backend only writes ZIP and 7z archives, not {:?}",
                     options.format
                 )));
             }
@@ -2292,7 +2642,15 @@ mod platform_impl {
             let final_destination = parent.join(file_name);
             ensure_no_reparse_ancestors(&parent, &final_destination)?;
 
-            let (items, total_bytes) = collect_sources(files, &final_destination, cancel)?;
+            let (mut items, total_bytes) = collect_sources(files, &final_destination, cancel)?;
+            if options.format == CreateFormat::Zip {
+                // ZIP readers infer parent directories from file paths, and
+                // the bundled ZIP handler does not safely accept explicit
+                // directory records through this callback ABI. Omitting them
+                // also avoids an empty update callback for every directory in
+                // large trees.
+                items.retain(|item| item.kind == SourceKind::File);
+            }
             let item_count = u32::try_from(items.len())
                 .map_err(|_| ArchiveError::LimitExceeded("too many entries".to_owned()))?;
 
@@ -2316,7 +2674,7 @@ mod platform_impl {
                     .map_err(|error| ArchiveError::io(&temporary_path, error))?,
             );
 
-            let out_archive = match self.api.create_out_archive() {
+            let out_archive = match self.api.create_out_archive(options.format) {
                 Ok(archive) => archive,
                 Err(error) => {
                     drop(temp_file.take());
@@ -2339,11 +2697,10 @@ mod platform_impl {
                         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
                         snapshot.total_entries = Some(items.len() as u64);
                         snapshot.total_bytes = Some(total_bytes);
+                        let items = Arc::new(items);
                         let context = Arc::new(Mutex::new(UpdateContext {
-                            items,
+                            total_bytes,
                             password: options.password.clone(),
-                            cancel: cancel.clone(),
-                            progress: Arc::clone(&throttled),
                             snapshot,
                             summary: OperationSummary::default(),
                             error: None,
@@ -2352,6 +2709,9 @@ mod platform_impl {
                             vtbl: &UPDATE_VTBL,
                             crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD2_VTBL,
                             refs: AtomicU32::new(1),
+                            items: Arc::clone(&items),
+                            cancel: cancel.clone(),
+                            progress: Arc::clone(&throttled),
                             context: Arc::clone(&context),
                         };
                         let hr = out_archive.update_items(
@@ -2364,7 +2724,8 @@ mod platform_impl {
                         let mut context =
                             context.lock().unwrap_or_else(|poison| poison.into_inner());
                         let error = context.error.take();
-                        let summary = context.summary.clone();
+                        let mut summary = context.summary.clone();
+                        summary.bytes_processed = total_bytes;
                         let mut snapshot = context.snapshot.clone();
                         drop(context);
                         // 7-Zip released the stream; close the file ourselves
@@ -2438,12 +2799,18 @@ mod platform_impl {
             opening.current_file = archive.display().to_string();
             throttled.report(opening, true);
 
-            let open_archive = open_for_read(&self.api, archive, password, cancel)?;
+            let format = archive_format(archive).ok_or_else(|| {
+                ArchiveError::UnsupportedOption(
+                    "7z.dll could not identify the archive format".to_owned(),
+                )
+            })?;
+            let open_archive = open_for_read(&self.api, archive, format, password, cancel)?;
             let entries = read_entries(
                 &open_archive.in_archive,
                 ProgressPhase::Testing,
                 &throttled,
                 cancel,
+                false,
             )?;
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Testing);
             snapshot.total_entries = Some(entries.len() as u64);
@@ -2454,8 +2821,8 @@ mod platform_impl {
             // returns before `resolve` could ever be invoked.
             let resolver: &'static dyn ConflictResolver =
                 unsafe { &*(&NeverResolver as *const dyn ConflictResolver) };
-            let context = Arc::new(Mutex::new(ExtractContext {
-                items: entries
+            let items = Arc::new(
+                entries
                     .iter()
                     .map(|entry| ExtractItem {
                         index: u32::try_from(entry.index).unwrap_or(u32::MAX),
@@ -2465,25 +2832,31 @@ mod platform_impl {
                         size: entry.size,
                         mtime_unix: entry.modified_unix_seconds,
                     })
-                    .collect(),
+                    .collect::<Vec<_>>(),
+            );
+            let selected = Arc::new(HashSet::new());
+            let context = Arc::new(Mutex::new(ExtractContext {
                 root: PathBuf::new(),
+                prepared_dirs: HashSet::new(),
+                assume_targets_missing: false,
                 policy: RuntimePolicy::OverwriteAll,
                 conflicts: resolver,
                 password: password.map(str::to_owned),
                 password_requested: false,
-                cancel: cancel.clone(),
-                progress: Arc::clone(&throttled),
                 snapshot,
                 summary: OperationSummary::default(),
                 pending: VecDeque::new(),
                 error: None,
-                selected: HashSet::new(),
                 test_mode: true,
             }));
             let callback = ExtractCallback {
                 vtbl: &EXTRACT_VTBL,
                 crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD_VTBL,
                 refs: AtomicU32::new(1),
+                items,
+                selected,
+                cancel: cancel.clone(),
+                progress: Arc::clone(&throttled),
                 context: Arc::clone(&context),
             };
             let hr = open_archive.in_archive.extract(
@@ -2537,7 +2910,8 @@ mod platform_impl {
     }
 
     // ------------------------------------------------------------------
-    // Composite engine: 7z -> 7z.dll, everything else -> libarchive
+    // Composite engine: 7z/ZIP read and creation -> 7z.dll when available;
+    // libarchive handles ZIP as a fallback and all other formats.
     // ------------------------------------------------------------------
     pub struct CompositeEngine {
         libarchive: LibArchiveEngine,
@@ -2563,8 +2937,12 @@ mod platform_impl {
 
         fn writable_formats(&self) -> Vec<CreateFormat> {
             let mut formats = self.libarchive.writable_formats();
-            if self.sevenzip.is_some() && !formats.contains(&CreateFormat::SevenZip) {
-                formats.push(CreateFormat::SevenZip);
+            if let Some(sevenzip) = &self.sevenzip {
+                for format in [CreateFormat::Zip, CreateFormat::SevenZip] {
+                    if sevenzip.can_create(format) && !formats.contains(&format) {
+                        formats.push(format);
+                    }
+                }
             }
             formats
         }
@@ -2577,15 +2955,13 @@ mod platform_impl {
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
-            if is_sevenzip_file(path) {
-                self.sevenzip
-                    .as_ref()
-                    .ok_or_else(sevenzip_unavailable)?
-                    .list(path, password, pathname_codepage, progress, cancel)
-            } else {
-                self.libarchive
-                    .list(path, password, pathname_codepage, progress, cancel)
+            if let Some(sevenzip) = &self.sevenzip {
+                if archive_format(path).is_some_and(|format| sevenzip.can_read(format)) {
+                    return sevenzip.list(path, password, pathname_codepage, progress, cancel);
+                }
             }
+            self.libarchive
+                .list(path, password, pathname_codepage, progress, cancel)
         }
 
         fn extract(
@@ -2597,15 +2973,20 @@ mod platform_impl {
             conflicts: &dyn ConflictResolver,
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
-            if is_sevenzip_file(archive) {
-                self.sevenzip
-                    .as_ref()
-                    .ok_or_else(sevenzip_unavailable)?
-                    .extract(archive, destination, options, progress, conflicts, cancel)
-            } else {
-                self.libarchive
-                    .extract(archive, destination, options, progress, conflicts, cancel)
+            if let Some(sevenzip) = &self.sevenzip {
+                if archive_format(archive).is_some_and(|format| sevenzip.can_read(format)) {
+                    return sevenzip.extract(
+                        archive,
+                        destination,
+                        options,
+                        progress,
+                        conflicts,
+                        cancel,
+                    );
+                }
             }
+            self.libarchive
+                .extract(archive, destination, options, progress, conflicts, cancel)
         }
 
         fn create(
@@ -2616,7 +2997,13 @@ mod platform_impl {
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
-            if options.format == CreateFormat::SevenZip {
+            if options.format == CreateFormat::SevenZip
+                || (options.format == CreateFormat::Zip
+                    && self
+                        .sevenzip
+                        .as_ref()
+                        .is_some_and(|engine| engine.can_create(CreateFormat::Zip)))
+            {
                 self.sevenzip
                     .as_ref()
                     .ok_or_else(sevenzip_unavailable)?
@@ -2634,14 +3021,12 @@ mod platform_impl {
             progress: &dyn ProgressSink,
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
-            if is_sevenzip_file(archive) {
-                self.sevenzip
-                    .as_ref()
-                    .ok_or_else(sevenzip_unavailable)?
-                    .test(archive, password, progress, cancel)
-            } else {
-                self.libarchive.test(archive, password, progress, cancel)
+            if let Some(sevenzip) = &self.sevenzip {
+                if archive_format(archive).is_some_and(|format| sevenzip.can_read(format)) {
+                    return sevenzip.test(archive, password, progress, cancel);
+                }
             }
+            self.libarchive.test(archive, password, progress, cancel)
         }
     }
 
@@ -2655,17 +3040,26 @@ mod platform_impl {
     // Shared helpers
     // ------------------------------------------------------------------
 
-    /// True when `path` starts with the 7z signature
-    /// (37 7A BC AF 27 1C).
-    pub(crate) fn is_sevenzip_file(path: &Path) -> bool {
+    fn archive_format(path: &Path) -> Option<CreateFormat> {
         let Ok(mut file) = File::open(path) else {
-            return false;
+            return None;
         };
         let mut signature = [0u8; 6];
         let Ok(amount) = file.read(&mut signature) else {
-            return false;
+            return None;
         };
-        amount == SEVENZIP_SIGNATURE.len() && signature == SEVENZIP_SIGNATURE
+        if amount == SEVENZIP_SIGNATURE.len() && signature == SEVENZIP_SIGNATURE {
+            return Some(CreateFormat::SevenZip);
+        }
+        if amount >= 4
+            && signature[0] == b'P'
+            && signature[1] == b'K'
+            && matches!(signature[2], 0x03 | 0x05 | 0x07)
+            && matches!(signature[3], 0x04 | 0x06 | 0x08)
+        {
+            return Some(CreateFormat::Zip);
+        }
+        None
     }
 
     struct OpenArchive {
@@ -2680,15 +3074,20 @@ mod platform_impl {
     fn open_for_read(
         api: &Api,
         path: &Path,
+        format: CreateFormat,
         password: Option<&str>,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OpenArchive> {
-        let in_archive = api.create_in_archive()?;
-        let file = File::open(path).map_err(|error| ArchiveError::io(path, error))?;
+        let in_archive = api.create_in_archive(format)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(path)
+            .map_err(|error| ArchiveError::io(path, error))?;
         let stream = Box::new(InStream {
             vtbl: &IN_STREAM_VTBL,
             refs: AtomicU32::new(2),
-            file: Mutex::new(file),
+            file: Mutex::new(BufReader::with_capacity(STREAM_BUFFER_SIZE, file)),
         });
         let callback = OpenCallback {
             vtbl: &OPEN_VTBL,
@@ -2711,7 +3110,8 @@ mod platform_impl {
                 return Err(ArchiveError::PasswordRequired);
             }
             return Err(ArchiveError::SevenZip(format!(
-                "opening 7z archive failed with HRESULT {:#010x}",
+                "opening {} archive failed with HRESULT {:#010x}",
+                format.label(),
                 hr as u32
             )));
         }
@@ -2727,6 +3127,7 @@ mod platform_impl {
         phase: ProgressPhase,
         throttled: &ThrottledProgress,
         cancel: &CancellationToken,
+        include_encryption: bool,
     ) -> ArchiveResult<Vec<ArchiveEntry>> {
         let mut count: u32 = 0;
         require_hr(
@@ -2792,13 +3193,18 @@ mod platform_impl {
             let modified_unix_seconds = mtime_prop.as_filetime_seconds();
             mtime_prop.clear();
 
-            let mut encrypted_prop = PropVariant::empty();
-            require_hr(
-                in_archive.get_property(index, KPID_ENCRYPTED, &mut encrypted_prop),
-                "reading 7z entry encryption flag",
-            )?;
-            let encrypted = encrypted_prop.as_bool().unwrap_or(false);
-            encrypted_prop.clear();
+            let encrypted = if include_encryption {
+                let mut encrypted_prop = PropVariant::empty();
+                require_hr(
+                    in_archive.get_property(index, KPID_ENCRYPTED, &mut encrypted_prop),
+                    "reading 7z entry encryption flag",
+                )?;
+                let encrypted = encrypted_prop.as_bool().unwrap_or(false);
+                encrypted_prop.clear();
+                encrypted
+            } else {
+                false
+            };
 
             let path = build_path(&display_path)?;
             entries.push(ArchiveEntry {
@@ -2839,6 +3245,35 @@ mod platform_impl {
         Ok(path)
     }
 
+    fn has_parallel_path_conflict(items: &[ExtractItem], selected: &HashSet<u32>) -> bool {
+        let mut paths = items
+            .iter()
+            .filter(|item| selected.contains(&item.index))
+            .map(|item| {
+                (
+                    item.relative
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_ascii_lowercase(),
+                    item.is_dir,
+                )
+            })
+            .collect::<Vec<_>>();
+        paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        for window in paths.windows(2) {
+            let (previous, previous_is_dir) = &window[0];
+            let (current, _) = &window[1];
+            if previous == current
+                || (!previous_is_dir
+                    && current.starts_with(previous)
+                    && current.as_bytes().get(previous.len()) == Some(&b'/'))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn apply_create_properties(
         out_archive: &RawOutArchive,
         options: &CreateOptions,
@@ -2851,9 +3286,9 @@ mod platform_impl {
         // SAFETY: QueryInterface returned a live ISetProperties interface.
         let set_properties = unsafe { RawSetProperties::from_raw(raw) };
 
-        let mut names: Vec<Vec<u16>> = Vec::with_capacity(4);
-        let mut name_ptrs: Vec<*const u16> = Vec::with_capacity(4);
-        let mut values: Vec<PropVariant> = Vec::with_capacity(4);
+        let mut names: Vec<Vec<u16>> = Vec::with_capacity(6);
+        let mut name_ptrs: Vec<*const u16> = Vec::with_capacity(6);
+        let mut values: Vec<PropVariant> = Vec::with_capacity(6);
         let mut push = |name: &str, value: PropVariant| {
             let mut wide: Vec<u16> = name.encode_utf16().collect();
             wide.push(0);
@@ -2861,24 +3296,42 @@ mod platform_impl {
             names.push(wide);
             values.push(value);
         };
-        // Compression level and method. Level 0 stores without compression,
-        // exactly like 7-Zip's -mx0.
+        if options.compression_level > 9 {
+            return Err(ArchiveError::UnsupportedOption(format!(
+                "compression level {} is outside 0..=9",
+                options.compression_level
+            )));
+        }
+        // Compression level. Level 0 stores without compression, exactly like
+        // 7-Zip's -mx0. The ZIP handler selects Store/Deflate from `x` when no
+        // explicit `m` method is supplied.
         push(
             "x",
             PropVariant::u32_value(u32::from(options.compression_level)),
         );
-        push(
-            "m",
-            PropVariant::bstr(if options.compression_level == 0 {
-                "Copy"
-            } else {
-                "LZMA2"
-            }),
-        );
-        // Multithreaded LZMA2: `mt` is the worker-thread count. When unset,
-        // 7-Zip uses all logical processors ("자동" / "전체").
+        if options.format == CreateFormat::SevenZip {
+            push(
+                "m",
+                PropVariant::bstr(if options.compression_level == 0 {
+                    "Copy"
+                } else {
+                    "LZMA2"
+                }),
+            );
+        }
+        if options.format == CreateFormat::Zip {
+            // Force the standard UTF-8 filename flag in ZIP headers.
+            push("cu", PropVariant::bool_value(true));
+        }
+        // `mt` is the worker-thread count. Auto/All are resolved by
+        // ThreadCount to the process-visible logical CPU count, matching
+        // 7-Zip CLI `-mmt=on` instead of relying on handler defaults.
         if let Some(threads) = options.threads.sevenzip_threads() {
             push("mt", PropVariant::u32_value(threads));
+        }
+        if options.format == CreateFormat::Zip && options.password.is_some() {
+            // Match the existing ZIP backend's AES-256 password behavior.
+            push("em", PropVariant::bstr("AES256"));
         }
         // Passwords are requested through ICryptoGetTextPassword2 on the
         // update callback. The 7z handler does not accept a `p` property in
@@ -2948,6 +3401,17 @@ mod platform_impl {
     fn is_reparse(metadata: &fs::Metadata) -> bool {
         use std::os::windows::fs::MetadataExt;
         metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    fn same_windows_path(left: &Path, right: &Path) -> bool {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+
+    fn stream_buffer_size(file_size: u64) -> usize {
+        usize::try_from(file_size.min(STREAM_BUFFER_SIZE as u64))
+            .unwrap_or(STREAM_BUFFER_SIZE)
+            .max(MIN_STREAM_BUFFER_SIZE)
     }
 
     fn temporary_path(parent: &Path, target: &Path) -> PathBuf {
@@ -3078,14 +3542,13 @@ mod platform_impl {
         destination: &Path,
         cancel: &CancellationToken,
     ) -> ArchiveResult<(Vec<SourceItem>, u64)> {
-        let destination = fs::canonicalize(destination).ok();
         let mut items = Vec::new();
         let mut total_bytes = 0u64;
         for root in files {
             check_cancel(cancel)?;
             let canonical =
                 fs::canonicalize(root).map_err(|error| ArchiveError::io(root, error))?;
-            if destination.as_deref() == Some(canonical.as_path()) {
+            if same_windows_path(&canonical, destination) {
                 continue;
             }
             let Some(base_name) = root
@@ -3107,7 +3570,7 @@ mod platform_impl {
                 walk_directory(
                     &canonical,
                     &base_name,
-                    destination.as_deref(),
+                    destination,
                     &mut items,
                     &mut total_bytes,
                     cancel,
@@ -3136,7 +3599,7 @@ mod platform_impl {
     fn walk_directory(
         canonical_root: &Path,
         prefix: &str,
-        destination: Option<&Path>,
+        destination: &Path,
         items: &mut Vec<SourceItem>,
         total_bytes: &mut u64,
         cancel: &CancellationToken,
@@ -3144,7 +3607,7 @@ mod platform_impl {
         let mut pending = vec![(prefix.to_owned(), canonical_root.to_path_buf())];
         while let Some((archive_prefix, directory)) = pending.pop() {
             check_cancel(cancel)?;
-            let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
+            let mut children: Vec<(String, PathBuf, fs::Metadata)> = Vec::new();
             let entries =
                 fs::read_dir(&directory).map_err(|error| ArchiveError::io(&directory, error))?;
             for entry in entries {
@@ -3157,29 +3620,29 @@ mod platform_impl {
                 if is_reparse(&metadata) {
                     continue;
                 }
-                let is_dir = metadata.is_dir();
                 let name = entry.file_name().to_string_lossy().into_owned();
-                children.push((name, path, is_dir));
+                children.push((name, path, metadata));
             }
             children.sort_by(|left, right| left.0.cmp(&right.0));
             items.push(SourceItem {
                 source: directory.clone(),
-                archive_name: format!("{archive_prefix}/"),
+                // The archive handler adds the directory separator based on
+                // KPID_IS_DIR. Keeping it out of the callback property also
+                // matches the path form used for child entries.
+                archive_name: archive_prefix.clone(),
                 kind: SourceKind::Directory,
                 size: 0,
                 modified_unix_seconds: None,
             });
-            for (name, path, is_dir) in children {
+            for (name, path, metadata) in children {
                 check_cancel(cancel)?;
-                if destination == fs::canonicalize(&path).ok().as_deref() {
+                if same_windows_path(&path, destination) {
                     continue;
                 }
                 let child_archive_name = format!("{archive_prefix}/{name}");
-                if is_dir {
+                if metadata.is_dir() {
                     pending.push((child_archive_name, path));
                 } else {
-                    let metadata = fs::symlink_metadata(&path)
-                        .map_err(|error| ArchiveError::io(&path, error))?;
                     *total_bytes = checked_add_with_limit(
                         *total_bytes,
                         metadata.len(),
@@ -3209,7 +3672,7 @@ mod platform_impl {
     mod tests {
         use super::{
             ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, SevenZipEngine,
-            filetime_to_unix_seconds, is_sevenzip_file, unix_seconds_to_filetime,
+            archive_format, filetime_to_unix_seconds, unix_seconds_to_filetime,
         };
         use crate::archive::ThreadCount;
         use std::io::Write;
@@ -3217,13 +3680,16 @@ mod platform_impl {
 
         #[test]
         fn thread_count_options_map_to_sevenzip_mt() {
-            assert_eq!(ThreadCount::Auto.sevenzip_threads(), None);
+            assert_eq!(
+                ThreadCount::Auto.sevenzip_threads(),
+                ThreadCount::All.sevenzip_threads()
+            );
+            assert!(ThreadCount::Auto.sevenzip_threads().is_some());
             assert_eq!(ThreadCount::Four.sevenzip_threads(), Some(4));
             assert_eq!(ThreadCount::Six.sevenzip_threads(), Some(6));
             assert_eq!(ThreadCount::Eight.sevenzip_threads(), Some(8));
             assert_eq!(ThreadCount::Ten.sevenzip_threads(), Some(10));
             assert_eq!(ThreadCount::Sixteen.sevenzip_threads(), Some(16));
-            assert_eq!(ThreadCount::All.sevenzip_threads(), None);
             assert_eq!(ThreadCount::from_registry_key("all"), ThreadCount::All);
             assert_eq!(ThreadCount::from_registry_key("6"), ThreadCount::Six);
             assert_eq!(ThreadCount::from_registry_key("10"), ThreadCount::Ten);
@@ -3237,6 +3703,16 @@ mod platform_impl {
         #[test]
         fn create_options_default_to_auto_threads() {
             assert_eq!(CreateOptions::default().threads, ThreadCount::Auto);
+        }
+
+        #[test]
+        fn input_stream_buffer_scales_for_small_files() {
+            assert_eq!(super::stream_buffer_size(1), super::MIN_STREAM_BUFFER_SIZE);
+            assert_eq!(super::stream_buffer_size(64 * 1024), 64 * 1024);
+            assert_eq!(
+                super::stream_buffer_size((super::STREAM_BUFFER_SIZE as u64) * 2),
+                super::STREAM_BUFFER_SIZE
+            );
         }
 
         #[test]
@@ -3263,9 +3739,9 @@ mod platform_impl {
             drop(file);
             let zip = directory.join("sample.zip");
             std::fs::write(&zip, b"PK\x03\x04junk").expect("create zip file");
-            assert!(is_sevenzip_file(&sevenzip));
-            assert!(!is_sevenzip_file(&zip));
-            assert!(!is_sevenzip_file(&directory.join("missing.7z")));
+            assert_eq!(archive_format(&sevenzip), Some(CreateFormat::SevenZip));
+            assert_eq!(archive_format(&zip), Some(CreateFormat::Zip));
+            assert_eq!(archive_format(&directory.join("missing.7z")), None);
             let _ = std::fs::remove_dir_all(&directory);
         }
 
@@ -3300,7 +3776,11 @@ mod platform_impl {
                 }
                 let engine =
                     SevenZipEngine::load_from_path(&candidate).expect("bundled 7z.dll loads");
-                assert_eq!(engine.writable_formats(), vec![CreateFormat::SevenZip]);
+                assert!(engine.can_read(CreateFormat::Zip));
+                assert_eq!(
+                    engine.writable_formats(),
+                    vec![CreateFormat::Zip, CreateFormat::SevenZip]
+                );
                 return;
             }
             eprintln!("bundled 7z.dll was not staged for tests; skipping");

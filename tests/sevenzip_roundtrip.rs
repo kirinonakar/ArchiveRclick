@@ -9,8 +9,8 @@ use std::{
 use archive_rclick_core::archive::ThreadCount;
 use archive_rclick_core::{
     archive::{
-        ArchiveEngine, ArchiveError, ConflictChoice, ConflictResolver, CreateFormat, CreateOptions,
-        ExtractOptions, SevenZipEngine,
+        ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
+        CreateFormat, CreateOptions, ExtractOptions, SevenZipEngine, libarchive::LibArchiveEngine,
     },
     tasks::CancellationToken,
 };
@@ -66,6 +66,17 @@ fn load_engine() -> SevenZipEngine {
         .and_then(Path::parent)
         .expect("profile directory");
     SevenZipEngine::load_from_path(&profile.join("7z.dll")).expect("load bundled 7z.dll")
+}
+
+fn load_composite() -> CompositeEngine {
+    let executable = std::env::current_exe().expect("locate test executable");
+    let profile = executable
+        .parent()
+        .and_then(Path::parent)
+        .expect("profile directory");
+    let libarchive = LibArchiveEngine::load_from_path(&profile.join("archive.dll"))
+        .expect("load bundled archive.dll");
+    CompositeEngine::new(libarchive, Some(load_engine()))
 }
 
 fn assert_no_archive_temporary_files(directory: &Path) {
@@ -126,6 +137,101 @@ fn bundled_7z_create_extract_round_trip() {
     assert_eq!(
         fs::read(output.join("payload").join("hello.txt")).unwrap(),
         b"hello from 7z\n"
+    );
+}
+
+#[test]
+fn bundled_zip_create_extract_round_trip() {
+    let work = Work::new();
+    let input = work.0.join("payload");
+    fs::create_dir_all(input.join("nested")).unwrap();
+    fs::write(input.join("hello.txt"), b"hello from ZIP\n").unwrap();
+    fs::write(input.join("nested").join("data.bin"), [0_u8, 1, 2, 3, 4]).unwrap();
+
+    let engine = load_composite();
+    let archive = work.0.join("payload.zip");
+    let cancel = CancellationToken::new();
+    let password = "zip-password";
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                format: CreateFormat::Zip,
+                password: Some(password.to_owned()),
+                ..CreateOptions::default()
+            },
+            &quiet,
+            &cancel,
+        )
+        .expect("create ZIP archive through 7z.dll");
+
+    let output = work.0.join("out");
+    engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions {
+                password: Some(password.to_owned()),
+                ..ExtractOptions::default()
+            },
+            &quiet,
+            &Overwrite,
+            &cancel,
+        )
+        .expect("extract ZIP archive through 7z.dll");
+    assert_eq!(
+        fs::read(output.join("payload").join("hello.txt")).unwrap(),
+        b"hello from ZIP\n"
+    );
+    assert_eq!(
+        fs::read(output.join("payload").join("nested").join("data.bin")).unwrap(),
+        [0_u8, 1, 2, 3, 4]
+    );
+}
+
+#[test]
+fn bundled_zip_many_files_extracts_with_parallel_workers() {
+    let work = Work::new();
+    let input = work.0.join("payload");
+    fs::create_dir_all(&input).unwrap();
+    for index in 0..512 {
+        let name = format!("file-{index:04}.bin");
+        fs::write(input.join(name), [index as u8; 4096]).unwrap();
+    }
+
+    let engine = load_composite();
+    let archive = work.0.join("many-files.zip");
+    let cancel = CancellationToken::new();
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                format: CreateFormat::Zip,
+                ..CreateOptions::default()
+            },
+            &quiet,
+            &cancel,
+        )
+        .expect("create many-file ZIP archive");
+
+    let output = work.0.join("out");
+    let summary = engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions::default(),
+            &quiet,
+            &Overwrite,
+            &cancel,
+        )
+        .expect("extract many-file ZIP archive");
+    assert_eq!(summary.entries_processed, 512);
+    assert_eq!(fs::read_dir(output.join("payload")).unwrap().count(), 512);
+    assert_eq!(
+        fs::read(output.join("payload").join("file-0511.bin")).unwrap(),
+        [0xFF_u8; 4096]
     );
 }
 

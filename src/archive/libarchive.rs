@@ -67,7 +67,11 @@ mod platform_impl {
     const AE_IFLNK: u16 = 0o120000;
     const AE_IFDIR: u16 = 0o040000;
 
-    const IO_BUFFER_SIZE: usize = 64 * 1024;
+    // Keep the Rust-to-libarchive handoff large enough that file I/O and FFI
+    // call overhead stay negligible next to the codec work.  libarchive has
+    // its own internal buffering, so this is deliberately a moderate 1 MiB
+    // staging buffer rather than an unbounded read-ahead cache.
+    const IO_BUFFER_SIZE: usize = 1024 * 1024;
     const OPEN_BLOCK_SIZE: usize = 64 * 1024;
     const MAX_ARCHIVE_PATH_UNITS: usize = 1024 * 1024;
     const MAX_ARCHIVE_PATH_UTF8_BYTES: usize = 4 * 1024 * 1024;
@@ -2015,6 +2019,7 @@ mod platform_impl {
             snapshot.total_entries = Some(items.len() as u64);
             snapshot.total_bytes = Some(total_bytes);
             let mut buffer = vec![0u8; IO_BUFFER_SIZE];
+            let mut next_progress_bytes = 0u64;
 
             for item in &items {
                 check_cancel(cancel)?;
@@ -2045,7 +2050,12 @@ mod platform_impl {
                         summary.bytes_processed += amount as u64;
                         snapshot.bytes_processed = summary.bytes_processed;
                         snapshot.entries_processed = summary.entries_processed;
-                        throttled.report(snapshot.clone(), false);
+                        if summary.bytes_processed >= next_progress_bytes {
+                            throttled.report(snapshot.clone(), false);
+                            next_progress_bytes = summary
+                                .bytes_processed
+                                .saturating_add(IO_BUFFER_SIZE as u64);
+                        }
                     }
                 }
                 writer.finish_entry()?;
@@ -2588,7 +2598,10 @@ mod platform_impl {
             .map_err(|error| ArchiveError::io(source, error))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ArchiveError::io(source, error))?;
-        children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+        // `sort_by_key` rebuilds the lowercase allocation for every
+        // comparison.  Directory enumeration can contain thousands of
+        // siblings, so cache the key once per entry instead.
+        children.sort_by_cached_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
         for child in children {
             let child_name = child.file_name();
             let child_name = child_name.to_str().ok_or_else(|| {
