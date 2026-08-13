@@ -455,6 +455,21 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
                         "overall compression reached 100% before the current file finished"
                     );
                 }
+                if current_total > 0 && !snapshot.current_file.is_empty() {
+                    let file_index = snapshot
+                        .current_file
+                        .strip_prefix("file-")
+                        .and_then(|name| name.strip_suffix(".bin"))
+                        .and_then(|index| index.parse::<u64>().ok())
+                        .expect("compression progress named an input file");
+                    let file_offset = file_index * current_total;
+                    assert!(
+                        snapshot.bytes_processed >= file_offset,
+                        "{} was displayed before earlier input bytes were processed: {} < {file_offset}",
+                        snapshot.current_file,
+                        snapshot.bytes_processed,
+                    );
+                }
             }
         }
         assert!(

@@ -26,6 +26,7 @@ component HeaderCell inherits Rectangle {
     in property <bool> resizable: true;
     callback sort(int);
     callback resize(int, length);
+    callback resize-finished(int);
 
     private property <length> drag-start-width: root.column-width;
     private property <length> drag-start-x: 0px;
@@ -96,7 +97,10 @@ component HeaderCell inherits Rectangle {
                     );
                 }
             } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                root.resizing = false;
+                if (root.resizing) {
+                    root.resizing = false;
+                    root.resize-finished(root.column-index);
+                }
             }
         }
     }
@@ -156,12 +160,16 @@ component ArchiveTextCell inherits Rectangle {
 }
 
 component ArchiveTableHeader inherits Rectangle {
+    in property <float> initial-name-boundary: 0.28;
+    in property <float> initial-size-boundary: 0.40;
+    in property <float> initial-packed-boundary: 0.52;
     callback sort(int);
+    callback column-widths-changed(float, float, float);
 
     private property <length> content-width: max(1px, self.width - 36px);
-    private property <float> name-boundary: 0.28;
-    private property <float> size-boundary: 0.40;
-    private property <float> packed-boundary: 0.52;
+    private property <float> name-boundary: root.initial-name-boundary;
+    private property <float> size-boundary: root.initial-size-boundary;
+    private property <float> packed-boundary: root.initial-packed-boundary;
     private property <length> min-name-width: 96px;
     private property <length> min-size-width: 60px;
     private property <length> min-packed-width: 60px;
@@ -205,6 +213,13 @@ component ArchiveTableHeader inherits Rectangle {
                 );
             }
         }
+        resize-finished(column) => {
+            root.column-widths-changed(
+                root.name-boundary,
+                root.size-boundary,
+                root.packed-boundary
+            );
+        }
     }
 
     HeaderCell {
@@ -223,6 +238,13 @@ component ArchiveTableHeader inherits Rectangle {
                 );
             }
         }
+        resize-finished(column) => {
+            root.column-widths-changed(
+                root.name-boundary,
+                root.size-boundary,
+                root.packed-boundary
+            );
+        }
     }
 
     HeaderCell {
@@ -240,6 +262,13 @@ component ArchiveTableHeader inherits Rectangle {
                     1.0 - root.min-modified-width / root.content-width
                 );
             }
+        }
+        resize-finished(column) => {
+            root.column-widths-changed(
+                root.name-boundary,
+                root.size-boundary,
+                root.packed-boundary
+            );
         }
     }
 
@@ -440,6 +469,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> create-formats;
     in-out property <bool> create-has-sources;
     in-out property <int> create-thread-selection: 0;
+    in-out property <bool> create-header-encryption: false;
 
     in-out property <bool> password-visible;
     in-out property <string> password-operation;
@@ -449,6 +479,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> font-options;
     in-out property <int> font-selection;
     in-out property <int> settings-thread-selection: 0;
+    in-out property <bool> settings-header-encryption: false;
     in-out property <int> theme-selection: 0;
     in-out property <[string]> language-options;
     in-out property <int> language-selection: 0;
@@ -457,6 +488,9 @@ export component AppWindow inherits Window {
     in-out property <int> selection-state: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
+    in-out property <float> column-name-boundary: 0.28;
+    in-out property <float> column-size-boundary: 0.40;
+    in-out property <float> column-packed-boundary: 0.52;
 
     callback open-requested();
     callback close-archive-requested();
@@ -480,8 +514,9 @@ export component AppWindow inherits Window {
     callback dropped(data-transfer);
 
     callback settings-requested();
-    callback settings-applied(int, int, int, int);
+    callback settings-applied(int, int, int, int, bool);
     callback settings-cancelled();
+    callback column-widths-changed(float, float, float);
     callback context-menu-register-requested();
     callback context-menu-unregister-requested();
 
@@ -657,7 +692,7 @@ export component AppWindow inherits Window {
                             border-color: Palette.border;
                             clip: true;
 
-                            Text {
+                            folder-path-text := Text {
                                 x: 12px;
                                 width: parent.width - 24px;
                                 height: parent.height;
@@ -668,6 +703,10 @@ export component AppWindow inherits Window {
                                 font-size: 13px;
                                 vertical-alignment: center;
                                 overflow: elide;
+
+                                if root.has-archive && root.current-folder != "" : Tooltip {
+                                    text: @markdown("\{root.current-folder}");
+                                }
                             }
                         }
 
@@ -759,7 +798,16 @@ export component AppWindow inherits Window {
                                 spacing: 0px;
 
                                 archive-header := ArchiveTableHeader {
+                                    initial-name-boundary: root.column-name-boundary;
+                                    initial-size-boundary: root.column-size-boundary;
+                                    initial-packed-boundary: root.column-packed-boundary;
                                     sort(column) => { root.sort-requested(column); }
+                                    column-widths-changed(name, size, packed) => {
+                                        root.column-name-boundary = name;
+                                        root.column-size-boundary = size;
+                                        root.column-packed-boundary = packed;
+                                        root.column-widths-changed(name, size, packed);
+                                    }
                                 }
 
                                 ListView {
@@ -887,6 +935,7 @@ export component AppWindow inherits Window {
         available-formats: root.create-formats;
         has-sources: root.create-has-sources;
         thread-selection: root.create-thread-selection;
+        header-encryption-default: root.create-header-encryption;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
         accepted(format-index, level, thread-index, password, password-confirmation, encrypt-headers) => {
@@ -919,15 +968,16 @@ export component AppWindow inherits Window {
         font-options: root.font-options;
         font-selection: root.font-selection;
         thread-selection: root.settings-thread-selection;
+        header-encryption: root.settings-header-encryption;
         theme-selection: root.theme-selection;
         language-options: root.language-options;
         language-selection: root.language-selection;
         context-menu-state: root.context-menu-state;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
-        accepted(font-selection, thread-index, theme-index, language-index) => {
+        accepted(font-selection, thread-index, theme-index, language-index, header_encryption) => {
             root.settings-visible = false;
-            root.settings-applied(font-selection, thread-index, theme-index, language-index);
+            root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption);
         }
         cancelled => { root.settings-visible = false; }
     }

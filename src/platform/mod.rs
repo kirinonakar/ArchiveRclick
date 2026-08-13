@@ -29,9 +29,11 @@ pub mod windows;
 pub use associations::{register_file_associations, unregister_file_associations};
 pub use drop_target::install_file_drop_handler;
 pub use settings::{
-    WindowGeometry, load_font_preference, load_language_preference, load_theme_preference,
-    load_thread_preference, load_window_geometry, resolve_font_family, save_font_preference,
-    save_language_preference, save_theme_preference, save_thread_preference, save_window_geometry,
+    ColumnBoundaries, WindowGeometry, load_column_boundaries, load_font_preference,
+    load_header_encryption_preference, load_language_preference, load_theme_preference,
+    load_thread_preference, load_window_geometry, resolve_font_family, save_column_boundaries,
+    save_font_preference, save_header_encryption_preference, save_language_preference,
+    save_theme_preference, save_thread_preference, save_window_geometry,
 };
 pub use shell::reveal_in_explorer;
 pub use titlebar::apply_window_theme;

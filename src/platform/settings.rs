@@ -11,6 +11,26 @@ pub struct WindowGeometry {
     pub height: u32,
 }
 
+/// Normalized cumulative boundaries for the visible archive-list columns.
+/// Keeping boundaries instead of raw pixels makes the layout responsive when
+/// the saved window is opened at a different size or DPI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnBoundaries {
+    pub name: f32,
+    pub size: f32,
+    pub packed: f32,
+}
+
+impl Default for ColumnBoundaries {
+    fn default() -> Self {
+        Self {
+            name: 0.28,
+            size: 0.40,
+            packed: 0.52,
+        }
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::ptr;
@@ -30,6 +50,7 @@ mod imp {
     const SETTINGS_KEY: &str = r"Software\ArchiveRclick\Settings";
     const FONT_VALUE: &str = "FontFamily";
     const THREAD_VALUE: &str = "CpuThreads";
+    const ENCRYPT_HEADERS_VALUE: &str = "EncryptHeaders";
     const THEME_VALUE: &str = "Theme";
     const LANGUAGE_VALUE: &str = "Language";
     const WINDOW_X_VALUE: &str = "WindowX";
@@ -38,6 +59,11 @@ mod imp {
     const WINDOW_HEIGHT_VALUE: &str = "WindowHeight";
     const WINDOW_GEOMETRY_VERSION_VALUE: &str = "WindowGeometryVersion";
     const WINDOW_GEOMETRY_VERSION: &str = "4";
+    const COLUMN_WIDTH_VERSION_VALUE: &str = "ColumnWidthVersion";
+    const COLUMN_WIDTH_VERSION: &str = "1";
+    const COLUMN_NAME_BOUNDARY_VALUE: &str = "ColumnNameBoundary";
+    const COLUMN_SIZE_BOUNDARY_VALUE: &str = "ColumnSizeBoundary";
+    const COLUMN_PACKED_BOUNDARY_VALUE: &str = "ColumnPackedBoundary";
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
@@ -120,6 +146,126 @@ mod imp {
         let key = OwnedKey(raw);
         let value = HSTRING::from(THREAD_VALUE);
         let data = utf16_bytes(preference);
+        // SAFETY: key is live and data is valid UTF-16 including its terminator.
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the settings registry value (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads the saved cumulative column boundaries. Invalid or incomplete
+    /// values fall back to the responsive default layout.
+    pub fn load_column_boundaries() -> super::ColumnBoundaries {
+        let default = super::ColumnBoundaries::default();
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return default;
+        };
+        if read_string_value(key.0, COLUMN_WIDTH_VERSION_VALUE).as_deref()
+            != Some(COLUMN_WIDTH_VERSION)
+        {
+            return default;
+        }
+        let Some(name) = read_string_value(key.0, COLUMN_NAME_BOUNDARY_VALUE)
+            .and_then(|value| value.parse::<f32>().ok())
+        else {
+            return default;
+        };
+        let Some(size) = read_string_value(key.0, COLUMN_SIZE_BOUNDARY_VALUE)
+            .and_then(|value| value.parse::<f32>().ok())
+        else {
+            return default;
+        };
+        let Some(packed) = read_string_value(key.0, COLUMN_PACKED_BOUNDARY_VALUE)
+            .and_then(|value| value.parse::<f32>().ok())
+        else {
+            return default;
+        };
+        let boundaries = super::ColumnBoundaries { name, size, packed };
+        valid_column_boundaries(&boundaries)
+            .then_some(boundaries)
+            .unwrap_or(default)
+    }
+
+    /// Persists the cumulative column boundaries after a completed drag.
+    pub fn save_column_boundaries(
+        boundaries: &super::ColumnBoundaries,
+    ) -> Result<(), String> {
+        if !valid_column_boundaries(boundaries) {
+            return Err("Invalid archive-list column boundaries".to_owned());
+        }
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        for (name, value) in [
+            (COLUMN_WIDTH_VERSION_VALUE, COLUMN_WIDTH_VERSION.to_owned()),
+            (
+                COLUMN_NAME_BOUNDARY_VALUE,
+                format!("{:.6}", boundaries.name),
+            ),
+            (
+                COLUMN_SIZE_BOUNDARY_VALUE,
+                format!("{:.6}", boundaries.size),
+            ),
+            (
+                COLUMN_PACKED_BOUNDARY_VALUE,
+                format!("{:.6}", boundaries.packed),
+            ),
+        ] {
+            write_string_value(key.0, name, &value)?;
+        }
+        Ok(())
+    }
+
+    fn valid_column_boundaries(boundaries: &super::ColumnBoundaries) -> bool {
+        boundaries.name.is_finite()
+            && boundaries.size.is_finite()
+            && boundaries.packed.is_finite()
+            && 0.0 < boundaries.name
+            && boundaries.name < boundaries.size
+            && boundaries.size < boundaries.packed
+            && boundaries.packed < 1.0
+    }
+
+    /// Loads whether new 7z archives should encrypt their headers; disabled
+    /// by default when the preference has not been stored yet.
+    pub fn load_header_encryption_preference() -> bool {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return false;
+        };
+        matches!(
+            read_string_value(key.0, ENCRYPT_HEADERS_VALUE).as_deref(),
+            Some("1" | "true" | "on")
+        )
+    }
+
+    /// Persists the default 7z header-encryption setting.
+    pub fn save_header_encryption_preference(enabled: bool) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        let value = HSTRING::from(ENCRYPT_HEADERS_VALUE);
+        let data = utf16_bytes(if enabled { "1" } else { "0" });
         // SAFETY: key is live and data is valid UTF-16 including its terminator.
         let status =
             unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
@@ -466,6 +612,24 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_column_boundaries() -> super::ColumnBoundaries {
+        super::ColumnBoundaries::default()
+    }
+
+    pub fn save_column_boundaries(
+        _boundaries: &super::ColumnBoundaries,
+    ) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
+    pub fn load_header_encryption_preference() -> bool {
+        false
+    }
+
+    pub fn save_header_encryption_preference(_enabled: bool) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn load_theme_preference() -> String {
         "auto".to_owned()
     }
@@ -500,7 +664,9 @@ mod imp {
 }
 
 pub use imp::{
-    load_font_preference, load_language_preference, load_theme_preference, load_thread_preference,
-    load_window_geometry, resolve_font_family, save_font_preference, save_language_preference,
-    save_theme_preference, save_thread_preference, save_window_geometry,
+    load_column_boundaries, load_font_preference, load_header_encryption_preference,
+    load_language_preference, load_theme_preference, load_thread_preference, load_window_geometry,
+    resolve_font_family, save_column_boundaries, save_font_preference,
+    save_header_encryption_preference, save_language_preference, save_theme_preference,
+    save_thread_preference, save_window_geometry,
 };

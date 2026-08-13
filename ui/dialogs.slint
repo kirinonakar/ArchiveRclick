@@ -131,6 +131,7 @@ export component CreateOverlay inherits Rectangle {
     in property <[string]> available-formats;
     in property <bool> has-sources;
     in property <int> thread-selection;
+    in property <bool> header-encryption-default: false;
 
     private property <int> thread-index: root.thread-selection;
     private property <string> password-error: "";
@@ -147,8 +148,8 @@ export component CreateOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 460px;
-        height: 460px;
+        width: 420px;
+        height: 420px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -158,8 +159,8 @@ export component CreateOverlay inherits Rectangle {
         drop-shadow-offset-y: 6px;
 
         VerticalLayout {
-            padding: 14px;
-            spacing: 6px;
+            padding: 12px;
+            spacing: 4px;
 
             Text {
                 text: root.language-index == 1 ? "압축파일 만들기" : root.language-index == 2 ? "アーカイブを作成" : "Create archive";
@@ -221,11 +222,6 @@ export component CreateOverlay inherits Rectangle {
                     format := ComboBox {
                         model: root.available-formats;
                         current-index: 0;
-                        changed current-index => {
-                            if (self.current-value != "7z") {
-                                header-encryption.checked = false;
-                            }
-                        }
                     }
                 }
 
@@ -248,20 +244,27 @@ export component CreateOverlay inherits Rectangle {
                 }
             }
 
-            Text {
-                text: root.language-index == 1 ? "CPU 스레드 (7z 압축)" : root.language-index == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
-                color: Palette.foreground;
-                font-weight: 600;
-            }
+            HorizontalLayout {
+                spacing: 8px;
 
-            thread-picker := ComboBox {
-                model: root.language-index == 1
-                    ? ["자동", "4", "6", "8", "10", "16", "전체"]
-                    : root.language-index == 2
-                        ? ["自動", "4", "6", "8", "10", "16", "すべて"]
-                        : ["Auto", "4", "6", "8", "10", "16", "All"];
-                current-index: root.thread-index;
-                changed current-index => { root.thread-index = self.current-index; }
+                Text {
+                    text: root.language-index == 1 ? "CPU 스레드 (7z)" : root.language-index == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+
+                thread-picker := ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.language-index == 1
+                        ? ["자동", "4", "6", "8", "10", "16", "전체"]
+                        : root.language-index == 2
+                            ? ["自動", "4", "6", "8", "10", "16", "すべて"]
+                            : ["Auto", "4", "6", "8", "10", "16", "All"];
+                    current-index: root.thread-index;
+                    changed current-index => { root.thread-index = self.current-index; }
+                }
             }
 
             HorizontalLayout {
@@ -287,6 +290,7 @@ export component CreateOverlay inherits Rectangle {
             header-encryption := CheckBox {
                 visible: format.current-value == "7z";
                 enabled: password.text != "";
+                checked: root.header-encryption-default;
                 text: root.language-index == 1
                     ? "파일명 암호화 (Header Encryption)"
                     : root.language-index == 2
@@ -348,6 +352,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <[string]> font-options;
     in property <int> font-selection;
     in property <int> thread-selection;
+    in property <bool> header-encryption: false;
     in property <int> theme-selection;
     in property <[string]> language-options;
     in property <int> language-selection;
@@ -357,7 +362,7 @@ export component SettingsOverlay inherits Rectangle {
     private property <int> theme-index: root.theme-selection;
     private property <int> selected-language: root.language-selection;
 
-    callback accepted(int, int, int, int);
+    callback accepted(int, int, int, int, bool);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
@@ -370,7 +375,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: 360px;
+        height: 400px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -404,6 +409,26 @@ export component SettingsOverlay inherits Rectangle {
                     model: root.language-options;
                     current-index: root.selected-language;
                     changed current-index => { root.selected-language = self.current-index; }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.language-selection == 1 ? "7z 파일명 암호화" : root.language-selection == 2 ? "7z ファイル名暗号化" : "7z Header Encryption";
+                    color: Palette.foreground;
+                    font-weight: 600;
+                    width: 150px;
+                    vertical-alignment: center;
+                }
+                header-encryption := CheckBox {
+                    horizontal-stretch: 1;
+                    checked: root.header-encryption;
+                    text: root.language-selection == 1
+                        ? "암호 설정 시 파일명 숨기기"
+                        : root.language-selection == 2
+                            ? "パスワード設定時にファイル名を隠す"
+                            : "Hide names when a password is set";
                 }
             }
 
@@ -511,7 +536,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(font.current-index, root.thread-index, root.theme-index, root.selected-language); }
+                    clicked => { root.accepted(font.current-index, root.thread-index, root.theme-index, root.selected-language, header-encryption.checked); }
                 }
             }
         }

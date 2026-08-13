@@ -1804,7 +1804,8 @@ mod platform_impl {
     struct UpdateContext {
         total_bytes: u64,
         password: Option<String>,
-        current_file_base_bytes: u64,
+        current_item_index: Option<usize>,
+        item_bytes_processed: Vec<u64>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
         error: Option<ArchiveError>,
@@ -1813,7 +1814,8 @@ mod platform_impl {
     struct UpdateInputProgress {
         context: Arc<Mutex<UpdateContext>>,
         sink: Arc<dyn ProgressSink>,
-        base_bytes: u64,
+        item_index: usize,
+        archive_name: String,
         total_bytes: u64,
     }
 
@@ -1825,18 +1827,31 @@ mod platform_impl {
                     .context
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                // A stream can outlive the callback's current item while
-                // 7-Zip is finishing a previous item. Do not let a stale
-                // stream overwrite the next file's progress.
-                if context.current_file_base_bytes != self.base_bytes {
-                    return;
-                }
-                context.snapshot.current_file_bytes_processed =
-                    context.snapshot.current_file_bytes_processed.max(position);
+                let (delta, processed) = {
+                    let Some(processed) =
+                        context.item_bytes_processed.get_mut(self.item_index)
+                    else {
+                        return;
+                    };
+                    let delta = position.saturating_sub(*processed);
+                    *processed = (*processed).max(position);
+                    (delta, *processed)
+                };
+
+                // 7-Zip may keep more than one input stream alive while its
+                // worker threads finish an earlier item. Count each stream's
+                // high-water mark independently so a late read is not lost or
+                // charged to whichever file happens to be shown in the UI.
                 context.snapshot.bytes_processed = context
                     .snapshot
                     .bytes_processed
-                    .max(self.base_bytes.saturating_add(position));
+                    .saturating_add(delta)
+                    .min(context.total_bytes);
+                if context.current_item_index == Some(self.item_index) {
+                    context.snapshot.current_file.clone_from(&self.archive_name);
+                    context.snapshot.current_file_total_bytes = Some(self.total_bytes);
+                    context.snapshot.current_file_bytes_processed = processed;
+                }
                 context.snapshot.clone()
             };
             self.sink.report(snapshot);
@@ -1931,16 +1946,6 @@ mod platform_impl {
         let Some(item) = callback.items.get(index as usize) else {
             return E_INVALIDARG;
         };
-        {
-            let mut context = callback
-                .context
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            context.snapshot.current_file.clone_from(&item.archive_name);
-            context.snapshot.current_file_total_bytes = Some(item.size);
-            context.snapshot.current_file_bytes_processed = 0;
-            context.current_file_base_bytes = context.snapshot.bytes_processed;
-        }
         unsafe {
             *new_data = i32::from(item.kind == SourceKind::File);
             *new_properties = 1;
@@ -1994,16 +1999,21 @@ mod platform_impl {
         let Some(item) = callback.items.get(index as usize).cloned() else {
             return E_INVALIDARG;
         };
-        let (base_bytes, total_bytes) = {
+        let item_index = index as usize;
+        let total_bytes = {
             let mut context = callback
                 .context
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             context.snapshot.current_file.clone_from(&item.archive_name);
             context.snapshot.current_file_total_bytes = Some(item.size);
-            context.snapshot.current_file_bytes_processed = 0;
-            context.current_file_base_bytes = context.snapshot.bytes_processed;
-            (context.current_file_base_bytes, item.size)
+            context.snapshot.current_file_bytes_processed = context
+                .item_bytes_processed
+                .get(item_index)
+                .copied()
+                .unwrap_or(0);
+            context.current_item_index = Some(item_index);
+            item.size
         };
         if item.kind == SourceKind::Directory {
             return S_OK;
@@ -2036,7 +2046,8 @@ mod platform_impl {
             progress: Some(Arc::new(UpdateInputProgress {
                 context: Arc::clone(&callback.context),
                 sink: Arc::clone(&callback.progress),
-                base_bytes,
+                item_index,
+                archive_name: item.archive_name.clone(),
                 total_bytes,
             })),
         });
@@ -2068,22 +2079,12 @@ mod platform_impl {
             return E_ABORT;
         }
         context.summary.entries_processed += 1;
-        let current_file_total_bytes = context.snapshot.current_file_total_bytes.unwrap_or(0);
-        context.snapshot.current_file_bytes_processed = current_file_total_bytes;
-        context.summary.bytes_processed = context
-            .summary
-            .bytes_processed
-            .saturating_add(current_file_total_bytes);
-        context.snapshot.bytes_processed = context
-            .snapshot
-            .bytes_processed
-            .max(
-                context
-                    .current_file_base_bytes
-                    .saturating_add(current_file_total_bytes),
-            )
-            .max(context.summary.bytes_processed);
-        context.current_file_base_bytes = context.snapshot.bytes_processed;
+        // Source-byte progress is accounted for by the individual input
+        // streams. SetOperationResult carries no item index, and 7-Zip can
+        // already have requested the next stream when this arrives, so using
+        // the currently displayed item here would charge bytes to the wrong
+        // file.
+        context.summary.bytes_processed = context.snapshot.bytes_processed;
         context.snapshot.entries_processed = context.summary.entries_processed;
         let snapshot = context.snapshot.clone();
         drop(context);
@@ -3078,7 +3079,8 @@ mod platform_impl {
                         let context = Arc::new(Mutex::new(UpdateContext {
                             total_bytes,
                             password: options.password.clone(),
-                            current_file_base_bytes: 0,
+                            current_item_index: None,
+                            item_bytes_processed: vec![0; items.len()],
                             snapshot,
                             summary: OperationSummary::default(),
                             error: None,

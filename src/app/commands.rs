@@ -212,6 +212,10 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
+    let column_boundaries = platform::load_column_boundaries();
+    ui.set_column_name_boundary(column_boundaries.name);
+    ui.set_column_size_boundary(column_boundaries.size);
+    ui.set_column_packed_boundary(column_boundaries.packed);
     let saved_geometry = platform::load_window_geometry();
     if let Some(geometry) = saved_geometry {
         ui.window()
@@ -248,6 +252,8 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     ui.set_settings_thread_selection(
         ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
     );
+    ui.set_settings_header_encryption(platform::load_header_encryption_preference());
+    ui.set_create_header_encryption(platform::load_header_encryption_preference());
     ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
     ui.set_language_options(ModelRc::from(
         LANGUAGE_OPTIONS
@@ -807,6 +813,18 @@ fn wire_callbacks(
 
     {
         let weak = ui.as_weak();
+        ui.on_column_widths_changed(move |name, size, packed| {
+            let boundaries = platform::ColumnBoundaries { name, size, packed };
+            if let Err(error) = platform::save_column_boundaries(&boundaries) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(format!("Could not save column widths: {error}").into());
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
         ui.on_encoding_selection_changed(move |selection| {
@@ -851,6 +869,7 @@ fn wire_callbacks(
                 ui.set_settings_thread_selection(
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
                 );
+                ui.set_settings_header_encryption(platform::load_header_encryption_preference());
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
                 ui.set_language_selection(language_selection_index(
                     &platform::load_language_preference(),
@@ -904,7 +923,11 @@ fn wire_callbacks(
     {
         let weak = ui.as_weak();
         ui.on_settings_applied(
-            move |font_selection, thread_selection, theme_selection, language_selection| {
+            move |font_selection,
+                  thread_selection,
+                  theme_selection,
+                  language_selection,
+                  header_encryption| {
                 let preference = FONT_OPTIONS
                     .get(font_selection.max(0) as usize)
                     .map(|(_, key)| *key)
@@ -915,6 +938,10 @@ fn wire_callbacks(
                 } else if let Err(error) = platform::save_thread_preference(
                     ThreadCount::from_ui_index(thread_selection).registry_key(),
                 ) {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) =
+                    platform::save_header_encryption_preference(header_encryption)
+                {
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) =
                     platform::save_theme_preference(theme_registry_key(theme_selection))
@@ -934,6 +961,8 @@ fn wire_callbacks(
                 let family = platform::resolve_font_family(preference);
                 if let Some(ui) = weak.upgrade() {
                     ui.set_font_family(family.into());
+                    ui.set_settings_header_encryption(header_encryption);
+                    ui.set_create_header_encryption(header_encryption);
                     ui.set_theme_selection(theme_selection);
                     ui.set_language_selection(language_selection);
                     platform::apply_window_theme(ui.window(), theme_selection);
