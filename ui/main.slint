@@ -357,19 +357,12 @@ component ArchiveTableHeader inherits Rectangle {
 
     height: 30px;
     background: Palette.alternate-background;
-    border-radius: 10px;
-    border-bottom-left-radius: 0px;
-    border-bottom-right-radius: 0px;
 
     Rectangle {
         x: 0px;
         width: 36px;
         height: parent.height;
         background: Palette.alternate-background;
-        border-radius: 10px;
-        border-top-right-radius: 0px;
-        border-bottom-left-radius: 0px;
-        border-bottom-right-radius: 0px;
     }
 
     HeaderCell {
@@ -988,13 +981,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             vertical-stretch: 1;
                             background: Palette.background;
-                            border-width: 1px;
-                            border-color: Palette.border;
-                            border-radius: 10px;
                             clip: true;
-                            drop-shadow-blur: 10px;
-                            drop-shadow-color: #00000022;
-                            drop-shadow-offset-y: 2px;
 
                             VerticalLayout {
                                 spacing: 0px;
@@ -1092,52 +1079,38 @@ export component AppWindow inherits Window {
 
                 // ---------------- Status bar ----------------
                 Rectangle {
-                    height: 48px;
+                    height: 1px;
+                    background: #D6D9DE;
+                }
+
+                Rectangle {
+                    height: 32px;
                     background: Palette.background;
 
-                    // Keep the status information visually grouped without a
-                    // hard full-width divider. The inset card mirrors the
-                    // rounded surfaces used by the path field and contents
-                    // panel while preserving a quiet separation from the
-                    // workspace.
-                    status-card := Rectangle {
-                        x: 12px;
-                        y: 6px;
-                        width: max(0px, parent.width - 24px);
-                        height: max(0px, parent.height - 12px);
-                        background: Palette.control-background;
-                        border-width: 1px;
-                        border-color: Palette.border;
-                        border-radius: 12px;
-                        drop-shadow-blur: 8px;
-                        drop-shadow-color: #00000010;
-                        drop-shadow-offset-y: 1px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 8px;
 
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            spacing: 8px;
+                        Text {
+                            text: root.summary-text;
+                            color: Palette.foreground;
+                            font-size: 11px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
 
-                            Text {
-                                text: root.summary-text;
-                                color: Palette.foreground;
-                                font-size: 11px;
-                                font-weight: 500;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                        Rectangle { horizontal-stretch: 1; }
 
-                            Rectangle { horizontal-stretch: 1; }
-
-                            Text {
-                                text: root.libarchive-version;
-                                color: Palette.foreground;
-                                font-size: 11px;
-                                opacity: 0.7;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
-                                overflow: elide;
-                            }
+                        Text {
+                            text: root.libarchive-version;
+                            color: Palette.foreground;
+                            font-size: 11px;
+                            opacity: 0.7;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
                         }
                     }
                 }
