@@ -25,8 +25,8 @@ pub(crate) struct DisplayEntry {
     pub(crate) is_folder: bool,
 }
 
-// Column indices come from the UI. This sentinel keeps the first view in stable
-// archive order and avoids sorting a large flat archive during model install.
+// Column indices come from the UI. This sentinel is available for callers that
+// need to preserve the archive's raw entry order.
 const ARCHIVE_ORDER: usize = usize::MAX;
 
 pub(crate) struct ArchiveRowModel {
@@ -150,8 +150,17 @@ impl ArchiveRowModel {
         self.notify.reset();
     }
 
-    pub(crate) fn prepare_listing(listing: ArchiveListing) -> (ArchiveListing, Vec<DisplayEntry>) {
-        let display = build_display_entries(&listing, Path::new(""), ARCHIVE_ORDER, true);
+    pub(crate) fn prepare_listing(
+        listing: ArchiveListing,
+        sort_column: usize,
+        sort_ascending: bool,
+    ) -> (ArchiveListing, Vec<DisplayEntry>) {
+        let display = build_display_entries(
+            &listing,
+            Path::new(""),
+            sort_column,
+            sort_ascending,
+        );
         (listing, display)
     }
 
@@ -263,7 +272,7 @@ impl AppState {
         let selected = Rc::new(RefCell::new(HashSet::new()));
         let selection_anchor = Rc::new(RefCell::new(None));
         let current_folder = Rc::new(RefCell::new(PathBuf::new()));
-        let sort_column = Rc::new(Cell::new(ARCHIVE_ORDER));
+        let sort_column = Rc::new(Cell::new(0));
         let sort_ascending = Rc::new(Cell::new(true));
         let rows = Rc::new(ArchiveRowModel::new(
             Rc::clone(&listing),
@@ -297,7 +306,7 @@ impl AppState {
 
     pub(crate) fn clear_archive(&self) {
         self.rows.clear_listing();
-        self.sort_column.set(ARCHIVE_ORDER);
+        self.sort_column.set(0);
         self.sort_ascending.set(true);
     }
 
@@ -512,7 +521,11 @@ mod tests {
     use super::AppState;
 
     fn install_listing(state: &AppState, listing: ArchiveListing) {
-        let (listing, display) = super::ArchiveRowModel::prepare_listing(listing);
+        let (listing, display) = super::ArchiveRowModel::prepare_listing(
+            listing,
+            state.sort_column.get(),
+            state.sort_ascending.get(),
+        );
         state.rows.set_prepared_listing(listing, display);
     }
 
@@ -551,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn default_view_preserves_archive_order_with_folders_first() {
+    fn default_view_sorts_names_with_folders_first() {
         let state = AppState::new();
         install_listing(
             &state,
@@ -566,7 +579,7 @@ mod tests {
 
         assert_eq!(
             row_names(&state),
-            ["folder", "zeta.txt", "Alpha.txt", "beta.txt"]
+            ["folder", "Alpha.txt", "beta.txt", "zeta.txt"]
         );
     }
 
@@ -616,7 +629,7 @@ mod tests {
         assert_eq!(
             selected,
             [
-                PathBuf::from("four.txt"),
+                PathBuf::from("one.txt"),
                 PathBuf::from("three.txt"),
                 PathBuf::from("two.txt"),
             ]

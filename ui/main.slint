@@ -23,6 +23,8 @@ component HeaderCell inherits Rectangle {
     in property <string> label;
     in property <int> column-index;
     in property <length> column-width;
+    in property <bool> sorted: false;
+    in property <bool> sort-ascending: true;
     in property <bool> resizable: true;
     callback sort(int);
     callback resize(int, length);
@@ -43,7 +45,7 @@ component HeaderCell inherits Rectangle {
         x: 10px;
         width: parent.width - 20px;
         height: parent.height;
-        text: root.label + "  ↕";
+        text: root.label + "  " + (root.sorted ? (root.sort-ascending ? "↑" : "↓") : "↕");
         color: Palette.foreground;
         font-weight: 600;
         font-size: 12px;
@@ -189,6 +191,8 @@ component ArchiveTableHeader inherits Rectangle {
     in property <float> initial-name-boundary: 0.28;
     in property <float> initial-size-boundary: 0.40;
     in property <float> initial-packed-boundary: 0.52;
+    in property <int> sort-column: 0;
+    in property <bool> sort-ascending: true;
     callback sort(int);
     callback column-widths-changed(float, float, float);
 
@@ -229,6 +233,8 @@ component ArchiveTableHeader inherits Rectangle {
         height: parent.height;
         label: "Name";
         column-index: 0;
+        sorted: root.sort-column == 0;
+        sort-ascending: root.sort-ascending;
         sort(column) => { root.sort(column); }
         resize(column, width) => {
             if (column == 0) {
@@ -254,6 +260,8 @@ component ArchiveTableHeader inherits Rectangle {
         height: parent.height;
         label: "Size";
         column-index: 1;
+        sorted: root.sort-column == 1;
+        sort-ascending: root.sort-ascending;
         sort(column) => { root.sort(column); }
         resize(column, width) => {
             if (column == 1) {
@@ -279,6 +287,8 @@ component ArchiveTableHeader inherits Rectangle {
         height: parent.height;
         label: "Packed";
         column-index: 2;
+        sorted: root.sort-column == 2;
+        sort-ascending: root.sort-ascending;
         sort(column) => { root.sort(column); }
         resize(column, width) => {
             if (column == 2) {
@@ -304,6 +314,8 @@ component ArchiveTableHeader inherits Rectangle {
         height: parent.height;
         label: "Modified";
         column-index: 3;
+        sorted: root.sort-column == 3;
+        sort-ascending: root.sort-ascending;
         resizable: false;
         sort(column) => { root.sort(column); }
     }
@@ -434,6 +446,7 @@ component ArchiveListRow inherits Rectangle {
 
 component IconToolButton inherits Rectangle {
     in property <string> glyph;
+    in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
     in property <bool> primary: false;
@@ -456,7 +469,17 @@ component IconToolButton inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
 
-        Text {
+        if root.icon.width > 0 && root.icon.height > 0 : Image {
+            source: root.icon;
+            width: 19px;
+            height: 19px;
+            colorize: root.enabled
+                ? (root.primary ? Palette.accent-background : Palette.foreground)
+                : Palette.foreground;
+            opacity: root.enabled ? 1.0 : 0.38;
+        }
+
+        if root.icon.width == 0 || root.icon.height == 0 : Text {
             text: root.glyph;
             font-family: "Segoe MDL2 Assets";
             font-size: 19px;
@@ -524,6 +547,8 @@ export component AppWindow inherits Window {
     in-out property <int> selection-count: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
+    in-out property <int> sort-column: 0;
+    in-out property <bool> sort-ascending: true;
     in-out property <float> column-name-boundary: 0.28;
     in-out property <float> column-size-boundary: 0.40;
     in-out property <float> column-packed-boundary: 0.52;
@@ -651,9 +676,9 @@ export component AppWindow inherits Window {
                         spacing: 8px;
 
                         IconToolButton {
-                            glyph: "\u{E8E5}";
+                            glyph: "\u{E838}";
+                            icon: @image-url("folder-open.svg");
                             label: root.language-selection == 1 ? "열기" : root.language-selection == 2 ? "開く" : "Open";
-                            primary: true;
                             enabled: !root.busy;
                             clicked => { root.open-requested(); }
                         }
@@ -677,7 +702,7 @@ export component AppWindow inherits Window {
                         }
 
                         IconToolButton {
-                            glyph: "\u{E74E}";
+                            glyph: "\u{E109}";
                             label: root.language-selection == 1 ? "압축하기" : root.language-selection == 2 ? "圧縮" : "Compress";
                             enabled: !root.busy;
                             clicked => { root.prepare-create-requested(); }
@@ -757,9 +782,7 @@ export component AppWindow inherits Window {
                         }
 
                         ComboBox {
-                            // Keep the longest English entry (for example,
-                            // "CP950 — Traditional Chinese") fully visible.
-                            width: 230px;
+                            width: 180px;
                             model: root.encoding-options;
                             current-index: root.encoding-selection;
                             accessible-label: "Code page";
@@ -836,6 +859,8 @@ export component AppWindow inherits Window {
                                     initial-name-boundary: root.column-name-boundary;
                                     initial-size-boundary: root.column-size-boundary;
                                     initial-packed-boundary: root.column-packed-boundary;
+                                    sort-column: root.sort-column;
+                                    sort-ascending: root.sort-ascending;
                                     sort(column) => { root.sort-requested(column); }
                                     column-widths-changed(name, size, packed) => {
                                         root.column-name-boundary = name;
@@ -904,11 +929,19 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
 
-                        Button {
-                            text: root.language-selection == 1 ? "압축파일 열기…" : root.language-selection == 2 ? "アーカイブを開く…" : "Open archive…";
-                            primary: true;
-                            enabled: !root.busy;
-                            clicked => { root.open-requested(); }
+                        HorizontalLayout {
+                            alignment: center;
+
+                            Button {
+                                width: 180px;
+                                icon: @image-url("folder-open.svg");
+                                icon-size: 18px;
+                                colorize-icon: true;
+                                text: root.language-selection == 1 ? "압축파일 열기…" : root.language-selection == 2 ? "アーカイブを開く…" : "Open archive…";
+                                primary: true;
+                                enabled: !root.busy;
+                                clicked => { root.open-requested(); }
+                            }
                         }
                     }
                 }

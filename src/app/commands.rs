@@ -230,6 +230,8 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     ui.set_column_name_boundary(column_boundaries.name);
     ui.set_column_size_boundary(column_boundaries.size);
     ui.set_column_packed_boundary(column_boundaries.packed);
+    ui.set_sort_column(0);
+    ui.set_sort_ascending(true);
     let saved_geometry = platform::load_window_geometry();
     if let Some(geometry) = saved_geometry {
         ui.window()
@@ -1097,6 +1099,7 @@ fn wire_callbacks(
     }
 
     {
+        let weak = ui.as_weak();
         let state = Rc::clone(&state);
         ui.on_sort_requested(move |column| {
             let column = column.max(0) as usize;
@@ -1105,6 +1108,10 @@ fn wire_callbacks(
             } else {
                 state.sort_column.set(column);
                 state.sort_ascending.set(true);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_sort_column(column as i32);
+                ui.set_sort_ascending(state.sort_ascending.get());
             }
             state.rebuild_display();
         });
@@ -1642,6 +1649,8 @@ fn start_listing(
     let cancel = begin_operation(ui, &state, "Opening archive", &path.display().to_string());
     let open_password = Arc::clone(&state.open_password);
     let pending_password_path = Arc::clone(&state.pending_password_path);
+    let sort_column = state.sort_column.get();
+    let sort_ascending = state.sort_ascending.get();
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
     let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
@@ -1654,7 +1663,9 @@ fn start_listing(
                 &progress,
                 &cancel,
             )
-            .map(super::ArchiveRowModel::prepare_listing);
+            .map(|listing| {
+                super::ArchiveRowModel::prepare_listing(listing, sort_column, sort_ascending)
+            });
         let _ = weak.upgrade_in_event_loop(move |ui| {
             finish_operation(&ui);
             match result {
@@ -2663,6 +2674,8 @@ fn close_archive(ui: &AppWindow, state: &AppState) {
 
     ui.set_archive_title("".into());
     ui.set_current_folder("".into());
+    ui.set_sort_column(0);
+    ui.set_sort_ascending(true);
     ui.set_has_archive(false);
     ui.set_can_go_up(false);
     ui.set_selection_state(0);
