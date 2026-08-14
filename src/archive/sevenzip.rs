@@ -1808,6 +1808,7 @@ mod platform_impl {
         current_item_index: Option<usize>,
         item_bytes_processed: Vec<u64>,
         item_total_bytes: Vec<u64>,
+        item_is_file: Vec<bool>,
         item_archive_names: Vec<String>,
         snapshot: ProgressSnapshot,
         summary: OperationSummary,
@@ -1962,6 +1963,11 @@ mod platform_impl {
                 .bytes_processed
                 .max(source_completed)
                 .min(context.total_bytes);
+            context.snapshot.entries_processed = completed_compression_files(
+                source_completed,
+                &context.item_total_bytes,
+                &context.item_is_file,
+            );
 
             if source_completed > 0
                 && let Some((item_index, item_bytes)) = split_compression_progress(
@@ -2005,6 +2011,33 @@ mod platform_impl {
             item_base = item_end;
         }
         last_file
+    }
+
+    fn completed_compression_files(
+        source_completed: u64,
+        item_total_bytes: &[u64],
+        item_is_file: &[bool],
+    ) -> u64 {
+        let mut completed_files = 0u64;
+        let mut cumulative_bytes = 0u64;
+        for (item_index, &item_total) in item_total_bytes.iter().enumerate() {
+            if !item_is_file.get(item_index).copied().unwrap_or(false) {
+                continue;
+            }
+            if item_total == 0 {
+                if source_completed > 0 && source_completed >= cumulative_bytes {
+                    completed_files = completed_files.saturating_add(1);
+                }
+                continue;
+            }
+            cumulative_bytes = cumulative_bytes.saturating_add(item_total);
+            if source_completed >= cumulative_bytes {
+                completed_files = completed_files.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+        completed_files
     }
 
     unsafe extern "system" fn update_get_update_item_info(
@@ -2146,7 +2179,9 @@ mod platform_impl {
         // the currently displayed item here would charge bytes to the wrong
         // file.
         context.summary.bytes_processed = context.snapshot.bytes_processed;
-        context.snapshot.entries_processed = context.summary.entries_processed;
+        if context.handler_total_bytes.is_none() {
+            context.snapshot.entries_processed = context.summary.entries_processed;
+        }
         let snapshot = context.snapshot.clone();
         drop(context);
         callback.progress.report(snapshot);
@@ -3148,6 +3183,10 @@ mod platform_impl {
                             current_item_index: None,
                             item_bytes_processed: vec![0; items.len()],
                             item_total_bytes: items.iter().map(|item| item.size).collect(),
+                            item_is_file: items
+                                .iter()
+                                .map(|item| item.kind == SourceKind::File)
+                                .collect(),
                             item_archive_names: items
                                 .iter()
                                 .map(|item| item.archive_name.clone())
@@ -3177,6 +3216,7 @@ mod platform_impl {
                         let error = context.error.take();
                         let mut summary = context.summary.clone();
                         summary.bytes_processed = total_bytes;
+                        summary.entries_processed = file_count;
                         let mut snapshot = context.snapshot.clone();
                         drop(context);
                         // 7-Zip released the stream; close the file ourselves
@@ -4484,8 +4524,8 @@ mod platform_impl {
     mod tests {
         use super::{
             ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, SevenZipEngine,
-            archive_format, filetime_to_unix_seconds, split_callback_progress,
-            split_compression_progress, unix_seconds_to_filetime,
+            archive_format, completed_compression_files, filetime_to_unix_seconds,
+            split_callback_progress, split_compression_progress, unix_seconds_to_filetime,
         };
         use crate::archive::ThreadCount;
         use std::io::Write;
@@ -4534,6 +4574,17 @@ mod platform_impl {
             assert_eq!(split_compression_progress(75, &totals), Some((3, 25)));
             assert_eq!(split_compression_progress(76, &totals), Some((4, 1)));
             assert_eq!(split_compression_progress(100, &totals), Some((4, 25)));
+        }
+
+        #[test]
+        fn compression_file_count_ignores_directories_and_tracks_boundaries() {
+            let totals = [25, 0, 0, 25];
+            let is_file = [true, false, true, true];
+            assert_eq!(completed_compression_files(0, &totals, &is_file), 0);
+            assert_eq!(completed_compression_files(24, &totals, &is_file), 0);
+            assert_eq!(completed_compression_files(25, &totals, &is_file), 2);
+            assert_eq!(completed_compression_files(26, &totals, &is_file), 2);
+            assert_eq!(completed_compression_files(50, &totals, &is_file), 3);
         }
 
         #[test]

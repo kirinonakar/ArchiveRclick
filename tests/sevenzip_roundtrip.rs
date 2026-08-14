@@ -452,7 +452,12 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
                 saw_last_quarter_advance = true;
             }
             assert_eq!(snapshot.total_entries, Some(4));
-            assert!(snapshot.entries_processed <= 4);
+            assert_eq!(
+                snapshot.entries_processed,
+                (snapshot.bytes_processed / (8 * 1024 * 1024)).min(4),
+                "{format:?} reported the wrong processed-file count at {} bytes",
+                snapshot.bytes_processed,
+            );
             if let Some(current_total) = snapshot.current_file_total_bytes {
                 assert!(
                     snapshot.current_file_bytes_processed <= current_total,

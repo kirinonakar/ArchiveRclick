@@ -1428,6 +1428,15 @@ fn start_listing(
     });
 }
 
+fn progress_title_with_filename(operation: &str, path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string());
+    format!("{operation} - {file_name}")
+}
+
 fn start_extract(
     ui: &AppWindow,
     state: Rc<AppState>,
@@ -1442,12 +1451,14 @@ fn start_extract(
         extraction_progress_hints(state.listing.borrow().as_ref(), &options.selection);
     options.total_entries_hint = hint_entries;
     options.total_bytes_hint = hint_bytes;
+    let progress_title = progress_title_with_filename("Extracting archive", &archive);
+    let archive_display = archive.display().to_string();
     let (cancel, weak_progress) = match begin_progress_window_operation(
         ui,
         &state,
         &progress_window,
-        "Extracting archive",
-        &archive.display().to_string(),
+        &progress_title,
+        &archive_display,
     ) {
         Ok(operation) => operation,
         Err(error) => {
@@ -1468,7 +1479,7 @@ fn start_extract(
     let cancellation = Arc::clone(&state.cancellation);
     let pending_conflict = Arc::clone(&state.pending_conflict);
     let progress = move |snapshot: ProgressSnapshot| {
-        update_progress_window(&weak_progress_updates, snapshot)
+        update_progress_window_details(&weak_progress_updates, snapshot)
     };
     std::thread::spawn(move || {
         let result = engine.extract(
@@ -1521,12 +1532,14 @@ fn start_create(
     options: CreateOptions,
     progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
+    let progress_title = progress_title_with_filename("Creating archive", &destination);
+    let destination_display = destination.display().to_string();
     let (cancel, weak_progress) = match begin_progress_window_operation(
         ui,
         &state,
         &progress_window,
-        "Creating archive",
-        &destination.display().to_string(),
+        &progress_title,
+        &destination_display,
     ) {
         Ok(operation) => operation,
         Err(error) => {
@@ -1540,7 +1553,7 @@ fn start_create(
     let weak_progress_finished = weak_progress.clone();
     let cancellation = Arc::clone(&state.cancellation);
     let progress = move |snapshot: ProgressSnapshot| {
-        update_progress_window(&weak_progress_updates, snapshot)
+        update_progress_window_details(&weak_progress_updates, snapshot)
     };
     std::thread::spawn(move || {
         let result = engine.create(&destination, &sources, &options, &progress, &cancel);
@@ -1647,8 +1660,8 @@ impl ProgressPasswordPrompt {
     }
 }
 
-const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 700.0;
-const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 310.0;
+const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 640.0;
+const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 300.0;
 
 /// Builds and shows the small progress window; its Cancel button cancels the
 /// running operation.
@@ -1732,16 +1745,7 @@ fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
     ui.set_progress_value(text.value);
 }
 
-fn update_progress_window(weak: &slint::Weak<ProgressWindow>, snapshot: ProgressSnapshot) {
-    let weak = weak.clone();
-    let _ = weak.upgrade_in_event_loop(move |ui| {
-        ui.set_progress_title(snapshot.phase.label().into());
-        apply_progress_window(&ui, &snapshot);
-    });
-}
-
-/// Like [`update_progress_window`], but keeps the operation title so that a
-/// batch operation can show "Extracting archive 2/3" while entries stream in.
+/// Keeps the operation title while progress values stream in.
 fn update_progress_window_details(weak: &slint::Weak<ProgressWindow>, snapshot: ProgressSnapshot) {
     let weak = weak.clone();
     let _ = weak.upgrade_in_event_loop(move |ui| apply_progress_window(&ui, &snapshot));
@@ -1817,12 +1821,16 @@ fn start_extract_batch_window(
 ) {
     let total = archives.len();
     let first = archives[0].display().to_string();
+    let initial_title = progress_title_with_filename(
+        &format!("Extracting archive 1/{total}"),
+        &archives[0],
+    );
     let cancel = CancellationToken::new();
     *state
         .cancellation
         .lock()
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
-    ui.set_progress_title("Extracting archives".into());
+    ui.set_progress_title(initial_title.into());
     ui.set_progress_file(first.into());
     set_initial_progress_window(ui);
     let weak = ui.as_weak();
@@ -1836,7 +1844,10 @@ fn start_extract_batch_window(
             if cancel.is_cancelled() {
                 break;
             }
-            let title = format!("Extracting archive {}/{}", index + 1, total);
+            let title = progress_title_with_filename(
+                &format!("Extracting archive {}/{}", index + 1, total),
+                archive,
+            );
             let archive_display = archive.display().to_string();
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_progress_title(title.into());
@@ -1936,14 +1947,16 @@ fn start_create_window(
         .cancellation
         .lock()
         .expect("cancellation mutex poisoned") = Some(cancel.clone());
-    ui.set_progress_title("Creating archive".into());
+    let progress_title = progress_title_with_filename("Creating archive", &destination);
+    ui.set_progress_title(progress_title.into());
     ui.set_progress_file(destination.display().to_string().into());
     set_initial_progress_window(ui);
     let weak = ui.as_weak();
     let weak_progress = weak.clone();
     let elevation_sources = sources.clone();
-    let progress =
-        move |snapshot: ProgressSnapshot| update_progress_window(&weak_progress, snapshot);
+    let progress = move |snapshot: ProgressSnapshot| {
+        update_progress_window_details(&weak_progress, snapshot)
+    };
     std::thread::spawn(move || {
         let result = engine.create(&destination, &sources, &options, &progress, &cancel);
         let _ = weak.upgrade_in_event_loop(move |ui| {

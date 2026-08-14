@@ -446,11 +446,11 @@ fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
     vec![
         (
             Verb::Zip,
-            format!("{}으로 압축하기", shorten_menu_name(&zip_name)),
+            format!("{}으로 압축하기", shorten_compression_name(&zip_name)),
         ),
         (
             Verb::SevenZip,
-            format!("{}로 압축하기", shorten_menu_name(&seven_name)),
+            format!("{}로 압축하기", shorten_compression_name(&seven_name)),
         ),
     ]
 }
@@ -458,17 +458,29 @@ fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
 /// Maximum number of characters shown for a file name in the context menu.
 const MAX_MENU_NAME_CHARS: usize = 30;
 
-/// Shortens a file name for the context menu: names longer than
-/// [`MAX_MENU_NAME_CHARS`] characters keep the final archive extension visible.
+/// Shortens an extraction destination name for the context menu.
+///
+/// Extraction destinations are based on an archive's stem, so a dot in the
+/// original name is part of the stem rather than an extension to preserve.
 fn shorten_menu_name(name: &str) -> String {
+    shorten_menu_name_with_suffix(name, None)
+}
+
+/// Shortens a generated compression destination while keeping its `.zip` or
+/// `.7z` extension visible.
+fn shorten_compression_name(name: &str) -> String {
+    shorten_menu_name_with_suffix(name, compression_suffix(name))
+}
+
+fn shorten_menu_name_with_suffix(name: &str, suffix: Option<&str>) -> String {
     if name.chars().count() <= MAX_MENU_NAME_CHARS {
         return name.to_owned();
     }
-    let suffix = archive_suffix(name).unwrap_or_default();
+    let suffix = suffix.unwrap_or_default();
     let suffix_len = suffix.chars().count();
     if suffix_len >= MAX_MENU_NAME_CHARS {
-        // An unusually long extension is still more useful than the stem;
-        // keep the complete extension even when it is the whole label.
+        // Keep the complete allowed extension even when it is the whole
+        // label. This branch is only reachable for an unusually long suffix.
         return suffix.to_owned();
     }
     let prefix_len = MAX_MENU_NAME_CHARS - suffix_len - 1;
@@ -476,15 +488,14 @@ fn shorten_menu_name(name: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
-fn archive_suffix(name: &str) -> Option<&str> {
+fn compression_suffix(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
-    for extension in [".tar.zst", ".tar.xz", ".tar.gz", ".tar.bz2"] {
+    for extension in [".zip", ".7z"] {
         if lower.ends_with(extension) {
             return name.get(name.len().saturating_sub(extension.len())..);
         }
     }
-    let dot = name.rfind('.')?;
-    (dot > 0).then(|| &name[dot..])
+    None
 }
 
 /// One top-level IExplorerCommand ("압축하기"/"풀기"). Explorer asks for the
@@ -1405,7 +1416,7 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{Verb, build_args, menu_verbs, shorten_menu_name};
+    use super::{Verb, build_args, menu_verbs, shorten_compression_name, shorten_menu_name};
 
     #[test]
     fn command_line_quoting_keeps_a_root_folder_argument_intact() {
@@ -1423,28 +1434,26 @@ mod tests {
 
     #[test]
     fn long_names_are_cut_to_30_characters() {
-        let long = "이것은매우긴파일이름입니다정말정말정말정말정말긴파일이름입니다.zip";
+        let long = "이것은매우긴파일이름입니다정말정말정말정말정말긴파일이름입니다";
         let shortened = shorten_menu_name(long);
         assert_eq!(shortened.chars().count(), 30);
-        assert!(shortened.ends_with(".zip"));
-        let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
+        let expected: String = long.chars().take(29).collect::<String>() + "…";
         assert_eq!(shortened, expected);
     }
 
     #[test]
-    fn ascii_long_names_are_cut_too() {
+    fn extraction_names_with_dots_are_cut_without_preserving_the_suffix() {
         let long = "very-long-file-name-that-goes-on-and-on-and-on.zip";
         let shortened = shorten_menu_name(long);
         assert_eq!(shortened.chars().count(), 30);
-        assert!(shortened.ends_with(".zip"));
-        let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
+        let expected: String = long.chars().take(29).collect::<String>() + "…";
         assert_eq!(shortened, expected);
     }
 
     #[test]
     fn long_7z_names_keep_the_extension_and_original_case() {
         let long = "very-long-file-name-that-goes-on-and-on-and-on.7Z";
-        let shortened = shorten_menu_name(long);
+        let shortened = shorten_compression_name(long);
         assert_eq!(shortened.chars().count(), 30);
         assert!(shortened.ends_with(".7Z"));
         let expected: String = long.chars().take(26).collect::<String>() + "…" + ".7Z";
@@ -1452,12 +1461,22 @@ mod tests {
     }
 
     #[test]
-    fn extension_near_the_display_limit_is_still_visible() {
+    fn long_zip_names_keep_the_extension_visible() {
+        let long = "archive-with-a-name-that-is-longer-than-the-menu-limit.zip";
+        let shortened = shorten_compression_name(long);
+        assert_eq!(shortened.chars().count(), 30);
+        assert!(shortened.ends_with(".zip"));
+        let expected: String = long.chars().take(25).collect::<String>() + "…" + ".zip";
+        assert_eq!(shortened, expected);
+    }
+
+    #[test]
+    fn other_suffixes_are_not_preserved_for_compression_labels() {
         let extension = format!(".{}", "x".repeat(29));
         let long = format!("archive{extension}");
-        let shortened = shorten_menu_name(&long);
-        assert_eq!(shortened, extension);
-        assert!(shortened.ends_with(&extension));
+        let shortened = shorten_compression_name(&long);
+        let expected: String = long.chars().take(29).collect::<String>() + "…";
+        assert_eq!(shortened, expected);
     }
 
     #[test]
