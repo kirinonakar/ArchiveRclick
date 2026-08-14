@@ -1,7 +1,6 @@
 import {
     Button,
     CheckBox,
-    ComboBox,
     LineEdit,
     ListView,
     Palette
@@ -17,6 +16,152 @@ export struct ArchiveRow {
     packed: string,
     modified: string,
     path: string,
+}
+
+component CodePageOption inherits Rectangle {
+    in property <string> value;
+    in property <bool> selected: false;
+    callback clicked;
+
+    width: 100%;
+    height: 30px;
+    background: option-touch.has-hover
+        ? Palette.control-background
+        : root.selected ? Palette.alternate-background : transparent;
+    accessible-role: list-item;
+    accessible-label: root.value;
+    accessible-item-selected: root.selected;
+
+    option-text := Text {
+        x: 10px;
+        width: max(0px, parent.width - 20px);
+        height: parent.height;
+        text: root.value;
+        color: Palette.foreground;
+        font-size: 10px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    option-touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+
+        if option-text.preferred-width > option-text.width : Tooltip {
+            text: @markdown("\{root.value}");
+        }
+    }
+}
+
+component CodePageComboBox inherits Rectangle {
+    in property <[string]> model: [];
+    in-out property <int> current-index: 0;
+    in property <bool> enabled: true;
+    callback selection-changed(int);
+
+    private property <string> current-value: root.model.length > 0
+        && root.current-index >= 0
+        && root.current-index < root.model.length
+            ? root.model[root.current-index] : "";
+
+    width: 180px;
+    height: 32px;
+    background: root.enabled ? Palette.control-background : Palette.background;
+    border-width: 1px;
+    border-color: root.enabled ? #D6D9DE : Palette.background;
+    border-radius: 3px;
+    clip: true;
+    accessible-role: combobox;
+    accessible-label: "Code page";
+    accessible-value: root.current-value;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+
+    selection-text := Text {
+        x: 8px;
+        width: max(0px, parent.width - 38px);
+        height: parent.height;
+        text: root.current-value;
+        color: root.enabled ? Palette.control-foreground : Palette.foreground;
+        font-size: 10px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    arrow := Image {
+        x: parent.width - 29px;
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        source: @image-url("dropdown-arrow.svg");
+        colorize: root.enabled ? Palette.foreground : Palette.border;
+    }
+
+    control-touch := TouchArea {
+        enabled: root.enabled;
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.toggle-popup(); }
+
+        if selection-text.preferred-width > selection-text.width : Tooltip {
+            text: @markdown("\{root.current-value}");
+        }
+    }
+
+    function toggle-popup() {
+        if (!root.enabled || root.model.length == 0) {
+            return;
+        }
+        if (popup.is-open) {
+            popup.close();
+        } else {
+            popup.show();
+        }
+    }
+
+    function select(index: int) {
+        if (index < 0 || index >= root.model.length) {
+            return;
+        }
+        root.current-index = index;
+        root.selection-changed(index);
+        popup.close();
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height;
+        width: root.width;
+        height: min(6, root.model.length) * 30px + 2px;
+        close-policy: close-on-click-outside;
+
+        popup-frame := Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: Palette.alternate-background;
+            border-width: 1px;
+            border-color: #D6D9DE;
+            border-radius: 4px;
+            clip: true;
+
+            ListView {
+                x: 1px;
+                y: 1px;
+                width: max(0px, parent.width - 2px);
+                height: max(0px, parent.height - 2px);
+
+                for value[index] in root.model : CodePageOption {
+                    value: value;
+                    selected: index == root.current-index;
+                    clicked => { root.select(index); }
+                }
+            }
+        }
+    }
 }
 
 component HeaderCell inherits Rectangle {
@@ -751,7 +896,7 @@ export component AppWindow inherits Window {
                             border-radius: 8px;
                             background: Palette.control-background;
                             border-width: 1px;
-                            border-color: Palette.border;
+                            border-color: #D6D9DE;
                             clip: true;
 
                             folder-path-text := Text {
@@ -781,14 +926,13 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                         }
 
-                        ComboBox {
+                        CodePageComboBox {
                             width: 180px;
                             model: root.encoding-options;
                             current-index: root.encoding-selection;
-                            accessible-label: "Code page";
-                            changed current-index => {
+                            selection-changed(index) => {
                                 root.encoding-selection = self.current-index;
-                                root.encoding-selection-changed(self.current-index);
+                                root.encoding-selection-changed(index);
                             }
                         }
 
