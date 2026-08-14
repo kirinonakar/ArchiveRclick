@@ -47,8 +47,8 @@ Use `--unregister` to remove that registration.
 
 Explorer files and folders can be dropped onto the window. A single dropped
 file is opened as an archive; multiple files or a folder are staged for archive
-creation. Dragging entries from inside an archive back to Explorer is not part
-of the initial build.
+creation. In the archive list, Shift-click selects a contiguous range. Dragging
+the selected entries to Explorer extracts them to the dropped location.
 
 ## Architecture
 

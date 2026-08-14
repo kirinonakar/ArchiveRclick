@@ -149,7 +149,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: 420px;
+        height: 360px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -159,8 +159,8 @@ export component CreateOverlay inherits Rectangle {
         drop-shadow-offset-y: 6px;
 
         VerticalLayout {
-            padding: 12px;
-            spacing: 4px;
+            padding: 10px;
+            spacing: 3px;
 
             Text {
                 text: root.language-index == 1 ? "압축파일 만들기" : root.language-index == 2 ? "アーカイブを作成" : "Create archive";
@@ -375,7 +375,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: 400px;
+        height: 330px;
         background: Palette.background;
         border-width: 1px;
         border-color: Palette.border;
@@ -385,8 +385,8 @@ export component SettingsOverlay inherits Rectangle {
         drop-shadow-offset-y: 8px;
 
         VerticalLayout {
-            padding: 14px;
-            spacing: 6px;
+            padding: 10px;
+            spacing: 4px;
 
             Text {
                 text: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";

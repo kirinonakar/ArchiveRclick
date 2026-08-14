@@ -114,9 +114,13 @@ component ArchiveTextCell inherits Rectangle {
     in property <bool> right-aligned: false;
     in property <length> text-left-padding: 4px;
     in property <length> text-right-padding: 4px;
+    private property <bool> drag-active: false;
+    private property <length> drag-start-x: 0px;
+    private property <length> drag-start-y: 0px;
     out property <bool> has-hover: touch.has-hover;
-    callback clicked;
+    callback clicked(bool);
     callback double-clicked;
+    callback drag-started;
 
     folder-icon := Text {
         x: root.text-left-padding;
@@ -150,8 +154,30 @@ component ArchiveTextCell inherits Rectangle {
         width: parent.width;
         height: parent.height;
         mouse-cursor: root.is-folder ? pointer : default;
-        clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.drag-active = false;
+                root.drag-start-x = self.mouse-x;
+                root.drag-start-y = self.mouse-y;
+            } else if (event.kind == PointerEventKind.move && self.pressed && !root.drag-active) {
+                if (self.mouse-x > root.drag-start-x + 6px
+                        || self.mouse-x < root.drag-start-x - 6px
+                        || self.mouse-y > root.drag-start-y + 6px
+                        || self.mouse-y < root.drag-start-y - 6px) {
+                    root.drag-active = true;
+                    root.drag-started();
+                }
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                if (event.kind == PointerEventKind.up
+                        && event.button == PointerEventButton.left
+                        && !root.drag-active) {
+                    root.clicked(event.modifiers.shift);
+                }
+                root.drag-active = false;
+            }
+        }
 
         if cell-text.preferred-width > cell-text.width : Tooltip {
             text: @markdown("\{root.value}");
@@ -292,9 +318,10 @@ component ArchiveListRow inherits Rectangle {
     in property <length> packed-column-width;
     in property <length> modified-column-width;
     in property <bool> context-menu-enabled: true;
-    callback toggle(int);
+    callback toggle(int, bool);
     callback activate(int);
     callback extract-context(int);
+    callback drag-started(int);
 
     height: 28px;
     background: root.entry.selected ? Palette.selection-background
@@ -315,7 +342,7 @@ component ArchiveListRow inherits Rectangle {
         height: parent.height - 2px;
         checked: root.entry.selected;
         text: "";
-        toggled => { root.toggle(root.row-index); }
+        toggled => { root.toggle(root.row-index, false); }
     }
 
     row-pointer := TouchArea {
@@ -323,8 +350,12 @@ component ArchiveListRow inherits Rectangle {
         width: parent.width - 36px;
         height: parent.height;
         mouse-cursor: root.entry.is-folder ? pointer : default;
-        clicked => { root.toggle(root.row-index); }
         double-clicked => { root.activate(root.row-index); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                root.toggle(root.row-index, event.modifiers.shift);
+            }
+        }
     }
 
     name-cell := ArchiveTextCell {
@@ -337,8 +368,9 @@ component ArchiveListRow inherits Rectangle {
         emphasize: root.entry.is-folder;
         text-left-padding: 4px;
         text-right-padding: 0px;
-        clicked => { root.toggle(root.row-index); }
+        clicked(shift) => { root.toggle(root.row-index, shift); }
         double-clicked => { root.activate(root.row-index); }
+        drag-started => { root.drag-started(root.row-index); }
     }
 
     size-cell := ArchiveTextCell {
@@ -350,8 +382,9 @@ component ArchiveListRow inherits Rectangle {
         right-aligned: true;
         text-left-padding: 6px;
         text-right-padding: 6px;
-        clicked => { root.toggle(root.row-index); }
+        clicked(shift) => { root.toggle(root.row-index, shift); }
         double-clicked => { root.activate(root.row-index); }
+        drag-started => { root.drag-started(root.row-index); }
     }
 
     packed-cell := ArchiveTextCell {
@@ -363,8 +396,9 @@ component ArchiveListRow inherits Rectangle {
         right-aligned: true;
         text-left-padding: 6px;
         text-right-padding: 6px;
-        clicked => { root.toggle(root.row-index); }
+        clicked(shift) => { root.toggle(root.row-index, shift); }
         double-clicked => { root.activate(root.row-index); }
+        drag-started => { root.drag-started(root.row-index); }
     }
 
     modified-cell := ArchiveTextCell {
@@ -375,8 +409,9 @@ component ArchiveListRow inherits Rectangle {
         selected: root.entry.selected;
         text-left-padding: 8px;
         text-right-padding: 8px;
-        clicked => { root.toggle(root.row-index); }
+        clicked(shift) => { root.toggle(root.row-index, shift); }
         double-clicked => { root.activate(root.row-index); }
+        drag-started => { root.drag-started(root.row-index); }
     }
 
     context-menu := ContextMenuArea {
@@ -495,10 +530,11 @@ export component AppWindow inherits Window {
     callback open-requested();
     callback close-archive-requested();
     callback up-requested();
-    callback toggle-selection(int);
+    callback toggle-selection(int, bool);
     callback select-all-requested(bool);
     callback activate-row(int);
     callback extract-context-requested(int);
+    callback drag-row-requested(int);
     callback sort-requested(int);
     callback encoding-selection-changed(int);
     callback show-extract-requested();
@@ -825,9 +861,10 @@ export component AppWindow inherits Window {
                                         packed-column-width: archive-header.packed-column-width;
                                         modified-column-width: archive-header.modified-column-width;
                                         context-menu-enabled: !root.busy;
-                                        toggle(row-index) => { root.toggle-selection(row-index); }
+                                        toggle(row-index, shift) => { root.toggle-selection(row-index, shift); }
                                         activate(row-index) => { root.activate-row(row-index); }
                                         extract-context(row-index) => { root.extract-context-requested(row-index); }
+                                        drag-started(row-index) => { root.drag-row-requested(row-index); }
                                     }
                                 }
                             }

@@ -1,10 +1,11 @@
 use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
+    fs,
+    path::{Component, Path, PathBuf},
     rc::Rc,
     sync::{Arc, Condvar, Mutex, mpsc},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use slint::winit_030::WinitWindowAccessor;
@@ -150,6 +151,7 @@ pub fn run() -> Result<(), String> {
 }
 
 fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Result<(), String> {
+    cleanup_drag_staging_directories();
     if let Some(command) = startup_argument.as_deref().and_then(|value| value.to_str()) {
         match command {
             "--register" => {
@@ -212,8 +214,11 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         }
     }
 
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    let result = ui
+        .run()
+        .map_err(|error| format!("UI event loop failed: {error}"));
+    cleanup_drag_staging_directories();
+    result
 }
 
 /// Builds the main application window and wires it up; shared by the
@@ -321,6 +326,7 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     // rectangle.
     let weak_for_close = ui.as_weak();
     ui.window().on_close_requested(move || {
+        cleanup_drag_staging_directories();
         if let Some(ui) = weak_for_close.upgrade()
             && should_save_window_geometry(ui.window())
         {
@@ -753,6 +759,171 @@ impl ConflictResolver for OverwriteAllResolver {
         ConflictChoice::OverwriteAll
     }
 }
+
+const DRAG_STAGING_PREFIX: &str = "ArchiveRclick-drag-";
+
+fn start_archive_drag(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, row: usize) {
+    if ui.get_busy()
+        || ui.get_password_visible()
+        || ui.get_conflict_visible()
+        || ui.get_create_visible()
+        || ui.get_extract_visible()
+        || ui.get_settings_visible()
+        || !ui.get_has_archive()
+    {
+        return;
+    }
+
+    // Starting a drag from an unselected row follows Explorer's usual
+    // behavior: that row becomes the sole selection before the drag begins.
+    if !state
+        .display
+        .borrow()
+        .get(row)
+        .is_some_and(|entry| state.selected.borrow().contains(&entry.relative_path))
+    {
+        if !state.rows.select_for_context(row) {
+            return;
+        }
+        update_selection_ui(&ui.as_weak(), state);
+    }
+
+    let Some(archive) = state
+        .listing
+        .borrow()
+        .as_ref()
+        .map(|listing| listing.archive_path.clone())
+    else {
+        return;
+    };
+    let mut selection = state.selected_paths();
+    if selection.is_empty() {
+        return;
+    }
+    selection.sort();
+
+    let staging = match create_drag_staging_directory() {
+        Ok(path) => path,
+        Err(error) => {
+            show_ui_error(&ui.as_weak(), "Extract selected items", error);
+            return;
+        }
+    };
+
+    ui.set_busy(true);
+    ui.set_status_text("Preparing selected items for Explorer…".into());
+
+    let password = state
+        .open_password
+        .lock()
+        .expect("password mutex poisoned")
+        .clone();
+    let options = ExtractOptions {
+        selection: ExtractSelection::Paths(selection.clone()),
+        password,
+        conflict_policy: InitialConflictPolicy::OverwriteAll,
+        pathname_codepage: pathname_codepage(ui.get_encoding_selection()),
+        ..ExtractOptions::default()
+    };
+    let cancel = CancellationToken::new();
+    let progress = |_: ProgressSnapshot| {};
+    let extraction = engine.extract(
+        &archive,
+        &staging,
+        &options,
+        &progress,
+        &OverwriteAllResolver,
+        &cancel,
+    );
+
+    let result = match extraction {
+        Ok(_) => staged_drag_paths(&staging, &selection)
+            .and_then(|paths| platform::start_file_drag(&paths).map(|()| paths)),
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = fs::remove_dir_all(&staging);
+    ui.set_busy(false);
+
+    match result {
+        Ok(_) => ui.set_status_text("Selected items were sent to Explorer".into()),
+        Err(error) => show_ui_error(&ui.as_weak(), "Drag selected items", error),
+    }
+}
+
+fn create_drag_staging_directory() -> Result<PathBuf, String> {
+    let temp = std::env::temp_dir();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Could not create a drag staging name: {error}"))?
+        .as_nanos();
+    let process = std::process::id();
+    for attempt in 0..100u32 {
+        let path = temp.join(format!(
+            "{DRAG_STAGING_PREFIX}{process}-{timestamp}-{attempt}"
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not create the drag staging directory {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err("Could not create a unique drag staging directory".to_owned())
+}
+
+fn staged_drag_paths(staging: &Path, selection: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    selection
+        .iter()
+        .map(|relative| {
+            if !relative.is_relative()
+                || relative.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::Prefix(_) | Component::RootDir | Component::ParentDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "The selected archive path is not a safe relative path: {}",
+                    relative.display()
+                ));
+            }
+            let staged = staging.join(relative);
+            if !staged.exists() {
+                return Err(format!(
+                    "The selected item was not extracted: {}",
+                    relative.display()
+                ));
+            }
+            Ok(staged)
+        })
+        .collect()
+}
+
+/// Removes this process's temporary Explorer-drag folders. The explicit
+/// process prefix prevents one running instance from deleting another
+/// instance's active drag payload.
+fn cleanup_drag_staging_directories() {
+    let process_prefix = format!("{DRAG_STAGING_PREFIX}{}-", std::process::id());
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_owned = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&process_prefix));
+        if is_owned && path.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths: Vec<PathBuf>) {
     if ui.get_busy()
         || ui.get_password_visible()
@@ -850,11 +1021,26 @@ fn wire_callbacks(
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
-        ui.on_toggle_selection(move |row| {
+        ui.on_toggle_selection(move |row, shift| {
             if row >= 0 {
-                state.rows.toggle(row as usize);
+                state.rows.select(row as usize, shift);
                 update_selection_ui(&weak, &state);
             }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        let engine = Arc::clone(&engine);
+        ui.on_drag_row_requested(move |row| {
+            if row < 0 {
+                return;
+            }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            start_archive_drag(&ui, &state, &engine, row as usize);
         });
     }
 

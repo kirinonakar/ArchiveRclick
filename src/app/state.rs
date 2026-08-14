@@ -33,6 +33,7 @@ pub(crate) struct ArchiveRowModel {
     listing: Rc<RefCell<Option<ArchiveListing>>>,
     display: Rc<RefCell<Vec<DisplayEntry>>>,
     selected: Rc<RefCell<HashSet<PathBuf>>>,
+    selection_anchor: Rc<RefCell<Option<PathBuf>>>,
     current_folder: Rc<RefCell<PathBuf>>,
     sort_column: Rc<Cell<usize>>,
     sort_ascending: Rc<Cell<bool>>,
@@ -44,6 +45,7 @@ impl ArchiveRowModel {
         listing: Rc<RefCell<Option<ArchiveListing>>>,
         display: Rc<RefCell<Vec<DisplayEntry>>>,
         selected: Rc<RefCell<HashSet<PathBuf>>>,
+        selection_anchor: Rc<RefCell<Option<PathBuf>>>,
         current_folder: Rc<RefCell<PathBuf>>,
         sort_column: Rc<Cell<usize>>,
         sort_ascending: Rc<Cell<bool>>,
@@ -52,6 +54,7 @@ impl ArchiveRowModel {
             listing,
             display,
             selected,
+            selection_anchor,
             current_folder,
             sort_column,
             sort_ascending,
@@ -59,17 +62,44 @@ impl ArchiveRowModel {
         }
     }
 
-    pub(crate) fn toggle(&self, row: usize) {
+    /// Toggles one row, or selects the contiguous range from the previous
+    /// anchor when Shift is held. The anchor is a path instead of a row
+    /// number so sorting and folder navigation cannot make it point at a
+    /// different entry.
+    pub(crate) fn select(&self, row: usize, extend: bool) {
         let display = self.display.borrow();
         let Some(entry) = display.get(row) else {
             return;
         };
+        let path = entry.relative_path.clone();
         let mut selected = self.selected.borrow_mut();
-        if !selected.insert(entry.relative_path.clone()) {
-            selected.remove(&entry.relative_path);
+        let anchor = extend
+            .then(|| self.selection_anchor.borrow().clone())
+            .flatten()
+            .and_then(|anchor| {
+                display
+                    .iter()
+                    .position(|candidate| candidate.relative_path == anchor)
+            });
+
+        if let Some(anchor) = anchor {
+            selected.clear();
+            let (start, end) = if anchor <= row {
+                (anchor, row)
+            } else {
+                (row, anchor)
+            };
+            selected.extend(
+                display[start..=end]
+                    .iter()
+                    .map(|candidate| candidate.relative_path.clone()),
+            );
+        } else if !selected.insert(path.clone()) {
+            selected.remove(&path);
         }
         drop(selected);
-        self.notify.row_changed(row);
+        *self.selection_anchor.borrow_mut() = Some(path);
+        self.notify.reset();
     }
 
     /// Selects the row targeted by a context menu.  A right-click on an
@@ -84,18 +114,21 @@ impl ArchiveRowModel {
         let mut selected = self.selected.borrow_mut();
         if !selected.contains(&path) {
             selected.clear();
-            selected.insert(path);
+            selected.insert(path.clone());
         }
         drop(selected);
+        *self.selection_anchor.borrow_mut() = Some(path);
         self.notify.reset();
         true
     }
 
     pub(crate) fn clear_selection(&self) {
         if self.selected.borrow().is_empty() {
+            self.selection_anchor.borrow_mut().take();
             return;
         }
         self.selected.borrow_mut().clear();
+        self.selection_anchor.borrow_mut().take();
         self.notify.reset();
     }
 
@@ -117,6 +150,7 @@ impl ArchiveRowModel {
         *self.display.borrow_mut() = display;
         self.current_folder.borrow_mut().clear();
         self.selected.borrow_mut().clear();
+        self.selection_anchor.borrow_mut().take();
         self.notify.reset();
     }
 
@@ -125,6 +159,7 @@ impl ArchiveRowModel {
         self.display.borrow_mut().clear();
         self.current_folder.borrow_mut().clear();
         self.selected.borrow_mut().clear();
+        self.selection_anchor.borrow_mut().take();
         self.notify.reset();
     }
 
@@ -216,6 +251,7 @@ impl AppState {
         let listing = Rc::new(RefCell::new(None));
         let display = Rc::new(RefCell::new(Vec::new()));
         let selected = Rc::new(RefCell::new(HashSet::new()));
+        let selection_anchor = Rc::new(RefCell::new(None));
         let current_folder = Rc::new(RefCell::new(PathBuf::new()));
         let sort_column = Rc::new(Cell::new(ARCHIVE_ORDER));
         let sort_ascending = Rc::new(Cell::new(true));
@@ -223,6 +259,7 @@ impl AppState {
             Rc::clone(&listing),
             Rc::clone(&display),
             Rc::clone(&selected),
+            Rc::clone(&selection_anchor),
             Rc::clone(&current_folder),
             Rc::clone(&sort_column),
             Rc::clone(&sort_ascending),
@@ -520,6 +557,34 @@ mod tests {
         assert_eq!(
             row_names(&state),
             ["folder", "zeta.txt", "Alpha.txt", "beta.txt"]
+        );
+    }
+
+    #[test]
+    fn shift_selection_selects_the_range_from_the_previous_anchor() {
+        let state = AppState::new();
+        install_listing(
+            &state,
+            listing(vec![
+                entry("one.txt", ArchiveEntryKind::File, Some(1), None),
+                entry("two.txt", ArchiveEntryKind::File, Some(2), None),
+                entry("three.txt", ArchiveEntryKind::File, Some(3), None),
+                entry("four.txt", ArchiveEntryKind::File, Some(4), None),
+            ]),
+        );
+
+        state.rows.select(1, false);
+        state.rows.select(3, true);
+
+        let mut selected = state.selected_paths();
+        selected.sort();
+        assert_eq!(
+            selected,
+            [
+                PathBuf::from("four.txt"),
+                PathBuf::from("three.txt"),
+                PathBuf::from("two.txt"),
+            ]
         );
     }
 
