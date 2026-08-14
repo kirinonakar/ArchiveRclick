@@ -13,6 +13,11 @@ selected entries, test it, or create a new archive.
 
  <img src="screenshot.png" alt="screenshot1" width="70%">
  
+## 🚀 Getting Started
+
+### 📥 Download
+You can download the portable zip in the [Releases Page](https://github.com/kirinonakar/ArchiveRclick/releases).
+
 ## Requirements
 
 - Rust 1.92 or newer with the MSVC Windows target.
