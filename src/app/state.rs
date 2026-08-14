@@ -82,7 +82,7 @@ impl ArchiveRowModel {
                     .position(|candidate| candidate.relative_path == anchor)
             });
 
-        if let Some(anchor) = anchor {
+        let range_selected = if let Some(anchor) = anchor {
             selected.clear();
             let (start, end) = if anchor <= row {
                 (anchor, row)
@@ -94,12 +94,22 @@ impl ArchiveRowModel {
                     .iter()
                     .map(|candidate| candidate.relative_path.clone()),
             );
+            true
         } else if !selected.insert(path.clone()) {
             selected.remove(&path);
-        }
+            false
+        } else {
+            false
+        };
         drop(selected);
         *self.selection_anchor.borrow_mut() = Some(path);
-        self.notify.reset();
+        // Keep ordinary clicks as a row-level update so the list item remains
+        // stable long enough for TouchArea to recognize a second click.
+        if range_selected {
+            self.notify.reset();
+        } else {
+            self.notify.row_changed(row);
+        }
     }
 
     /// Selects the row targeted by a context menu.  A right-click on an
@@ -558,6 +568,31 @@ mod tests {
             row_names(&state),
             ["folder", "zeta.txt", "Alpha.txt", "beta.txt"]
         );
+    }
+
+    #[test]
+    fn activating_a_folder_rebuilds_the_view_inside_that_folder() {
+        let state = AppState::new();
+        install_listing(
+            &state,
+            listing(vec![
+                entry("folder/child.txt", ArchiveEntryKind::File, Some(1), None),
+                entry("top.txt", ArchiveEntryKind::File, Some(2), None),
+                entry(
+                    "folder/nested/grand.txt",
+                    ArchiveEntryKind::File,
+                    Some(3),
+                    None,
+                ),
+            ]),
+        );
+
+        let folder = state.activate_row(0).expect("first row is a folder");
+        *state.current_folder.borrow_mut() = folder;
+        state.rows.clear_selection();
+        state.rebuild_display();
+
+        assert_eq!(row_names(&state), ["nested", "child.txt"]);
     }
 
     #[test]
