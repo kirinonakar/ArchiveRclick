@@ -13,6 +13,7 @@ const RUNTIME_FILES: &[&str] = &[
     "zstd.dll",
 ];
 const LICENSE_FILES: &[&str] = &[
+    "7zip.txt",
     "bzip2.txt",
     "libarchive.txt",
     "liblzma.txt",
@@ -27,6 +28,7 @@ fn main() {
     println!("cargo:rerun-if-changed=runtime/licenses");
     println!("cargo:rerun-if-changed=runtime/SHA256SUMS");
     println!("cargo:rerun-if-changed=runtime/THIRD-PARTY-NOTICES.md");
+    println!("cargo:rerun-if-changed=THIRD-PARTY-LICENSES.md");
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=app.ico");
     slint_build::compile("ui/main.slint").expect("failed to compile Slint UI");
@@ -77,6 +79,16 @@ fn copy_runtime_bundle() {
         panic!(
             "failed to copy native runtime notices {} to {}: {error}",
             notice.display(),
+            destination.display()
+        )
+    });
+
+    let rust_notice = manifest_dir.join("THIRD-PARTY-LICENSES.md");
+    let destination = profile_dir.join("THIRD-PARTY-LICENSES.md");
+    fs::copy(&rust_notice, &destination).unwrap_or_else(|error| {
+        panic!(
+            "failed to copy Rust dependency notices {} to {}: {error}",
+            rust_notice.display(),
             destination.display()
         )
     });

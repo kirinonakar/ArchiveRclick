@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 description = "A fast, lightweight Windows archive manager built with Rust, Slint, and libarchive"
+license = "MIT"
 publish = false
 build = "build.rs"
 

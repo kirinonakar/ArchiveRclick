@@ -78,6 +78,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $output
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick_core.dll") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\THIRD-PARTY-NOTICES.md") -Destination $output
+    Copy-Item -LiteralPath (Join-Path $repository "THIRD-PARTY-LICENSES.md") -Destination $output
     Copy-Item -LiteralPath $manifestPath -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\licenses") -Destination $output -Recurse
 

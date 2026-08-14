@@ -10,6 +10,8 @@ and libarchive for broader archive-format support.
 
 <img src="screenshot.png" alt="ArchiveRclick screenshot" width="70%">
 
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/v1.17.1/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev/)
+
 ## Features
 
 - Open and browse ZIP, 7z, RAR/RAR5, TAR, CAB, ISO, LHA/LZH, CPIO, AR, XAR,
@@ -89,6 +91,9 @@ expected hashes of the bundled native files.
 
 ArchiveRclick source code is licensed under the [MIT License](LICENSE).
 
+The portable ZIP is a combined distribution and is not wholly MIT-licensed;
+the bundled components listed below retain their own license terms.
+
 The portable Windows build also redistributes these native components under
 their own terms:
 
@@ -107,6 +112,8 @@ The complete notices and license texts are included in
 [`runtime/THIRD-PARTY-NOTICES.md`](runtime/THIRD-PARTY-NOTICES.md) and
 [`runtime/licenses/`](runtime/licenses/). Microsoft redistribution terms are
 also listed at the [Visual Studio REDIST page](https://aka.ms/vs/18/redistribution).
+Rust dependency license metadata is listed in
+[`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md).
 
 ## Architecture
 
