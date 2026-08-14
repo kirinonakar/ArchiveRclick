@@ -10,7 +10,7 @@ and libarchive for broader archive-format support.
 
 <img src="screenshot.png" alt="ArchiveRclick screenshot" width="70%">
 
-[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/v1.17.1/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev/)
+<a href="https://slint.dev/"><img src="https://raw.githubusercontent.com/slint-ui/slint/v1.17.1/logo/MadeWithSlint-logo-whitebg.png" alt="Made with Slint" width="160"></a>
 
 ## Features
 
