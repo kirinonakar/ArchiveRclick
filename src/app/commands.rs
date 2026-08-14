@@ -210,7 +210,6 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 path,
                 None,
                 pathname_codepage(ui.get_encoding_selection()),
-                Rc::clone(&operation_progress_window),
             );
         } else {
             ui.set_status_text(format!("Not a file: {}", path.display()).into());
@@ -317,20 +316,13 @@ fn open_main_window(
     let weak = ui.as_weak();
     let state_for_drop = Rc::clone(&state);
     let engine_for_drop = Arc::clone(&engine);
-    let progress_window_for_drop = Rc::clone(&operation_progress_window);
     platform::install_file_drop_handler(
         ui.window(),
         Box::new(move |paths| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            handle_file_drop(
-                &ui,
-                &state_for_drop,
-                &engine_for_drop,
-                paths,
-                Rc::clone(&progress_window_for_drop),
-            );
+            handle_file_drop(&ui, &state_for_drop, &engine_for_drop, paths);
         }),
     );
 
@@ -943,7 +935,6 @@ fn handle_file_drop(
     state: &Rc<AppState>,
     engine: &Engine,
     paths: Vec<PathBuf>,
-    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
     if ui.get_busy()
         || ui.get_password_visible()
@@ -978,7 +969,6 @@ fn handle_file_drop(
         path,
         None,
         pathname_codepage(ui.get_encoding_selection()),
-        progress_window,
     );
 }
 
@@ -993,7 +983,6 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
-        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_open_requested(move || match platform::pick_archive() {
             Ok(Some(path)) => {
                 if let Some(ui) = weak.upgrade() {
@@ -1004,7 +993,6 @@ fn wire_callbacks(
                         path,
                         None,
                         pathname_codepage(ui.get_encoding_selection()),
-                        Rc::clone(&progress_window),
                     );
                 }
             }
@@ -1152,7 +1140,6 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
-        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_encoding_selection_changed(move |selection| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1181,7 +1168,6 @@ fn wire_callbacks(
                 path,
                 password,
                 pathname_codepage(selection),
-                Rc::clone(&progress_window),
             );
         });
     }
@@ -1572,7 +1558,6 @@ fn wire_callbacks(
                 path,
                 Some(password),
                 pathname_codepage(ui.get_encoding_selection()),
-                Rc::clone(&progress_window),
             );
         });
     }
@@ -1631,7 +1616,6 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
-        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_dropped(move |data| {
             let Ok(text) = data.plain_text() else {
                 if let Some(ui) = weak.upgrade() {
@@ -1659,7 +1643,6 @@ fn wire_callbacks(
                     path,
                     None,
                     pathname_codepage(ui.get_encoding_selection()),
-                    Rc::clone(&progress_window),
                 );
             }
         });
@@ -1673,34 +1656,21 @@ fn start_listing(
     path: PathBuf,
     password: Option<String>,
     pathname_codepage: u32,
-    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
     let progress_title = progress_title_with_filename("Opening archive", &path);
-    let path_display = path.display().to_string();
-    let (cancel, weak_progress) = match begin_progress_window_operation(
-        ui,
-        &state,
-        &progress_window,
-        &progress_title,
-        &path_display,
-    ) {
-        Ok(operation) => operation,
-        Err(error) => {
-            ui.set_status_text(error.clone().into());
-            platform::show_error("Open archive", &error);
-            return;
-        }
-    };
+    let cancel = CancellationToken::new();
+    *state
+        .cancellation
+        .lock()
+        .expect("cancellation mutex poisoned") = Some(cancel.clone());
+    ui.set_busy(true);
+    ui.set_status_text(progress_title.into());
     let open_password = Arc::clone(&state.open_password);
     let pending_password_path = Arc::clone(&state.pending_password_path);
     let sort_column = state.sort_column.get();
     let sort_ascending = state.sort_ascending.get();
     let weak = ui.as_weak();
-    let weak_progress_updates = weak_progress.clone();
-    let weak_progress_finished = weak_progress.clone();
-    let progress = move |snapshot: ProgressSnapshot| {
-        update_progress_window_details(&weak_progress_updates, snapshot)
-    };
+    let progress = |_: ProgressSnapshot| {};
     std::thread::spawn(move || {
         let result = engine
             .list(
@@ -1714,9 +1684,6 @@ fn start_listing(
                 super::ArchiveRowModel::prepare_listing(listing, sort_column, sort_ascending)
             });
         let _ = weak.upgrade_in_event_loop(move |ui| {
-            if let Some(progress_ui) = weak_progress_finished.upgrade() {
-                let _ = progress_ui.hide();
-            }
             finish_operation(&ui);
             match result {
                 Ok((listing, display)) => {
