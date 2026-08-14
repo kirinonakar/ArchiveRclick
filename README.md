@@ -1,87 +1,117 @@
 # ArchiveRclick
 
 <p align="center">
-  <img src="app.png" alt="ico" width="100" height="100" />
+  <img src="app.png" alt="ArchiveRclick" width="100" height="100" />
 </p>
 
-ArchiveRclick is a Windows-focused archive browser written in Rust. It uses
-Slint for the native desktop UI, libarchive for most archive formats, and the
-7-Zip runtime (`7z.dll`) for 7z archives.
+ArchiveRclick is a small, portable Windows x64 archive manager written in Rust.
+It uses Slint for the native UI, bundled 7-Zip (`7z.dll`) for ZIP/7z operations,
+and libarchive for broader archive-format support.
 
-The project is intentionally small: open an archive, inspect it, extract all or
-selected entries, test it, or create a new archive.
+<img src="screenshot.png" alt="ArchiveRclick screenshot" width="70%">
 
- <img src="screenshot.png" alt="screenshot1" width="70%">
- 
-## 🚀 Getting Started
+## Features
 
-### 📥 Download
-You can download the portable zip in the [Releases Page](https://github.com/kirinonakar/ArchiveRclick/releases).
+- Open and browse ZIP, 7z, RAR/RAR5, TAR, CAB, ISO, LHA/LZH, CPIO, AR, XAR,
+  WARC, and other formats supported by the bundled libarchive runtime. Formats
+  are detected from archive contents rather than filename extensions.
+- Navigate folders, sort and resize columns, select individual entries or a
+  contiguous range with Shift-click, drag and drop to extract.
+- Extract all or selected entries to a chosen directory, the current directory,
+  or an archive-name directory. Choose how existing files are handled, enter a
+  password when needed, cancel long operations, and monitor progress.
+- Create ZIP or 7z archives from files and folders with selectable compression
+  level and CPU threads. Password protection is supported; 7z can also encrypt
+  file names (headers).
+- Drag selected entries from the archive to Explorer. Drop a single archive onto
+  the window to open it, or drop multiple files/a folder to prepare a new archive.
+- Optional Explorer right-click commands for extraction, one-archive creation,
+  and one-archive-per-folder batch creation.
+- English, Korean, and Japanese UI; system/light/dark themes; configurable
+  fonts, legacy filename code pages, 7z thread count, and header-encryption
+  defaults.
+
+## Download
+
+Download the portable ZIP from the [Releases page](https://github.com/kirinonakar/ArchiveRclick/releases).
 
 ## Requirements
 
-- Rust 1.92 or newer with the MSVC Windows target.
-- A 64-bit Windows 10/11 system. The supported libarchive 3.8.9 runtime and its
-  codec dependencies are bundled under `runtime/x64` and copied beside the
-  executable automatically by `cargo build`.
+- 64-bit Windows 10 or 11.
+- Rust 1.92 or newer with the MSVC Windows target for building.
 
-Use a libarchive build that includes zlib, liblzma, and zstd if ZIP, TAR.GZ,
-TAR.XZ, and TAR.ZST creation are required. The application detects read formats
-from archive contents rather than filename extensions.
+The supported libarchive 3.8.9 runtime and its codec dependencies are bundled;
+no separate archive-runtime installation is required.
 
-## Build
+## Build and use
 
 ```powershell
 cargo build --release
-```
-
-The resulting `target\release` directory contains `archive-rclick.exe`, the
-eight required native runtime DLLs, and `THIRD-PARTY-NOTICES.md`. Keep these
-files together when copying or packaging the application. Developers may set
-`ARCHIVERCLICK_LIBARCHIVE` to an absolute path to test another supported
-libarchive 3.x build.
-
-Open an archive from the UI or pass it on the command line:
-
-```powershell
 target\release\archive-rclick.exe example.7z
+target\release\archive-rclick.exe --check-runtime
 ```
 
-Register ArchiveRclick as an available handler in Windows Default Apps (per
-user, without overriding the user's existing choices):
+The build copies the required native DLLs and runtime notices beside the
+executable. Keep them together when copying the application. To create a clean
+portable package with hashes and complete license files, run:
 
 ```powershell
-target\release\archive-rclick.exe --register
+.\package-release.ps1
 ```
 
-Use `--unregister` to remove that registration.
+Command-line operations:
 
-Explorer files and folders can be dropped onto the window. A single dropped
-file is opened as an archive; multiple files or a folder are staged for archive
-creation. In the archive list, Shift-click selects a contiguous range. Dragging
-the selected entries to Explorer extracts them to the dropped location.
+```text
+ArchiveRclick [archive|command]
+  extract <archive>...  Extract each archive into its own subfolder
+  zip <path>...         Create one ZIP archive
+  7z <path>...          Create one 7z archive
+  zip-each <folder>...  Create one ZIP archive per folder
+  7z-each <folder>...   Create one 7z archive per folder
+  --register            Register as an available Windows archive handler
+  --unregister          Remove that registration
+```
+
+`--register` only adds a per-user handler that can be selected under Windows
+Default apps; it does not replace the user's existing defaults. The Explorer
+right-click extension can be registered or removed from the application's
+Settings screen.
+
+## Security
+
+Archive paths are treated as untrusted. Extraction rejects absolute paths,
+parent traversal, reserved Windows names, links, special files, and reparse
+points. Listing, testing, and extraction apply entry/size limits and verify
+destination handles before installing output. `runtime/SHA256SUMS` records the
+expected hashes of the bundled native files.
+
+## License and third-party components
+
+ArchiveRclick source code is licensed under the [MIT License](LICENSE).
+
+The portable Windows build also redistributes these native components under
+their own terms:
+
+| Component | Version | License summary |
+| --- | --- | --- |
+| libarchive | 3.8.9 | Mixed per-file notices, mainly BSD-style |
+| zlib | 1.3.2 | zlib license |
+| bzip2 | 1.0.8 | bzip2 license |
+| XZ Utils / liblzma | 5.8.3 | 0BSD for liblzma; see package notice |
+| LZ4 | 1.10.0 | BSD 2-Clause |
+| Zstandard | 1.5.7 | BSD or GPLv2 |
+| 7-Zip (`7z.dll`) | 26.02 | LGPL with the 7-Zip unRAR restriction and BSD portions |
+| Microsoft VC runtime | 14.51.36247.0 | Microsoft Visual Studio REDIST terms |
+
+The complete notices and license texts are included in
+[`runtime/THIRD-PARTY-NOTICES.md`](runtime/THIRD-PARTY-NOTICES.md) and
+[`runtime/licenses/`](runtime/licenses/). Microsoft redistribution terms are
+also listed at the [Visual Studio REDIST page](https://aka.ms/vs/18/redistribution).
 
 ## Architecture
 
-- `src/archive`: UI-independent archive API, metadata, options, and libarchive FFI.
-- `src/tasks`: standard-thread cancellation and throttled progress primitives.
-- `src/app`: Slint-facing state and command wiring.
-- `src/platform`: Windows dialogs, dynamic-library lookup, and shell integration.
+- `src/archive`: archive API, metadata, options, path safety, and native FFI.
+- `src/tasks`: cancellation and throttled progress primitives.
+- `src/app`: Slint state and command wiring.
+- `src/platform`: Windows dialogs, settings, file associations, and Explorer integration.
 - `ui`: Slint components.
-
-Archive entry paths are treated as untrusted. Extraction rejects absolute paths,
-parent traversal, reserved Windows names, links, special files, and reparse-point
-ancestors beneath the selected destination.
-
-Listing and integrity testing apply entry, metadata, and decompressed-byte caps
-to resist resource-exhaustion archives. Extraction also verifies opened root,
-parent, and temporary-file handles remain under the selected destination before
-installing output. The final Windows rename uses `MoveFileExW`; an attacker who
-already has concurrent write access to the chosen destination can still create
-a very narrow reparse-point swap race between the last check and that rename.
-Fully removing that race requires NT handle-relative create/rename operations.
-
-Runtime round-trip tests exercise the same bundled libarchive 3.8.9 DLL that is
-copied into Cargo's target profile directory. `runtime/SHA256SUMS` records the
-exact native payload; `scripts/package-release.ps1` creates a clean portable
-release folder and verifies every bundled hash.
