@@ -1,5 +1,9 @@
 # ArchiveRclick
 
+<p align="center">
+  <img src="app.png" alt="ico" width="100" height="100" />
+</p>
+
 ArchiveRclick is a Windows-focused archive browser written in Rust. It uses
 Slint for the native desktop UI, libarchive for most archive formats, and the
 7-Zip runtime (`7z.dll`) for 7z archives.
@@ -7,6 +11,8 @@ Slint for the native desktop UI, libarchive for most archive formats, and the
 The project is intentionally small: open an archive, inspect it, extract all or
 selected entries, test it, or create a new archive.
 
+ <img src="screenshot.png" alt="screenshot1" width="70%">
+ 
 ## Requirements
 
 - Rust 1.92 or newer with the MSVC Windows target.
