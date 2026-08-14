@@ -94,6 +94,18 @@ const CLSID_SEVENZIP_COMMAND: GUID = GUID {
     data3: 0x4F5A,
     data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
 };
+const CLSID_ZIP_EACH_COMMAND: GUID = GUID {
+    data1: 0x6B2B1C4E,
+    data2: 0x9D3E,
+    data3: 0x4F5A,
+    data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
+const CLSID_SEVENZIP_EACH_COMMAND: GUID = GUID {
+    data1: 0x6B2B1C4F,
+    data2: 0x9D3E,
+    data3: 0x4F5A,
+    data4: [0x8C, 0x7B, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
 
 const ARCHIVE_EXTENSIONS: &[&str] = &[
     ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".lha", ".lzh",
@@ -112,6 +124,13 @@ const MODERN_ZIP_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\A
 const MODERN_SEVENZIP_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickSevenZip";
 const MODERN_SEVENZIP_DIRECTORY_MENU_KEY: &str =
     r"Software\Classes\Directory\shell\ArchiveRclickSevenZip";
+const MODERN_ZIP_EACH_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickZipEach";
+const MODERN_ZIP_EACH_DIRECTORY_MENU_KEY: &str =
+    r"Software\Classes\Directory\shell\ArchiveRclickZipEach";
+const MODERN_SEVENZIP_EACH_MENU_KEY: &str =
+    r"Software\Classes\*\shell\ArchiveRclickSevenZipEach";
+const MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY: &str =
+    r"Software\Classes\Directory\shell\ArchiveRclickSevenZipEach";
 const LEGACY_CONTEXT_MENU_KEY: &str =
     r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick";
 const LEGACY_DIRECTORY_CONTEXT_MENU_KEY: &str =
@@ -372,12 +391,14 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
     }
 }
 
-/// The three actions the shell extension can run on a selection.
+/// The actions the shell extension can run on a selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Extract,
     Zip,
     SevenZip,
+    ZipEach,
+    SevenZipEach,
 }
 
 impl Verb {
@@ -386,6 +407,8 @@ impl Verb {
             Verb::Extract => "extract",
             Verb::Zip => "zip",
             Verb::SevenZip => "7z",
+            Verb::ZipEach => "zip-each",
+            Verb::SevenZipEach => "7z-each",
         }
     }
 
@@ -394,6 +417,8 @@ impl Verb {
             Self::Extract => "Extract the selected archive(s)",
             Self::Zip => "Create a ZIP archive from the selected items",
             Self::SevenZip => "Create a 7z archive from the selected items",
+            Self::ZipEach => "Create one ZIP archive for each selected folder",
+            Self::SevenZipEach => "Create one 7z archive for each selected folder",
         }
     }
 }
@@ -434,6 +459,15 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
 }
 
 fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    if is_multi_folder_selection(paths) {
+        return vec![
+            (Verb::Zip, "선택한 폴더를 하나의 ZIP으로 압축하기".to_owned()),
+            (Verb::SevenZip, "선택한 폴더를 하나의 7z으로 압축하기".to_owned()),
+            (Verb::ZipEach, "각 폴더를 각각 ZIP으로 압축하기".to_owned()),
+            (Verb::SevenZipEach, "각 폴더를 각각 7z으로 압축하기".to_owned()),
+        ];
+    }
+
     // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
     let zip_name = unique_path(&cli_archive_destination(paths, CreateFormat::Zip))
         .file_name()
@@ -453,6 +487,10 @@ fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
             format!("{}로 압축하기", shorten_compression_name(&seven_name)),
         ),
     ]
+}
+
+fn is_multi_folder_selection(paths: &[PathBuf]) -> bool {
+    paths.len() > 1 && paths.iter().all(|path| path.is_dir())
 }
 
 /// Maximum number of characters shown for a file name in the context menu.
@@ -717,6 +755,8 @@ pub unsafe extern "system" fn DllGetClassObject(
         CLSID_EXTRACT_COMMAND => FactoryKind::ExplorerCommand(Verb::Extract),
         CLSID_ZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::Zip),
         CLSID_SEVENZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZip),
+        CLSID_ZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::ZipEach),
+        CLSID_SEVENZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZipEach),
         _ => return CLASS_E_CLASSNOTAVAILABLE,
     };
     // The class factory itself is a live COM object too.  If it is omitted
@@ -1078,6 +1118,11 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (CLSID_EXTRACT_COMMAND, "ArchiveRclick extract command"),
         (CLSID_ZIP_COMMAND, "ArchiveRclick ZIP command"),
         (CLSID_SEVENZIP_COMMAND, "ArchiveRclick 7z command"),
+        (CLSID_ZIP_EACH_COMMAND, "ArchiveRclick per-folder ZIP command"),
+        (
+            CLSID_SEVENZIP_EACH_COMMAND,
+            "ArchiveRclick per-folder 7z command",
+        ),
     ] {
         let command_guid = guid_string_for(command_clsid);
         let command_clsid_key = format!(r"Software\Classes\CLSID\{command_guid}");
@@ -1101,6 +1146,11 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (MODERN_EXTRACT_MENU_KEY, CLSID_EXTRACT_COMMAND),
         (MODERN_ZIP_MENU_KEY, CLSID_ZIP_COMMAND),
         (MODERN_SEVENZIP_MENU_KEY, CLSID_SEVENZIP_COMMAND),
+        (MODERN_ZIP_EACH_MENU_KEY, CLSID_ZIP_EACH_COMMAND),
+        (
+            MODERN_SEVENZIP_EACH_MENU_KEY,
+            CLSID_SEVENZIP_EACH_COMMAND,
+        ),
     ] {
         let command_guid = guid_string_for(command_clsid);
         set_registry_string(
@@ -1116,6 +1166,14 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (MODERN_EXTRACT_DIRECTORY_MENU_KEY, CLSID_EXTRACT_COMMAND),
         (MODERN_ZIP_DIRECTORY_MENU_KEY, CLSID_ZIP_COMMAND),
         (MODERN_SEVENZIP_DIRECTORY_MENU_KEY, CLSID_SEVENZIP_COMMAND),
+        (
+            MODERN_ZIP_EACH_DIRECTORY_MENU_KEY,
+            CLSID_ZIP_EACH_COMMAND,
+        ),
+        (
+            MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
+            CLSID_SEVENZIP_EACH_COMMAND,
+        ),
     ] {
         let command_guid = guid_string_for(command_clsid);
         set_registry_string(
@@ -1146,6 +1204,8 @@ pub fn unregister_context_menu() -> Result<(), String> {
         CLSID_EXTRACT_COMMAND,
         CLSID_ZIP_COMMAND,
         CLSID_SEVENZIP_COMMAND,
+        CLSID_ZIP_EACH_COMMAND,
+        CLSID_SEVENZIP_EACH_COMMAND,
     ] {
         delete_registry_tree(
             HKEY_CURRENT_USER,
@@ -1161,6 +1221,10 @@ pub fn unregister_context_menu() -> Result<(), String> {
         MODERN_ZIP_DIRECTORY_MENU_KEY,
         MODERN_SEVENZIP_MENU_KEY,
         MODERN_SEVENZIP_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_EACH_MENU_KEY,
+        MODERN_ZIP_EACH_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_EACH_MENU_KEY,
+        MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
         LEGACY_CONTEXT_MENU_KEY,
         LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
     ] {
@@ -1184,6 +1248,8 @@ pub fn is_context_menu_registered() -> bool {
         CLSID_EXTRACT_COMMAND,
         CLSID_ZIP_COMMAND,
         CLSID_SEVENZIP_COMMAND,
+        CLSID_ZIP_EACH_COMMAND,
+        CLSID_SEVENZIP_EACH_COMMAND,
     ]
     .into_iter()
     .all(|clsid| {
@@ -1202,6 +1268,10 @@ pub fn is_context_menu_registered() -> bool {
         MODERN_ZIP_DIRECTORY_MENU_KEY,
         MODERN_SEVENZIP_MENU_KEY,
         MODERN_SEVENZIP_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_EACH_MENU_KEY,
+        MODERN_ZIP_EACH_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_EACH_MENU_KEY,
+        MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
     ]
     .into_iter()
     .all(|key| registry_key_exists(HKEY_CURRENT_USER, key));
@@ -1416,7 +1486,9 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{Verb, build_args, menu_verbs, shorten_compression_name, shorten_menu_name};
+    use super::{
+        Verb, build_args, menu_verbs, shorten_compression_name, shorten_menu_name,
+    };
 
     #[test]
     fn command_line_quoting_keeps_a_root_folder_argument_intact() {
@@ -1501,6 +1573,33 @@ mod tests {
             multiple.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract, Verb::Zip, Verb::SevenZip]
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn multiple_folders_use_per_folder_compression_commands() {
+        let root =
+            std::env::temp_dir().join(format!("archive-rclick-shell-ext-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let first = root.join("one");
+        let second = root.join("two");
+        std::fs::create_dir_all(&first).expect("create first folder");
+        std::fs::create_dir_all(&second).expect("create second folder");
+
+        let verbs = menu_verbs(&[first.clone(), second.clone()]);
+        assert_eq!(
+            verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Zip, Verb::SevenZip, Verb::ZipEach, Verb::SevenZipEach]
+        );
+        assert_eq!(verbs[0].1, "선택한 폴더를 하나의 ZIP으로 압축하기");
+        assert_eq!(verbs[1].1, "선택한 폴더를 하나의 7z으로 압축하기");
+        assert_eq!(verbs[2].1, "각 폴더를 각각 ZIP으로 압축하기");
+        assert_eq!(verbs[3].1, "각 폴더를 각각 7z으로 압축하기");
+        assert_eq!(Verb::Zip.subcommand(), "zip");
+        assert_eq!(Verb::SevenZip.subcommand(), "7z");
+        assert_eq!(Verb::ZipEach.subcommand(), "zip-each");
+        assert_eq!(Verb::SevenZipEach.subcommand(), "7z-each");
 
         let _ = std::fs::remove_dir_all(root);
     }

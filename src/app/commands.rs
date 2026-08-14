@@ -137,6 +137,14 @@ pub fn run() -> Result<(), String> {
             let rest: Vec<OsString> = args.collect();
             run_gui_create(&rest, CreateFormat::SevenZip, elevated_retry)
         }
+        Some("zip-each") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_each(&rest, CreateFormat::Zip, elevated_retry)
+        }
+        Some("7z-each") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_each(&rest, CreateFormat::SevenZip, elevated_retry)
+        }
         _ => run_with_startup_argument(command),
     }
 }
@@ -163,7 +171,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 return Ok(());
             }
             "--help" | "-h" | "/?" => {
-                let help = "ArchiveRclick [archive|command]\n\nCommands:\n  extract <archive>...  Extract each archive into its own subfolder\n  zip <path>...         Create a ZIP archive named after the source folder\n  7z <path>...          Create a 7z archive named after the source folder\n\nOptions:\n  --register       Register as an available archive handler\n  --unregister     Remove that registration\n  --check-runtime  Verify the bundled archive engine and exit";
+                let help = "ArchiveRclick [archive|command]\n\nCommands:\n  extract <archive>...  Extract each archive into its own subfolder\n  zip <path>...         Create a ZIP archive named after the source folder\n  7z <path>...          Create a 7z archive named after the source folder\n  zip-each <folder>...  Create one ZIP archive for each folder\n  7z-each <folder>...   Create one 7z archive for each folder\n\nOptions:\n  --register       Register as an available archive handler\n  --unregister     Remove that registration\n  --check-runtime  Verify the bundled archive engine and exit";
                 if cfg!(test) {
                     println!("{help}");
                 } else {
@@ -505,6 +513,58 @@ fn run_gui_create(
         .map_err(|error| format!("UI event loop failed: {error}"))
 }
 
+/// Creates one archive beside every selected folder. The normal invocation
+/// receives only folder paths; an elevated retry also carries the exact
+/// destination for each folder so a partially completed first attempt is not
+/// redirected to a new `_2` archive.
+fn run_gui_create_each(
+    args: &[OsString],
+    format: CreateFormat,
+    elevated_retry: bool,
+) -> Result<(), String> {
+    let verb = match format {
+        CreateFormat::Zip => "zip-each",
+        CreateFormat::SevenZip => "7z-each",
+        _ => unreachable!("only zip and 7z reach the per-folder create flow"),
+    };
+    let requested_sources = parse_elevated_batch_output(args, elevated_retry)?;
+    if requested_sources.is_empty() {
+        return Err(format!("Usage: ArchiveRclick {verb} <folder>..."));
+    }
+
+    let mut items = Vec::with_capacity(requested_sources.len());
+    for (destination_override, argument) in requested_sources {
+        let requested = PathBuf::from(argument);
+        let source = match resolve_existing_path(&requested) {
+            Some(path) if path.is_dir() => path,
+            Some(path) => return Err(format!("Not a folder: {}", path.display())),
+            None => return Err(missing_path_message(&requested)),
+        };
+        let destination = destination_override.unwrap_or_else(|| {
+            unique_path(&cli_archive_destination(std::slice::from_ref(&source), format))
+        });
+        items.push((source, destination));
+    }
+
+    let engine: Engine = load_engine()?;
+    let options = CreateOptions {
+        format,
+        threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
+        ..CreateOptions::default()
+    };
+    let (ui, state) = open_progress_window()?;
+    start_create_batch_window(
+        &ui,
+        &state,
+        Arc::clone(&engine),
+        items,
+        options,
+        elevated_retry,
+    );
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
 /// Parses the destination marker used only by an elevated retry.  Normal CLI
 /// invocations keep the original `zip <source>...` shape, while a retry gets
 /// the exact destination selected before the first attempt.  Keeping that
@@ -526,6 +586,46 @@ fn parse_elevated_output(
         return Err("The elevated retry is missing its input path".to_owned());
     }
     Ok((Some(destination), args[2..].to_vec()))
+}
+
+/// Parses the repeated `--output <destination> <folder>` markers used by an
+/// elevated per-folder compression retry. Normal invocations are just a list
+/// of folder arguments and have no destination overrides.
+fn parse_elevated_batch_output(
+    args: &[OsString],
+    elevated_retry: bool,
+) -> Result<Vec<(Option<PathBuf>, OsString)>, String> {
+    if !elevated_retry {
+        return Ok(args
+            .iter()
+            .cloned()
+            .map(|source| (None, source))
+            .collect());
+    }
+
+    let mut items = Vec::with_capacity(args.len() / 3);
+    let mut index = 0;
+    while index < args.len() {
+        if args[index].as_os_str() != OsStr::new("--output") {
+            return Err(
+                "The elevated per-folder compression retry is missing an output marker"
+                    .to_owned(),
+            );
+        }
+        let Some(destination) = args.get(index + 1) else {
+            return Err(
+                "The elevated per-folder compression retry is missing an output path".to_owned(),
+            );
+        };
+        let Some(source) = args.get(index + 2) else {
+            return Err(
+                "The elevated per-folder compression retry is missing a folder path".to_owned(),
+            );
+        };
+        items.push((Some(PathBuf::from(destination)), source.clone()));
+        index += 3;
+    }
+    Ok(items)
 }
 
 fn missing_path_message(path: &Path) -> String {
@@ -1779,6 +1879,39 @@ fn request_context_elevation(
     }
 }
 
+fn request_context_create_batch_elevation(
+    retry_already_attempted: bool,
+    subcommand: &str,
+    failures: &[(PathBuf, PathBuf, ArchiveError)],
+) -> bool {
+    if retry_already_attempted {
+        return false;
+    }
+    let failures = failures
+        .iter()
+        .filter(|(_, _, error)| error.requires_elevation())
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return false;
+    }
+
+    let mut args = Vec::with_capacity(failures.len() * 3 + 2);
+    args.push(OsString::from("--elevated-retry"));
+    args.push(OsString::from(subcommand));
+    for (source, destination, _) in failures {
+        args.push(OsString::from("--output"));
+        args.push(destination.as_os_str().to_owned());
+        args.push(source.as_os_str().to_owned());
+    }
+    match platform::run_elevated(&args) {
+        Ok(launched) => launched,
+        Err(error) => {
+            platform::show_error("Request administrator access", &error);
+            false
+        }
+    }
+}
+
 fn request_context_extract_elevation(
     retry_already_attempted: bool,
     failures: &[(PathBuf, PathBuf, ArchiveError)],
@@ -1980,6 +2113,88 @@ fn start_create_window(
                     }
                 }
                 Err(_) => {}
+            }
+            close_progress_window(&ui);
+        });
+    });
+}
+
+/// Creates one archive per selected folder inside the progress-only window.
+/// The items are processed sequentially so each folder gets its own output
+/// and the progress window remains a single, predictable operation.
+fn start_create_batch_window(
+    ui: &ProgressWindow,
+    state: &Rc<ProgressWindowState>,
+    engine: Engine,
+    items: Vec<(PathBuf, PathBuf)>,
+    options: CreateOptions,
+    elevated_retry: bool,
+) {
+    let total = items.len();
+    let initial_title = progress_title_with_filename(
+        &format!("Creating archive 1/{total}"),
+        &items[0].1,
+    );
+    let cancel = CancellationToken::new();
+    *state
+        .cancellation
+        .lock()
+        .expect("cancellation mutex poisoned") = Some(cancel.clone());
+    ui.set_progress_title(initial_title.into());
+    ui.set_progress_file(items[0].1.display().to_string().into());
+    set_initial_progress_window(ui);
+    let weak = ui.as_weak();
+    let weak_progress = weak.clone();
+    let subcommand = match options.format {
+        CreateFormat::Zip => "zip-each",
+        CreateFormat::SevenZip => "7z-each",
+        _ => "",
+    };
+    std::thread::spawn(move || {
+        let mut failures: Vec<(PathBuf, PathBuf, ArchiveError)> = Vec::new();
+        for (index, (source, destination)) in items.iter().enumerate() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let title = progress_title_with_filename(
+                &format!("Creating archive {}/{}", index + 1, total),
+                destination,
+            );
+            let destination_display = destination.display().to_string();
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_progress_title(title.into());
+                ui.set_progress_file(destination_display.into());
+                set_initial_progress_window(&ui);
+            });
+            let source_files = vec![source.clone()];
+            let progress = |snapshot: ProgressSnapshot| {
+                update_progress_window_details(&weak_progress, snapshot)
+            };
+            match engine.create(destination, &source_files, &options, &progress, &cancel) {
+                Ok(_) => {}
+                Err(ArchiveError::Cancelled) => break,
+                Err(error) => failures.push((source.clone(), destination.clone(), error)),
+            }
+        }
+
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if !cancel.is_cancelled()
+                && request_context_create_batch_elevation(
+                    elevated_retry,
+                    subcommand,
+                    &failures,
+                )
+            {
+                close_progress_window(&ui);
+                return;
+            }
+            if !cancel.is_cancelled() && !failures.is_empty() {
+                let details = failures
+                    .iter()
+                    .map(|(source, _, error)| format!("{}: {error}", source.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                platform::show_error("Create archives", &format!("Some folders failed:\n{details}"));
             }
             close_progress_window(&ui);
         });
@@ -2478,8 +2693,9 @@ fn hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder,
-        create_formats_for_ui, parse_dropped_path, parse_elevated_extract, parse_elevated_output,
-        progress_ui_text, run_with_startup_argument, unique_path,
+        create_formats_for_ui, parse_dropped_path, parse_elevated_batch_output,
+        parse_elevated_extract, parse_elevated_output, progress_ui_text, run_with_startup_argument,
+        unique_path,
     };
     use crate::archive::CreateFormat;
     use crate::tasks::{ProgressPhase, ProgressSnapshot};
@@ -2555,6 +2771,45 @@ mod tests {
         let (destination, sources) = parse_elevated_output(&args[2..], false).expect("normal CLI");
         assert_eq!(destination, None);
         assert_eq!(sources, vec![OsString::from(r"C:\Windows\Input folder")]);
+    }
+
+    #[test]
+    fn elevated_per_folder_create_retry_keeps_each_destination() {
+        let args = vec![
+            OsString::from("--output"),
+            OsString::from(r"C:\Windows\one.zip"),
+            OsString::from(r"C:\Temp\one"),
+            OsString::from("--output"),
+            OsString::from(r"C:\Windows\two.7z"),
+            OsString::from(r"C:\Temp\two"),
+        ];
+        let parsed = parse_elevated_batch_output(&args, true).expect("valid batch retry");
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    Some(PathBuf::from(r"C:\Windows\one.zip")),
+                    OsString::from(r"C:\Temp\one"),
+                ),
+                (
+                    Some(PathBuf::from(r"C:\Windows\two.7z")),
+                    OsString::from(r"C:\Temp\two"),
+                ),
+            ]
+        );
+
+        let normal = parse_elevated_batch_output(
+            &[OsString::from(r"C:\Temp\one"), OsString::from(r"C:\Temp\two")],
+            false,
+        )
+        .expect("valid normal batch invocation");
+        assert_eq!(
+            normal,
+            vec![
+                (None, OsString::from(r"C:\Temp\one")),
+                (None, OsString::from(r"C:\Temp\two")),
+            ]
+        );
     }
 
     #[test]
