@@ -1682,6 +1682,7 @@ fn start_listing(
                         return;
                     }
                     ui.set_selection_state(0);
+                    ui.set_selection_count(0);
                     ui.set_archive_title(archive_name.into());
                     ui.set_current_folder("".into());
                     ui.set_has_archive(true);
@@ -2665,6 +2666,7 @@ fn close_archive(ui: &AppWindow, state: &AppState) {
     ui.set_has_archive(false);
     ui.set_can_go_up(false);
     ui.set_selection_state(0);
+    ui.set_selection_count(0);
     ui.set_status_text("Archive closed".into());
     ui.set_summary_text("No archive open".into());
 }
@@ -2672,6 +2674,7 @@ fn close_archive(ui: &AppWindow, state: &AppState) {
 fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
     let display = state.display.borrow();
     let selected = state.selected.borrow();
+    let selection_count = i32::try_from(selected.len()).unwrap_or(i32::MAX);
     let state_value = if display.is_empty() || selected.is_empty() {
         0
     } else if display
@@ -2684,6 +2687,7 @@ fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
     };
     if let Some(ui) = weak.upgrade() {
         ui.set_selection_state(state_value);
+        ui.set_selection_count(selection_count);
     }
 }
 

@@ -148,6 +148,16 @@ fn bundled_7z_create_extract_round_trip() {
         )
         .expect("create 7z archive");
 
+    let listing = engine
+        .list(&archive, None, 0, &quiet, &cancel)
+        .expect("list 7z archive");
+    let hello = listing
+        .entries
+        .iter()
+        .find(|entry| entry.display_path.ends_with("hello.txt"))
+        .expect("7z listing contains hello.txt");
+    assert!(hello.compressed_size.is_some());
+
     let output = work.0.join("out");
     engine
         .extract(

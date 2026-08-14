@@ -70,6 +70,7 @@ mod platform_impl {
     const KPID_PATH: u32 = 3;
     const KPID_IS_DIR: u32 = 6;
     const KPID_SIZE: u32 = 7;
+    const KPID_PACK_SIZE: u32 = 8;
     const KPID_MTIME: u32 = 12;
     const KPID_ENCRYPTED: u32 = 15;
 
@@ -4015,6 +4016,22 @@ mod platform_impl {
                 )?;
             }
 
+            let mut packed_size_prop = PropVariant::empty();
+            require_hr(
+                in_archive.get_property(index, KPID_PACK_SIZE, &mut packed_size_prop),
+                "reading 7z entry packed size",
+            )?;
+            let compressed_size = packed_size_prop.as_u64();
+            packed_size_prop.clear();
+            if let Some(compressed_size) = compressed_size {
+                checked_add_with_limit(
+                    0,
+                    compressed_size,
+                    MAX_LIST_DECLARED_BYTES,
+                    "7z listing declared packed size",
+                )?;
+            }
+
             let mut mtime_prop = PropVariant::empty();
             require_hr(
                 in_archive.get_property(index, KPID_MTIME, &mut mtime_prop),
@@ -4042,7 +4059,7 @@ mod platform_impl {
                 path,
                 display_path,
                 size,
-                compressed_size: None,
+                compressed_size,
                 modified_unix_seconds,
                 kind: if is_dir {
                     ArchiveEntryKind::Directory

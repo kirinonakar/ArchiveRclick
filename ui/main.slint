@@ -521,6 +521,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> encoding-options;
     in-out property <int> encoding-selection: 0;
     in-out property <int> selection-state: 0;
+    in-out property <int> selection-count: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
     in-out property <float> column-name-boundary: 0.28;
@@ -795,11 +796,9 @@ export component AppWindow inherits Window {
                             }
 
                             Text {
-                                text: root.selection-state == 2
-                                    ? (root.language-selection == 1 ? "현재 폴더의 모든 항목 선택됨" : root.language-selection == 2 ? "現在のフォルダーをすべて選択中" : "All items in this folder selected")
-                                    : root.selection-state == 1
-                                        ? (root.language-selection == 1 ? "일부 항목 선택됨" : root.language-selection == 2 ? "一部の項目を選択中" : "Some items selected")
-                                        : "";
+                                text: root.selection-count > 0
+                                    ? (root.language-selection == 1 ? "" + root.selection-count + "개 항목 선택" : root.language-selection == 2 ? "" + root.selection-count + "項目を選択中" : "" + root.selection-count + " items selected")
+                                    : "";
                                 color: Palette.foreground;
                                 opacity: 0.68;
                                 font-size: 11px;
