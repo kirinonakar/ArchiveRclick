@@ -1,4 +1,4 @@
-import { Button, Palette, ProgressIndicator } from "std-widgets.slint";
+import { Button, Palette } from "std-widgets.slint";
 
 // The progress bar gives a quick visual indication; this row keeps the exact
 // values readable while an Explorer operation is running.
@@ -8,14 +8,14 @@ export component ProgressStats inherits Rectangle {
     in property <string> remaining-text;
     in property <string> total-text;
 
-    height: 34px;
+    height: 30px;
     background: Palette.alternate-background;
     border-radius: 6px;
     accessible-role: region;
     accessible-label: "Operation timing";
 
     HorizontalLayout {
-        padding: 7px;
+        padding: 6px;
         spacing: 8px;
 
         Text {
@@ -53,137 +53,6 @@ export component ProgressStats inherits Rectangle {
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
-        }
-    }
-}
-
-export component ProgressOverlay inherits Rectangle {
-    in property <string> operation-title;
-    in property <string> current-file;
-    in property <string> progress-file-percent;
-    in property <string> progress-percent;
-    in property <string> progress-elapsed;
-    in property <string> progress-remaining;
-    in property <string> progress-total;
-    in property <string> detail;
-    in property <float> file-value;
-    in property <float> value;
-
-    callback cancelled();
-
-    background: #00000080;
-    accessible-role: region;
-    accessible-label: root.operation-title;
-
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 680px;
-        height: 326px;
-        background: Palette.background;
-        border-width: 1px;
-        border-color: Palette.border;
-        border-radius: 6px;
-
-        VerticalLayout {
-            padding: 18px;
-            spacing: 10px;
-
-            Text {
-                text: root.operation-title;
-                font-size: 19px;
-                font-weight: 600;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-
-            Text {
-                text: root.current-file;
-                color: Palette.foreground;
-                overflow: elide;
-            }
-
-            HorizontalLayout {
-                height: 26px;
-                spacing: 8px;
-
-                Text {
-                    text: "File";
-                    width: 58px;
-                    color: Palette.foreground;
-                    vertical-alignment: center;
-                }
-
-                ProgressIndicator {
-                    progress: root.file-value;
-                    indeterminate: root.file-value < 0;
-                    horizontal-stretch: 1;
-                    accessible-label: "Current file progress";
-                    accessible-value: root.file-value < 0 ? "Working" : "" + Math.round(root.file-value * 100) + "%";
-                }
-
-                Text {
-                    text: root.progress-file-percent;
-                    width: 48px;
-                    color: Palette.foreground;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-            }
-
-            HorizontalLayout {
-                height: 26px;
-                spacing: 8px;
-
-                Text {
-                    text: "Overall";
-                    width: 58px;
-                    color: Palette.foreground;
-                    vertical-alignment: center;
-                }
-
-                ProgressIndicator {
-                    progress: root.value;
-                    indeterminate: root.value < 0;
-                    horizontal-stretch: 1;
-                    accessible-label: "Overall operation progress";
-                    accessible-value: root.value < 0 ? "Working" : "" + Math.round(root.value * 100) + "%";
-                }
-
-                Text {
-                    text: root.progress-percent;
-                    width: 48px;
-                    color: Palette.foreground;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-            }
-
-            ProgressStats {
-                percent-text: root.progress-percent;
-                elapsed-text: root.progress-elapsed;
-                remaining-text: root.progress-remaining;
-                total-text: root.progress-total;
-            }
-
-            Text {
-                text: root.detail;
-                color: Palette.foreground;
-                wrap: word-wrap;
-                vertical-alignment: center;
-                min-height: 28px;
-            }
-
-            Rectangle { vertical-stretch: 1; }
-
-            HorizontalLayout {
-                Rectangle { horizontal-stretch: 1; }
-
-                Button {
-                    text: "Cancel";
-                    clicked => { root.cancelled(); }
-                }
-            }
         }
     }
 }

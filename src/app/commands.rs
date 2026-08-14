@@ -197,7 +197,9 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         }
     }
 
-    let (ui, state, engine, _writable_formats) = open_main_window()?;
+    let operation_progress_window = Rc::new(RefCell::new(None::<ProgressWindow>));
+    let (ui, state, engine, _writable_formats) =
+        open_main_window(Rc::clone(&operation_progress_window))?;
 
     if let Some(path) = startup_argument.map(PathBuf::from) {
         if path.is_file() {
@@ -208,6 +210,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 path,
                 None,
                 pathname_codepage(ui.get_encoding_selection()),
+                Rc::clone(&operation_progress_window),
             );
         } else {
             ui.set_status_text(format!("Not a file: {}", path.display()).into());
@@ -223,7 +226,9 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 
 /// Builds the main application window and wires it up; shared by the
 /// interactive startup path and the Explorer context-menu operations.
-fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
+fn open_main_window(
+    operation_progress_window: Rc<RefCell<Option<ProgressWindow>>>,
+) -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let column_boundaries = platform::load_column_boundaries();
@@ -245,7 +250,6 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
     ui.set_status_text("Ready".into());
     ui.set_summary_text("No archive open".into());
     ui.set_libarchive_version(engine.version().into());
-    set_initial_progress(&ui);
     ui.set_create_source_summary("Choose files or a folder to archive".into());
     ui.set_create_destination("Choose after selecting Create…".into());
     let font_preference = platform::load_font_preference();
@@ -307,18 +311,26 @@ fn open_main_window() -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateForm
         Rc::clone(&state),
         Arc::clone(&engine),
         writable_formats.clone(),
+        Rc::clone(&operation_progress_window),
     );
 
     let weak = ui.as_weak();
     let state_for_drop = Rc::clone(&state);
     let engine_for_drop = Arc::clone(&engine);
+    let progress_window_for_drop = Rc::clone(&operation_progress_window);
     platform::install_file_drop_handler(
         ui.window(),
         Box::new(move |paths| {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            handle_file_drop(&ui, &state_for_drop, &engine_for_drop, paths);
+            handle_file_drop(
+                &ui,
+                &state_for_drop,
+                &engine_for_drop,
+                paths,
+                Rc::clone(&progress_window_for_drop),
+            );
         }),
     );
 
@@ -926,7 +938,13 @@ fn cleanup_drag_staging_directories() {
     }
 }
 
-fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths: Vec<PathBuf>) {
+fn handle_file_drop(
+    ui: &AppWindow,
+    state: &Rc<AppState>,
+    engine: &Engine,
+    paths: Vec<PathBuf>,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
+) {
     if ui.get_busy()
         || ui.get_password_visible()
         || ui.get_conflict_visible()
@@ -960,6 +978,7 @@ fn handle_file_drop(ui: &AppWindow, state: &Rc<AppState>, engine: &Engine, paths
         path,
         None,
         pathname_codepage(ui.get_encoding_selection()),
+        progress_window,
     );
 }
 
@@ -968,14 +987,13 @@ fn wire_callbacks(
     state: Rc<AppState>,
     engine: Engine,
     writable_formats: Vec<CreateFormat>,
+    operation_progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
-    // Keep the secondary progress window alive on the UI thread while a main
-    // window create/extract worker is running.
-    let operation_progress_window = Rc::new(RefCell::new(None::<ProgressWindow>));
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_open_requested(move || match platform::pick_archive() {
             Ok(Some(path)) => {
                 if let Some(ui) = weak.upgrade() {
@@ -986,6 +1004,7 @@ fn wire_callbacks(
                         path,
                         None,
                         pathname_codepage(ui.get_encoding_selection()),
+                        Rc::clone(&progress_window),
                     );
                 }
             }
@@ -1133,6 +1152,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_encoding_selection_changed(move |selection| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1161,6 +1181,7 @@ fn wire_callbacks(
                 path,
                 password,
                 pathname_codepage(selection),
+                Rc::clone(&progress_window),
             );
         });
     }
@@ -1464,6 +1485,7 @@ fn wire_callbacks(
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
         let weak = ui.as_weak();
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_test_requested(move || {
             let Some(path) = state
                 .listing
@@ -1484,6 +1506,7 @@ fn wire_callbacks(
                         .lock()
                         .expect("password mutex poisoned")
                         .clone(),
+                    Rc::clone(&progress_window),
                 );
             }
         });
@@ -1493,6 +1516,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_password_response(move |password, accepted| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1523,6 +1547,7 @@ fn wire_callbacks(
                     Arc::clone(&engine),
                     path,
                     Some(password),
+                    Rc::clone(&progress_window),
                 );
                 return;
             }
@@ -1547,6 +1572,7 @@ fn wire_callbacks(
                 path,
                 Some(password),
                 pathname_codepage(ui.get_encoding_selection()),
+                Rc::clone(&progress_window),
             );
         });
     }
@@ -1605,6 +1631,7 @@ fn wire_callbacks(
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
+        let progress_window = Rc::clone(&operation_progress_window);
         ui.on_dropped(move |data| {
             let Ok(text) = data.plain_text() else {
                 if let Some(ui) = weak.upgrade() {
@@ -1632,6 +1659,7 @@ fn wire_callbacks(
                     path,
                     None,
                     pathname_codepage(ui.get_encoding_selection()),
+                    Rc::clone(&progress_window),
                 );
             }
         });
@@ -1645,15 +1673,34 @@ fn start_listing(
     path: PathBuf,
     password: Option<String>,
     pathname_codepage: u32,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
-    let cancel = begin_operation(ui, &state, "Opening archive", &path.display().to_string());
+    let progress_title = progress_title_with_filename("Opening archive", &path);
+    let path_display = path.display().to_string();
+    let (cancel, weak_progress) = match begin_progress_window_operation(
+        ui,
+        &state,
+        &progress_window,
+        &progress_title,
+        &path_display,
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            ui.set_status_text(error.clone().into());
+            platform::show_error("Open archive", &error);
+            return;
+        }
+    };
     let open_password = Arc::clone(&state.open_password);
     let pending_password_path = Arc::clone(&state.pending_password_path);
     let sort_column = state.sort_column.get();
     let sort_ascending = state.sort_ascending.get();
     let weak = ui.as_weak();
-    let weak_progress = weak.clone();
-    let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
+    let weak_progress_updates = weak_progress.clone();
+    let weak_progress_finished = weak_progress.clone();
+    let progress = move |snapshot: ProgressSnapshot| {
+        update_progress_window_details(&weak_progress_updates, snapshot)
+    };
     std::thread::spawn(move || {
         let result = engine
             .list(
@@ -1667,6 +1714,9 @@ fn start_listing(
                 super::ArchiveRowModel::prepare_listing(listing, sort_column, sort_ascending)
             });
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(progress_ui) = weak_progress_finished.upgrade() {
+                let _ = progress_ui.hide();
+            }
             finish_operation(&ui);
             match result {
                 Ok((listing, display)) => {
@@ -1711,8 +1761,6 @@ fn start_listing(
                     *pending_password_path
                         .lock()
                         .expect("password-path mutex poisoned") = Some(path.clone());
-                    ui.set_progress_visible(false);
-                    ui.set_busy(false);
                     ui.set_password_value("".into());
                     ui.set_password_operation(
                         format!("Enter the password for {}", path.display()).into(),
@@ -1987,6 +2035,30 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
         if let Some(ui) = weak_for_cancel.upgrade() {
             ui.set_progress_title("Cancelling…".into());
         }
+    });
+    // The title-bar X must behave exactly like the Cancel button: cancel the
+    // running operation (and any pending password prompt) so the worker aborts
+    // and cleans up its temporary files instead of leaving them behind. Keep
+    // the window alive until the worker calls `close_progress_window`; hiding
+    // the only window here would end the event loop and terminate the process
+    // before the worker gets a chance to remove its temporary files.
+    let state_for_close = Rc::clone(&state);
+    let password_for_close = Arc::clone(&state.password_prompt);
+    let weak_for_close = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(token) = state_for_close
+            .cancellation
+            .lock()
+            .expect("cancellation mutex poisoned")
+            .as_ref()
+        {
+            token.cancel();
+        }
+        password_for_close.respond(None);
+        if let Some(ui) = weak_for_close.upgrade() {
+            ui.set_progress_title("Cancelling…".into());
+        }
+        slint::CloseRequestResponse::KeepWindowShown
     });
     let password_for_response = Arc::clone(&state.password_prompt);
     let weak_for_response = ui.as_weak();
@@ -2405,21 +2477,38 @@ fn start_test(
     engine: Engine,
     archive: PathBuf,
     password: Option<String>,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
-    let cancel = begin_operation(
+    let progress_title = progress_title_with_filename("Testing archive", &archive);
+    let archive_display = archive.display().to_string();
+    let (cancel, weak_progress) = match begin_progress_window_operation(
         ui,
         &state,
-        "Testing archive",
-        &archive.display().to_string(),
-    );
+        &progress_window,
+        &progress_title,
+        &archive_display,
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            ui.set_status_text(error.clone().into());
+            platform::show_error("Test archive", &error);
+            return;
+        }
+    };
     let weak = ui.as_weak();
-    let weak_progress = weak.clone();
+    let weak_progress_updates = weak_progress.clone();
+    let weak_progress_finished = weak_progress.clone();
     let open_password = Arc::clone(&state.open_password);
     let pending_test_password_path = Arc::clone(&state.pending_test_password_path);
-    let progress = move |snapshot: ProgressSnapshot| update_progress(&weak_progress, snapshot);
+    let progress = move |snapshot: ProgressSnapshot| {
+        update_progress_window_details(&weak_progress_updates, snapshot)
+    };
     std::thread::spawn(move || {
         let result = engine.test(&archive, password.as_deref(), &progress, &cancel);
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(progress_ui) = weak_progress_finished.upgrade() {
+                let _ = progress_ui.hide();
+            }
             finish_operation(&ui);
             match result {
                 Ok(summary) => {
@@ -2476,25 +2565,6 @@ fn normalize_hint_path(path: &Path) -> PathBuf {
         .collect()
 }
 
-fn begin_operation(
-    ui: &AppWindow,
-    state: &AppState,
-    title: &str,
-    current_file: &str,
-) -> CancellationToken {
-    let cancel = CancellationToken::new();
-    *state
-        .cancellation
-        .lock()
-        .expect("cancellation mutex poisoned") = Some(cancel.clone());
-    ui.set_busy(true);
-    ui.set_progress_visible(true);
-    ui.set_progress_title(title.into());
-    ui.set_progress_file(current_file.into());
-    set_initial_progress(ui);
-    cancel
-}
-
 /// Starts an operation from the main UI but renders progress in the same
 /// standalone window used by Explorer verbs. The strong handle is retained on
 /// the UI thread; workers receive only weak handles and cancellation tokens.
@@ -2517,7 +2587,6 @@ fn begin_progress_window_operation(
         .expect("progress cancellation mutex poisoned") = Some(cancel.clone());
 
     ui.set_busy(true);
-    ui.set_progress_visible(false);
     ui.set_status_text(title.into());
     progress_ui.set_progress_title(title.into());
     progress_ui.set_progress_file(current_file.into());
@@ -2529,32 +2598,10 @@ fn begin_progress_window_operation(
 
 fn finish_operation(ui: &AppWindow) {
     ui.set_busy(false);
-    ui.set_progress_visible(false);
     ui.set_conflict_visible(false);
 }
 
-fn apply_progress_to(ui: &AppWindow, snapshot: &ProgressSnapshot) {
-    let text = progress_ui_text(snapshot);
-    ui.set_progress_file(snapshot.current_file.clone().into());
-    ui.set_progress_file_percent(text.file_percent.into());
-    ui.set_progress_percent(text.percent.into());
-    ui.set_progress_elapsed(text.elapsed.into());
-    ui.set_progress_remaining(text.remaining.into());
-    ui.set_progress_total(text.total.into());
-    ui.set_progress_detail(text.detail.into());
-    ui.set_progress_file_value(text.file_value);
-    ui.set_progress_value(text.value);
-}
-
-fn update_progress(weak: &slint::Weak<AppWindow>, snapshot: ProgressSnapshot) {
-    let weak = weak.clone();
-    let _ = weak.upgrade_in_event_loop(move |ui| {
-        ui.set_progress_title(snapshot.phase.label().into());
-        apply_progress_to(&ui, &snapshot);
-    });
-}
-
-/// Like [`update_progress`], but keeps the current operation title so that a
+/// Keeps the current operation title while progress values stream in, so a
 /// batch operation can show "Extracting archive 2/3" while entries stream in.
 struct UiConflictResolver {
     weak: slint::Weak<AppWindow>,
@@ -2758,18 +2805,6 @@ struct ProgressUiText {
 fn initial_progress_text() -> ProgressUiText {
     let snapshot = ProgressSnapshot::new(crate::tasks::ProgressPhase::Opening);
     progress_ui_text(&snapshot)
-}
-
-fn set_initial_progress(ui: &AppWindow) {
-    let text = initial_progress_text();
-    ui.set_progress_file_percent(text.file_percent.into());
-    ui.set_progress_percent(text.percent.into());
-    ui.set_progress_elapsed(text.elapsed.into());
-    ui.set_progress_remaining(text.remaining.into());
-    ui.set_progress_total(text.total.into());
-    ui.set_progress_detail(text.detail.into());
-    ui.set_progress_file_value(text.file_value);
-    ui.set_progress_value(text.value);
 }
 
 fn set_initial_progress_window(ui: &ProgressWindow) {

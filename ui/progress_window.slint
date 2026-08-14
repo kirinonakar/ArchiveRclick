@@ -27,9 +27,9 @@ export component ProgressWindow inherits Window {
     title: "ArchiveRclick";
     icon: @image-url("../app.png");
     default-font-family: root.font-family == "" ? "Yu Gothic" : root.font-family;
-    preferred-width: 640px;
-    preferred-height: 300px;
-    min-width: 580px;
+    preferred-width: 600px;
+    preferred-height: 280px;
+    min-width: 540px;
     min-height: 280px;
     background: Palette.background;
 
@@ -40,8 +40,8 @@ export component ProgressWindow inherits Window {
     }
 
     VerticalLayout {
-        padding: 18px;
-        spacing: 10px;
+        padding: 12px;
+        spacing: 8px;
 
         Text {
             text: root.progress-title;
@@ -58,7 +58,7 @@ export component ProgressWindow inherits Window {
         }
 
         HorizontalLayout {
-            height: 26px;
+            height: 24px;
             spacing: 8px;
 
             Text {
@@ -86,7 +86,7 @@ export component ProgressWindow inherits Window {
         }
 
         HorizontalLayout {
-            height: 26px;
+            height: 24px;
             spacing: 8px;
 
             Text {
@@ -125,10 +125,12 @@ export component ProgressWindow inherits Window {
             color: Palette.foreground;
             wrap: word-wrap;
             vertical-alignment: center;
-            min-height: 28px;
+            min-height: 24px;
         }
 
-        Rectangle { vertical-stretch: 1; }
+        // Keep the Cancel button close to the content instead of pinning it
+        // to the bottom of the window.
+        Rectangle { height: 12px; }
 
         HorizontalLayout {
             Rectangle { horizontal-stretch: 1; }

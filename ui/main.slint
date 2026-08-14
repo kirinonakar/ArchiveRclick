@@ -6,7 +6,7 @@ import {
     Palette
 } from "std-widgets.slint";
 import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
-import { ConflictOverlay, ProgressOverlay } from "progress.slint";
+import { ConflictOverlay } from "progress.slint";
 
 export struct ArchiveRow {
     selected: bool,
@@ -644,18 +644,6 @@ export component AppWindow inherits Window {
     in-out property <bool> busy;
     in-out property <bool> can-go-up;
 
-    in-out property <bool> progress-visible;
-    in-out property <string> progress-title;
-    in-out property <string> progress-file;
-    in-out property <string> progress-file-percent;
-    in-out property <string> progress-percent;
-    in-out property <string> progress-elapsed;
-    in-out property <string> progress-remaining;
-    in-out property <string> progress-total;
-    in-out property <string> progress-detail;
-    in-out property <float> progress-file-value;
-    in-out property <float> progress-value;
-
     in-out property <bool> conflict-visible;
     in-out property <string> conflict-path;
 
@@ -763,7 +751,7 @@ export component AppWindow inherits Window {
             activated => {
                 if (root.conflict-visible) {
                     root.conflict-response(4);
-                } else if (root.progress-visible || root.busy) {
+                } else if (root.busy) {
                     root.cancel-requested();
                 } else if (root.settings-visible) {
                     root.settings-visible = false;
@@ -1155,20 +1143,6 @@ export component AppWindow inherits Window {
             root.create-requested(format-index, level, thread-index, password, password-confirmation, encrypt-headers);
         }
         cancelled => { root.create-visible = false; }
-    }
-
-    if root.progress-visible : ProgressOverlay {
-        operation-title: root.progress-title;
-        current-file: root.progress-file;
-        progress-file-percent: root.progress-file-percent;
-        progress-percent: root.progress-percent;
-        progress-elapsed: root.progress-elapsed;
-        progress-remaining: root.progress-remaining;
-        progress-total: root.progress-total;
-        detail: root.progress-detail;
-        file-value: root.progress-file-value;
-        value: root.progress-value;
-        cancelled => { root.cancel-requested(); }
     }
 
     if root.conflict-visible : ConflictOverlay {
