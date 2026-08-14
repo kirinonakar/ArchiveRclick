@@ -1,9 +1,9 @@
-//! 7z.dll backend for the 7z and ZIP formats.
+//! 7z.dll backend for reading 7z, ZIP, and RAR formats and creating 7z/ZIP.
 //!
-//! 7z and ZIP archives are listed, extracted, tested, and created with the
-//! bundled 7-Zip DLL (`runtime/x64/7z.dll`) so the format handlers can use
-//! their native multithreaded paths. 7z compression uses LZMA2 and ZIP uses
-//! Deflate; other formats continue to use the libarchive backend.
+//! 7z, ZIP, and RAR archives are listed, extracted, and tested with the bundled
+//! 7-Zip DLL (`runtime/x64/7z.dll`) so solid RAR archives and the native format
+//! handlers are supported. 7z and ZIP can also be created; other formats
+//! continue to use the libarchive backend.
 //!
 //! The DLL is used through the classic 7-Zip COM-style interface: the
 //! exported `CreateObject` function instantiates the 7z format handler, and
@@ -108,6 +108,24 @@ mod platform_impl {
     const MIN_STREAM_BUFFER_SIZE: usize = 4 * 1024;
     const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ReadFormat {
+        SevenZip,
+        Zip,
+        Rar4,
+        Rar5,
+    }
+
+    impl ReadFormat {
+        fn label(self) -> &'static str {
+            match self {
+                Self::SevenZip => "7z",
+                Self::Zip => "ZIP",
+                Self::Rar4 | Self::Rar5 => "RAR",
+            }
+        }
+    }
 
     // FILETIME epoch (1601-01-01) relative to the Unix epoch, in 100ns units
     // and in seconds.
@@ -2346,6 +2364,8 @@ mod platform_impl {
         _library: DynamicLibrary,
         create_object: CreateObjectFn,
         zip_clsid: Guid,
+        rar4_clsid: Option<Guid>,
+        rar5_clsid: Option<Guid>,
         zip_reader_available: bool,
         zip_writer_available: bool,
     }
@@ -2420,6 +2440,26 @@ mod platform_impl {
                 let zip_vtbl = unsafe { *zip_reader_probe.cast::<*const InArchiveVtbl>() };
                 unsafe { ((*zip_vtbl).release)(zip_reader_probe) };
             }
+            // RAR reading is optional for reduced development DLLs. Full
+            // 7-Zip builds expose distinct RAR4 ("Rar") and RAR5 ("Rar5")
+            // handlers, so selecting only by the .rar extension is not enough.
+            let probe_rar_reader = |handler_name: &str| {
+                let rar_clsid = discover_handler_clsid(&library, handler_name)?;
+                let mut rar_probe: *mut c_void = ptr::null_mut();
+                let rar_hr = unsafe {
+                    create_object(&rar_clsid, &IID_IIN_ARCHIVE, &mut rar_probe)
+                };
+                if rar_hr != S_OK || rar_probe.is_null() {
+                    return None;
+                }
+                // SAFETY: the probe is a live IInArchive interface returned
+                // by the DLL and is released exactly once.
+                let rar_vtbl = unsafe { *rar_probe.cast::<*const InArchiveVtbl>() };
+                unsafe { ((*rar_vtbl).release)(rar_probe) };
+                Some(rar_clsid)
+            };
+            let rar4_clsid = probe_rar_reader("rar");
+            let rar5_clsid = probe_rar_reader("rar5");
             let mut zip_probe: *mut c_void = ptr::null_mut();
             // ZIP creation is optional because development builds may stage a
             // 7z-only DLL.  The normal bundled runtime is the full DLL.
@@ -2435,21 +2475,27 @@ mod platform_impl {
                 _library: library,
                 create_object,
                 zip_clsid,
+                rar4_clsid,
+                rar5_clsid,
                 zip_reader_available,
                 zip_writer_available,
             })
         }
 
-        fn create_in_archive(&self, format: CreateFormat) -> ArchiveResult<RawInArchive> {
+        fn create_in_archive(&self, format: ReadFormat) -> ArchiveResult<RawInArchive> {
             let clsid = match format {
-                CreateFormat::SevenZip => &CLSID_C_FORMAT_7Z,
-                CreateFormat::Zip => &self.zip_clsid,
-                _ => {
-                    return Err(ArchiveError::UnsupportedOption(format!(
-                        "7z.dll cannot read {} archives",
-                        format.label()
-                    )));
-                }
+                ReadFormat::SevenZip => &CLSID_C_FORMAT_7Z,
+                ReadFormat::Zip => &self.zip_clsid,
+                ReadFormat::Rar4 => self.rar4_clsid.as_ref().ok_or_else(|| {
+                    ArchiveError::UnsupportedOption(
+                        "the loaded 7z.dll does not provide a RAR4 reader".to_owned(),
+                    )
+                })?,
+                ReadFormat::Rar5 => self.rar5_clsid.as_ref().ok_or_else(|| {
+                    ArchiveError::UnsupportedOption(
+                        "the loaded 7z.dll does not provide a RAR5 reader".to_owned(),
+                    )
+                })?,
             };
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
@@ -2490,11 +2536,12 @@ mod platform_impl {
             Ok(unsafe { RawOutArchive::from_raw(raw) })
         }
 
-        fn can_read(&self, format: CreateFormat) -> bool {
+        fn can_read(&self, format: ReadFormat) -> bool {
             match format {
-                CreateFormat::SevenZip => true,
-                CreateFormat::Zip => self.zip_reader_available,
-                _ => false,
+                ReadFormat::SevenZip => true,
+                ReadFormat::Zip => self.zip_reader_available,
+                ReadFormat::Rar4 => self.rar4_clsid.is_some(),
+                ReadFormat::Rar5 => self.rar5_clsid.is_some(),
             }
         }
     }
@@ -2523,6 +2570,14 @@ mod platform_impl {
         }
 
         pub fn can_read(&self, format: CreateFormat) -> bool {
+            match format {
+                CreateFormat::SevenZip => self.can_read_format(ReadFormat::SevenZip),
+                CreateFormat::Zip => self.can_read_format(ReadFormat::Zip),
+                _ => false,
+            }
+        }
+
+        fn can_read_format(&self, format: ReadFormat) -> bool {
             self.api.can_read(format)
         }
 
@@ -2554,7 +2609,7 @@ mod platform_impl {
     fn read_all_entries(
         api: &Api,
         path: &Path,
-        format: CreateFormat,
+        format: ReadFormat,
         password: Option<&str>,
         pathname_codepage: u32,
         throttled: &ThrottledProgress,
@@ -2575,7 +2630,7 @@ mod platform_impl {
     fn run_extract_worker(
         api: &Api,
         archive: &Path,
-        format: CreateFormat,
+        format: ReadFormat,
         password: Option<&str>,
         pathname_codepage: u32,
         root: PathBuf,
@@ -2701,7 +2756,7 @@ mod platform_impl {
             return run_extract_worker(
                 &api,
                 archive,
-                CreateFormat::Zip,
+                ReadFormat::Zip,
                 password,
                 pathname_codepage,
                 root,
@@ -2738,7 +2793,7 @@ mod platform_impl {
                 run_extract_worker(
                     &api,
                     &archive,
-                    CreateFormat::Zip,
+                    ReadFormat::Zip,
                     password.as_deref(),
                     pathname_codepage,
                     root,
@@ -2827,7 +2882,7 @@ mod platform_impl {
                     "7z.dll could not identify the archive format".to_owned(),
                 )
             })?;
-            let zip_name_records = if format == CreateFormat::Zip {
+            let zip_name_records = if format == ReadFormat::Zip {
                 read_zip_name_records(path)?
             } else {
                 None
@@ -2924,7 +2979,7 @@ mod platform_impl {
                     "7z.dll could not identify the archive format".to_owned(),
                 )
             })?;
-            let zip_name_records = if format == CreateFormat::Zip {
+            let zip_name_records = if format == ReadFormat::Zip {
                 read_zip_name_records(archive)?
             } else {
                 None
@@ -3019,7 +3074,7 @@ mod platform_impl {
             let total_entries = options.total_entries_hint.unwrap_or(items.len() as u64);
             let total_bytes = options.total_bytes_hint.or(Some(selected_bytes));
             let summary =
-                if format == CreateFormat::Zip && assume_targets_missing && indices.len() >= 256 {
+                if format == ReadFormat::Zip && assume_targets_missing && indices.len() >= 256 {
                     run_parallel_zip_extract(
                         Arc::clone(&self.api),
                         archive,
@@ -3454,7 +3509,7 @@ mod platform_impl {
             cancel: &CancellationToken,
         ) -> ArchiveResult<ArchiveListing> {
             if let Some(sevenzip) = &self.sevenzip {
-                if archive_format(path).is_some_and(|format| sevenzip.can_read(format)) {
+                if archive_format(path).is_some_and(|format| sevenzip.can_read_format(format)) {
                     return sevenzip.list(path, password, pathname_codepage, progress, cancel);
                 }
             }
@@ -3472,7 +3527,7 @@ mod platform_impl {
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
             if let Some(sevenzip) = &self.sevenzip {
-                if archive_format(archive).is_some_and(|format| sevenzip.can_read(format)) {
+                if archive_format(archive).is_some_and(|format| sevenzip.can_read_format(format)) {
                     return sevenzip.extract(
                         archive,
                         destination,
@@ -3520,7 +3575,7 @@ mod platform_impl {
             cancel: &CancellationToken,
         ) -> ArchiveResult<OperationSummary> {
             if let Some(sevenzip) = &self.sevenzip {
-                if archive_format(archive).is_some_and(|format| sevenzip.can_read(format)) {
+                if archive_format(archive).is_some_and(|format| sevenzip.can_read_format(format)) {
                     return sevenzip.test(archive, password, progress, cancel);
                 }
             }
@@ -3538,16 +3593,18 @@ mod platform_impl {
     // Shared helpers
     // ------------------------------------------------------------------
 
-    fn archive_format(path: &Path) -> Option<CreateFormat> {
+    fn archive_format(path: &Path) -> Option<ReadFormat> {
         let Ok(mut file) = File::open(path) else {
             return None;
         };
-        let mut signature = [0u8; 6];
+        let mut signature = [0u8; 8];
         let Ok(amount) = file.read(&mut signature) else {
             return None;
         };
-        if amount == SEVENZIP_SIGNATURE.len() && signature == SEVENZIP_SIGNATURE {
-            return Some(CreateFormat::SevenZip);
+        if amount >= SEVENZIP_SIGNATURE.len()
+            && signature[..SEVENZIP_SIGNATURE.len()] == SEVENZIP_SIGNATURE
+        {
+            return Some(ReadFormat::SevenZip);
         }
         if amount >= 4
             && signature[0] == b'P'
@@ -3555,7 +3612,13 @@ mod platform_impl {
             && matches!(signature[2], 0x03 | 0x05 | 0x07)
             && matches!(signature[3], 0x04 | 0x06 | 0x08)
         {
-            return Some(CreateFormat::Zip);
+            return Some(ReadFormat::Zip);
+        }
+        if amount >= 7 && signature[..7] == *b"Rar!\x1a\x07\x00" {
+            return Some(ReadFormat::Rar4);
+        }
+        if amount >= 8 && signature == *b"Rar!\x1a\x07\x01\x00" {
+            return Some(ReadFormat::Rar5);
         }
         None
     }
@@ -3584,11 +3647,11 @@ mod platform_impl {
     /// automatic mode samples the raw central-directory names with the
     /// detector shared by the libarchive backend.
     fn effective_zip_codepage(
-        format: CreateFormat,
+        format: ReadFormat,
         requested: u32,
         records: Option<&[ZipNameRecord]>,
     ) -> u32 {
-        if format != CreateFormat::Zip || requested != 0 {
+        if format != ReadFormat::Zip || requested != 0 {
             return requested;
         }
         records.map(detect_zip_codepage).unwrap_or(0)
@@ -3901,7 +3964,7 @@ mod platform_impl {
     fn open_for_read(
         api: &Api,
         path: &Path,
-        format: CreateFormat,
+        format: ReadFormat,
         password: Option<&str>,
         _pathname_codepage: u32,
         cancel: &CancellationToken,
@@ -4540,8 +4603,8 @@ mod platform_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, SevenZipEngine,
-            archive_format, completed_compression_files, filetime_to_unix_seconds,
+            ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, ReadFormat,
+            SevenZipEngine, archive_format, completed_compression_files, filetime_to_unix_seconds,
             split_callback_progress, split_compression_progress, unix_seconds_to_filetime,
         };
         use crate::archive::ThreadCount;
@@ -4661,8 +4724,14 @@ mod platform_impl {
             drop(file);
             let zip = directory.join("sample.zip");
             std::fs::write(&zip, b"PK\x03\x04junk").expect("create zip file");
-            assert_eq!(archive_format(&sevenzip), Some(CreateFormat::SevenZip));
-            assert_eq!(archive_format(&zip), Some(CreateFormat::Zip));
+            let rar4 = directory.join("sample-rar4.rar");
+            std::fs::write(&rar4, b"Rar!\x1a\x07\x00junk").expect("create RAR4 file");
+            let rar5 = directory.join("sample-rar5.rar");
+            std::fs::write(&rar5, b"Rar!\x1a\x07\x01\x00junk").expect("create RAR5 file");
+            assert_eq!(archive_format(&sevenzip), Some(ReadFormat::SevenZip));
+            assert_eq!(archive_format(&zip), Some(ReadFormat::Zip));
+            assert_eq!(archive_format(&rar4), Some(ReadFormat::Rar4));
+            assert_eq!(archive_format(&rar5), Some(ReadFormat::Rar5));
             assert_eq!(archive_format(&directory.join("missing.7z")), None);
             let _ = std::fs::remove_dir_all(&directory);
         }
@@ -4699,6 +4768,8 @@ mod platform_impl {
                 let engine =
                     SevenZipEngine::load_from_path(&candidate).expect("bundled 7z.dll loads");
                 assert!(engine.can_read(CreateFormat::Zip));
+                assert!(engine.can_read_format(ReadFormat::Rar4));
+                assert!(engine.can_read_format(ReadFormat::Rar5));
                 assert_eq!(
                     engine.writable_formats(),
                     vec![CreateFormat::Zip, CreateFormat::SevenZip]
