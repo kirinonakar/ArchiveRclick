@@ -642,6 +642,72 @@ fn cancelled_7z_extraction_removes_temporary_file() {
 }
 
 #[test]
+fn split_zip_and_7z_round_trip_through_volume_files() {
+    let work = Work::new();
+    let input = work.0.join("split-payload");
+    fs::create_dir_all(&input).unwrap();
+    let mut state = 0x1234_5678_u32;
+    let payload: Vec<u8> = (0..32_768)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect();
+    fs::write(input.join("large.bin"), &payload).unwrap();
+
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    for (format, extension) in [(CreateFormat::Zip, "zip"), (CreateFormat::SevenZip, "7z")] {
+        let archive = work.0.join(format!("split.{extension}"));
+        engine
+            .create(
+                &archive,
+                std::slice::from_ref(&input),
+                &CreateOptions {
+                    format,
+                    split_size: Some(1024),
+                    ..CreateOptions::default()
+                },
+                &quiet,
+                &cancel,
+            )
+            .unwrap_or_else(|error| panic!("create split {extension} archive: {error}"));
+
+        let first = work.0.join(format!("split.{extension}.001"));
+        let second = work.0.join(format!("split.{extension}.002"));
+        assert!(first.is_file(), "missing first {extension} volume");
+        assert!(second.is_file(), "missing second {extension} volume");
+        assert!(fs::metadata(&first).unwrap().len() <= 1024);
+
+        let listing = engine
+            .list(&first, None, 0, &quiet, &cancel)
+            .unwrap_or_else(|error| panic!("list split {extension} archive: {error}"));
+        assert!(listing
+            .entries
+            .iter()
+            .any(|entry| entry.display_path.ends_with("large.bin")));
+
+        let output = work.0.join(format!("out-{extension}"));
+        engine
+            .extract(
+                &first,
+                &output,
+                &ExtractOptions::default(),
+                &quiet,
+                &Overwrite,
+                &cancel,
+            )
+            .unwrap_or_else(|error| panic!("extract split {extension} archive: {error}"));
+        assert_eq!(fs::read(output.join("large.bin")).unwrap(), payload);
+        engine
+            .test(&first, None, &quiet, &cancel)
+            .unwrap_or_else(|error| panic!("test split {extension} archive: {error}"));
+    }
+}
+
+#[test]
 fn bundled_7z_create_handles_multiple_inputs_and_password() {
     let work = Work::new();
     let folder = work.0.join("folder");

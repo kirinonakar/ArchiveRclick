@@ -2008,6 +2008,11 @@ mod platform_impl {
                     "select at least one input".to_owned(),
                 ));
             }
+            if options.split_size.is_some() {
+                return Err(ArchiveError::UnsupportedOption(
+                    "split compression requires the bundled 7z backend".to_owned(),
+                ));
+            }
             let parent = destination
                 .parent()
                 .filter(|path| !path.as_os_str().is_empty())

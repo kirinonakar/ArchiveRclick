@@ -5,6 +5,7 @@ import {
     ListView,
     Palette
 } from "std-widgets.slint";
+import { AppTheme } from "theme.slint";
 import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
 import { ConflictOverlay } from "progress.slint";
 
@@ -70,7 +71,7 @@ component CodePageComboBox inherits Rectangle {
     height: 32px;
     background: root.enabled ? Palette.control-background : Palette.background;
     border-width: 1px;
-    border-color: root.enabled ? Palette.border : Palette.background;
+    border-color: root.enabled ? AppTheme.border : Palette.background;
     border-radius: 3px;
     clip: true;
     accessible-role: combobox;
@@ -97,7 +98,7 @@ component CodePageComboBox inherits Rectangle {
         width: 12px;
         height: 12px;
         source: @image-url("dropdown-arrow.svg");
-        colorize: root.enabled ? Palette.foreground : Palette.border;
+        colorize: root.enabled ? Palette.foreground : AppTheme.border;
     }
 
     control-touch := TouchArea {
@@ -144,7 +145,7 @@ component CodePageComboBox inherits Rectangle {
             height: parent.height;
             background: Palette.alternate-background;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: AppTheme.border;
             border-radius: 4px;
             clip: true;
 
@@ -215,7 +216,7 @@ component HeaderCell inherits Rectangle {
         width: 1px;
         height: parent.height - 10px;
         background: resize-handle.has-hover || resize-handle.pressed
-            ? Palette.accent-background : Palette.border;
+            ? Palette.accent-background : AppTheme.border;
         opacity: resize-handle.has-hover || resize-handle.pressed ? 0.9 : 0.32;
     }
 
@@ -653,6 +654,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> create-formats;
     in-out property <bool> create-has-sources;
     in-out property <int> create-thread-selection: 0;
+    in-out property <int> create-volume-selection: 0;
     in-out property <bool> create-header-encryption: false;
 
     in-out property <bool> password-visible;
@@ -694,7 +696,7 @@ export component AppWindow inherits Window {
     callback prepare-create-requested();
     callback choose-create-files-requested();
     callback choose-create-folder-requested();
-    callback create-requested(int, int, int, string, string, bool);
+    callback create-requested(int, int, int, int, string, string, bool);
     callback test-requested();
     callback cancel-requested();
     callback conflict-response(int);
@@ -849,7 +851,7 @@ export component AppWindow inherits Window {
                 // path bar below.
                 Rectangle {
                     height: 1px;
-                    background: Palette.border;
+                    background: AppTheme.border;
                 }
 
                 // ---------------- Path bar ----------------
@@ -884,7 +886,7 @@ export component AppWindow inherits Window {
                             border-radius: 8px;
                             background: Palette.control-background;
                             border-width: 1px;
-                            border-color: Palette.border;
+                            border-color: AppTheme.border;
                             clip: true;
 
                             folder-path-text := Text {
@@ -1075,7 +1077,7 @@ export component AppWindow inherits Window {
                 // ---------------- Status bar ----------------
                 Rectangle {
                     height: 1px;
-                    background: Palette.border;
+                    background: AppTheme.border;
                 }
 
                 Rectangle {
@@ -1135,12 +1137,13 @@ export component AppWindow inherits Window {
         available-formats: root.create-formats;
         has-sources: root.create-has-sources;
         thread-selection: root.create-thread-selection;
+        volume-selection: root.create-volume-selection;
         header-encryption-default: root.create-header-encryption;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
-        accepted(format-index, level, thread-index, password, password-confirmation, encrypt-headers) => {
+        accepted(format-index, level, thread-index, volume-index, password, password-confirmation, encrypt-headers) => {
             root.create-visible = false;
-            root.create-requested(format-index, level, thread-index, password, password-confirmation, encrypt-headers);
+            root.create-requested(format-index, level, thread-index, volume-index, password, password-confirmation, encrypt-headers);
         }
         cancelled => { root.create-visible = false; }
     }
@@ -1180,7 +1183,7 @@ export component AppWindow inherits Window {
             height: 220px;
             background: Palette.background;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: AppTheme.border;
             border-radius: 12px;
             drop-shadow-blur: 18px;
             drop-shadow-color: #00000055;

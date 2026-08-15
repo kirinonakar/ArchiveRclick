@@ -1,4 +1,5 @@
 import { Button, LineEdit, Palette, ProgressIndicator } from "std-widgets.slint";
+import { AppTheme } from "theme.slint";
 import { ProgressStats } from "progress.slint";
 
 // Small progress-only window shown while Explorer right-click operations run.
@@ -154,7 +155,7 @@ export component ProgressWindow inherits Window {
             height: 220px;
             background: Palette.background;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: AppTheme.border;
             border-radius: 12px;
             drop-shadow-blur: 18px;
             drop-shadow-color: #00000055;

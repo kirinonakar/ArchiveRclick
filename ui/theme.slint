@@ -1,0 +1,8 @@
+import { Palette } from "std-widgets.slint";
+
+// Keep the original light-theme border color while using a visible gray in
+// dark mode instead of the default Fluent border opacity.
+export global AppTheme {
+    out property <brush> border: Palette.color-scheme == ColorScheme.dark
+        ? #555555 : #D6D9DE;
+}

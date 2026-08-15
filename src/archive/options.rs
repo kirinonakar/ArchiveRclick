@@ -149,6 +149,71 @@ pub enum ThreadCount {
     All,
 }
 
+/// Volume sizes offered by the create dialog.  The values use the same
+/// binary units as 7-Zip's volume-size input (1 GB = 1024^3 bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeSizePreset {
+    None,
+    TenMb,
+    FiftyMb,
+    OneHundredMb,
+    ThreeHundredMb,
+    SixHundredFiftyMb,
+    OneGb,
+    FourGb,
+    TwentyThreeGb,
+    NinetyTwoPointFourGb,
+}
+
+impl VolumeSizePreset {
+    pub const ALL: [Self; 10] = [
+        Self::None,
+        Self::TenMb,
+        Self::FiftyMb,
+        Self::OneHundredMb,
+        Self::ThreeHundredMb,
+        Self::SixHundredFiftyMb,
+        Self::OneGb,
+        Self::FourGb,
+        Self::TwentyThreeGb,
+        Self::NinetyTwoPointFourGb,
+    ];
+
+    pub fn bytes(self) -> Option<u64> {
+        const MB: u64 = 1024 * 1024;
+        const GB: u64 = 1024 * 1024 * 1024;
+
+        match self {
+            Self::None => None,
+            Self::TenMb => Some(10 * MB),
+            Self::FiftyMb => Some(50 * MB),
+            Self::OneHundredMb => Some(100 * MB),
+            Self::ThreeHundredMb => Some(300 * MB),
+            Self::SixHundredFiftyMb => Some(650 * MB),
+            Self::OneGb => Some(GB),
+            Self::FourGb => Some(4 * GB),
+            Self::TwentyThreeGb => Some(23 * GB),
+            // 92.4 GiB, rounded to the nearest byte.  This corresponds to
+            // the familiar 100 GB optical-media capacity label.
+            Self::NinetyTwoPointFourGb => Some(99_213_744_538),
+        }
+    }
+
+    pub fn from_ui_index(index: i32) -> Self {
+        Self::ALL
+            .get(index.max(0) as usize)
+            .copied()
+            .unwrap_or(Self::None)
+    }
+
+    pub fn ui_index(self) -> i32 {
+        Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0) as i32
+    }
+}
+
 impl ThreadCount {
     pub const ALL: [Self; 7] = [
         Self::Auto,
@@ -231,6 +296,9 @@ impl ThreadCount {
 pub struct CreateOptions {
     pub format: CreateFormat,
     pub compression_level: u8,
+    /// Optional maximum physical size of each output volume.  When set, the
+    /// 7z backend writes `<archive>.<nnn>` parts through a multi-volume stream.
+    pub split_size: Option<u64>,
     pub password: Option<String>,
     /// Encrypt 7z headers so filenames and directory names require the
     /// archive password to be listed.
@@ -244,6 +312,7 @@ impl fmt::Debug for CreateOptions {
             .debug_struct("CreateOptions")
             .field("format", &self.format)
             .field("compression_level", &self.compression_level)
+            .field("split_size", &self.split_size)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("encrypt_headers", &self.encrypt_headers)
             .field("threads", &self.threads)
@@ -256,6 +325,7 @@ impl Default for CreateOptions {
         Self {
             format: CreateFormat::Zip,
             compression_level: 6,
+            split_size: None,
             password: None,
             encrypt_headers: false,
             threads: ThreadCount::Auto,
@@ -265,7 +335,7 @@ impl Default for CreateOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateOptions, ExtractOptions};
+    use super::{CreateOptions, ExtractOptions, VolumeSizePreset};
 
     #[test]
     fn extract_options_debug_redacts_password() {
@@ -291,5 +361,27 @@ mod tests {
         let rendered = format!("{options:?}");
         assert!(!rendered.contains(secret));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn volume_size_presets_round_trip_through_ui_indices() {
+        let expected = [
+            None,
+            Some(10 * 1024 * 1024),
+            Some(50 * 1024 * 1024),
+            Some(100 * 1024 * 1024),
+            Some(300 * 1024 * 1024),
+            Some(650 * 1024 * 1024),
+            Some(1024 * 1024 * 1024),
+            Some(4 * 1024 * 1024 * 1024),
+            Some(23 * 1024 * 1024 * 1024),
+            Some(99_213_744_538),
+        ];
+
+        for (index, expected_bytes) in expected.into_iter().enumerate() {
+            let preset = VolumeSizePreset::from_ui_index(index as i32);
+            assert_eq!(preset.bytes(), expected_bytes);
+            assert_eq!(preset.ui_index(), index as i32);
+        }
     }
 }

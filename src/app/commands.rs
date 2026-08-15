@@ -16,7 +16,7 @@ use crate::{
     archive::{
         ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
         CreateFormat, CreateOptions, ExtractOptions, ExtractSelection, InitialConflictPolicy,
-        SevenZipEngine, ThreadCount, libarchive::LibArchiveEngine,
+        SevenZipEngine, ThreadCount, VolumeSizePreset, libarchive::LibArchiveEngine,
     },
     platform,
     tasks::{CancellationToken, ProgressSnapshot},
@@ -47,6 +47,32 @@ fn create_formats_for_ui(formats: Vec<CreateFormat>) -> Vec<CreateFormat> {
         .into_iter()
         .filter(|format| matches!(*format, CreateFormat::Zip | CreateFormat::SevenZip))
         .collect()
+}
+
+const ARCHIVE_DROP_EXTENSIONS: &[&str] = &[
+    "zip", "zipx", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "cab", "lha", "lzh",
+    "tgz", "tbz2", "txz",
+];
+
+fn is_archive_drop_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let extension_matches = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            ARCHIVE_DROP_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        });
+    let split_volume_matches = name.rsplit_once('.').is_some_and(|(base, suffix)| {
+        (base.ends_with(".zip") || base.ends_with(".7z"))
+            && suffix.len() >= 3
+            && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    extension_matches || split_volume_matches
 }
 
 // Font choices offered in Settings. The "auto" entry resolves at startup to
@@ -202,7 +228,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         open_main_window(Rc::clone(&operation_progress_window))?;
 
     if let Some(path) = startup_argument.map(PathBuf::from) {
-        if path.is_file() {
+        if path.is_file() && is_archive_drop_path(&path) {
             start_listing(
                 &ui,
                 Rc::clone(&state),
@@ -211,6 +237,8 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 None,
                 pathname_codepage(ui.get_encoding_selection()),
             );
+        } else if path.is_file() {
+            ui.set_status_text(format!("Not a supported archive: {}", path.display()).into());
         } else {
             ui.set_status_text(format!("Not a file: {}", path.display()).into());
         }
@@ -962,6 +990,10 @@ fn handle_file_drop(
         ui.set_status_text("The drop did not contain a file or folder".into());
         return;
     };
+    if !is_archive_drop_path(&path) {
+        ui.set_status_text(format!("Not a supported archive: {}", path.display()).into());
+        return;
+    }
     start_listing(
         ui,
         Rc::clone(state),
@@ -1365,6 +1397,7 @@ fn wire_callbacks(
                 let thread_selection =
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index();
                 ui.set_create_thread_selection(thread_selection);
+                ui.set_create_volume_selection(VolumeSizePreset::None.ui_index());
                 ui.set_create_visible(true);
             }
         });
@@ -1409,6 +1442,7 @@ fn wire_callbacks(
             move |format_index,
                   level,
                   thread_index,
+                  volume_index,
                   password,
                   password_confirmation,
                   encrypt_headers| {
@@ -1444,9 +1478,13 @@ fn wire_callbacks(
                             return;
                         }
                     };
+                let split_size = matches!(format, CreateFormat::Zip | CreateFormat::SevenZip)
+                    .then(|| VolumeSizePreset::from_ui_index(volume_index).bytes())
+                    .flatten();
                 let options = CreateOptions {
                     format,
                     compression_level: level.clamp(0, 9) as u8,
+                    split_size,
                     password: (!password.is_empty()).then(|| password.to_string()),
                     encrypt_headers,
                     threads: ThreadCount::from_ui_index(thread_index),
@@ -1632,6 +1670,14 @@ fn wire_callbacks(
             if !path.is_file() {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_status_text(format!("Not a file: {}", path.display()).into());
+                }
+                return;
+            }
+            if !is_archive_drop_path(&path) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(
+                        format!("Not a supported archive: {}", path.display()).into(),
+                    );
                 }
                 return;
             }
@@ -2898,7 +2944,7 @@ fn hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder,
-        create_formats_for_ui, parse_dropped_path, parse_elevated_batch_output,
+        create_formats_for_ui, is_archive_drop_path, parse_dropped_path, parse_elevated_batch_output,
         parse_elevated_extract, parse_elevated_output, progress_ui_text, run_with_startup_argument,
         unique_path,
     };
@@ -2924,6 +2970,14 @@ mod tests {
             parse_dropped_path("file:///C:/Temp/My%20Archive.zip\r\n"),
             Some(PathBuf::from(r"C:\Temp\My Archive.zip"))
         );
+    }
+
+    #[test]
+    fn drop_filter_rejects_media_files_and_accepts_archive_names() {
+        assert!(!is_archive_drop_path(Path::new("movie.mkv")));
+        assert!(is_archive_drop_path(Path::new("backup.ZIP")));
+        assert!(is_archive_drop_path(Path::new("backup.7z.001")));
+        assert!(!is_archive_drop_path(Path::new("movie.mkv.001")));
     }
 
     #[test]

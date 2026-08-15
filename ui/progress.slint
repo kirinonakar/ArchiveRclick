@@ -1,4 +1,5 @@
 import { Button, Palette } from "std-widgets.slint";
+import { AppTheme } from "theme.slint";
 
 // The progress bar gives a quick visual indication; this row keeps the exact
 // values readable while an Explorer operation is running.
@@ -73,7 +74,7 @@ export component ConflictOverlay inherits Rectangle {
         height: 228px;
         background: Palette.background;
         border-width: 1px;
-        border-color: Palette.border;
+        border-color: AppTheme.border;
         border-radius: 6px;
 
         VerticalLayout {

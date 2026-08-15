@@ -21,7 +21,7 @@ mod platform_impl {
         cell::Cell,
         collections::{BTreeMap, HashSet, VecDeque},
         env,
-        ffi::c_void,
+        ffi::{OsString, c_void},
         fs::{self, File, OpenOptions},
         io::{BufReader, Read, Seek, SeekFrom, Write},
         mem,
@@ -115,6 +115,8 @@ mod platform_impl {
         Zip,
         Rar4,
         Rar5,
+        SevenZipVolume,
+        ZipVolume,
     }
 
     impl ReadFormat {
@@ -123,7 +125,25 @@ mod platform_impl {
                 Self::SevenZip => "7z",
                 Self::Zip => "ZIP",
                 Self::Rar4 | Self::Rar5 => "RAR",
+                Self::SevenZipVolume => "7z split volume",
+                Self::ZipVolume => "ZIP split volume",
             }
+        }
+
+        fn base(self) -> Self {
+            match self {
+                Self::SevenZipVolume => Self::SevenZip,
+                Self::ZipVolume => Self::Zip,
+                other => other,
+            }
+        }
+
+        fn is_zip(self) -> bool {
+            matches!(self, Self::Zip | Self::ZipVolume)
+        }
+
+        fn is_volume(self) -> bool {
+            matches!(self, Self::SevenZipVolume | Self::ZipVolume)
         }
     }
 
@@ -812,6 +832,185 @@ mod platform_impl {
         S_OK
     }
 
+    static MULTI_IN_STREAM_VTBL: InStreamVtbl = InStreamVtbl {
+        query_interface: multi_in_stream_query_interface,
+        add_ref: stream_add_ref,
+        release: multi_in_stream_release,
+        read: multi_in_stream_read,
+        seek: multi_in_stream_seek,
+    };
+
+    /// Presents `<archive>.<nnn>` files as one logical input stream.  7-Zip's
+    /// volume writer splits the byte stream outside the format handler, so
+    /// joining the parts again is the inverse operation for ZIP and 7z.
+    #[repr(C)]
+    struct MultiInStream {
+        vtbl: &'static InStreamVtbl,
+        refs: AtomicU32,
+        files: Mutex<Vec<BufReader<File>>>,
+        starts: Vec<u64>,
+        lengths: Vec<u64>,
+        total_length: u64,
+        position: AtomicU64,
+    }
+
+    impl MultiInStream {
+        fn open(paths: &[PathBuf]) -> ArchiveResult<Self> {
+            if paths.is_empty() {
+                return Err(ArchiveError::InvalidInput(
+                    "split archive has no volume files".to_owned(),
+                ));
+            }
+            let mut files = Vec::with_capacity(paths.len());
+            let mut starts = Vec::with_capacity(paths.len());
+            let mut lengths = Vec::with_capacity(paths.len());
+            let mut total_length = 0u64;
+            for path in paths {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+                    .open(path)
+                    .map_err(|error| ArchiveError::io(path, error))?;
+                let length = file
+                    .metadata()
+                    .map_err(|error| ArchiveError::io(path, error))?
+                    .len();
+                starts.push(total_length);
+                lengths.push(length);
+                total_length = total_length.checked_add(length).ok_or_else(|| {
+                    ArchiveError::LimitExceeded("split archive size overflow".to_owned())
+                })?;
+                files.push(BufReader::with_capacity(STREAM_BUFFER_SIZE, file));
+            }
+            Ok(Self {
+                vtbl: &MULTI_IN_STREAM_VTBL,
+                refs: AtomicU32::new(2),
+                files: Mutex::new(files),
+                starts,
+                lengths,
+                total_length,
+                position: AtomicU64::new(0),
+            })
+        }
+
+        fn volume_index(&self, position: u64) -> usize {
+            self.starts
+                .partition_point(|start| *start <= position)
+                .saturating_sub(1)
+        }
+    }
+
+    unsafe extern "system" fn multi_in_stream_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        stream_query_interface(
+            this,
+            iid,
+            out,
+            &[IID_ISEQUENTIAL_IN_STREAM, IID_IIN_STREAM],
+            stream_add_ref,
+        )
+    }
+
+    unsafe extern "system" fn multi_in_stream_release(this: *mut c_void) -> u32 {
+        let stream = unsafe { &*(this as *const MultiInStream) };
+        let remaining = stream.refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1);
+        if remaining == 0 {
+            unsafe { drop(Box::from_raw(this as *mut MultiInStream)) };
+        }
+        remaining
+    }
+
+    unsafe extern "system" fn multi_in_stream_read(
+        this: *mut c_void,
+        data: *mut c_void,
+        size: u32,
+        processed: *mut u32,
+    ) -> i32 {
+        if !processed.is_null() {
+            unsafe { *processed = 0 };
+        }
+        if this.is_null() || (data.is_null() && size != 0) {
+            return E_INVALIDARG;
+        }
+        if size == 0 {
+            return S_OK;
+        }
+        let stream = unsafe { &*(this as *const MultiInStream) };
+        let mut files = stream
+            .files
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut position = stream.position.load(Ordering::Acquire);
+        let mut remaining = size as usize;
+        let mut destination = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), remaining) };
+
+        while remaining != 0 && position < stream.total_length {
+            let index = stream.volume_index(position);
+            let local = position.saturating_sub(stream.starts[index]);
+            let available = stream.lengths[index].saturating_sub(local);
+            if available == 0 {
+                position = stream
+                    .starts
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(stream.total_length);
+                continue;
+            }
+            let amount = remaining.min(usize::try_from(available).unwrap_or(remaining));
+            let file = &mut files[index];
+            if file.seek(SeekFrom::Start(local)).is_err() {
+                return E_FAIL;
+            }
+            let read = match file.read(&mut destination[..amount]) {
+                Ok(read) => read,
+                Err(_) => return E_FAIL,
+            };
+            if read == 0 {
+                return E_FAIL;
+            }
+            position = position.saturating_add(read as u64);
+            remaining -= read;
+            destination = &mut destination[read..];
+        }
+        stream.position.store(position, Ordering::Release);
+        if !processed.is_null() {
+            unsafe { *processed = (size as usize - remaining) as u32 };
+        }
+        S_OK
+    }
+
+    unsafe extern "system" fn multi_in_stream_seek(
+        this: *mut c_void,
+        offset: i64,
+        origin: u32,
+        new_position: *mut u64,
+    ) -> i32 {
+        let stream = unsafe { &*(this as *const MultiInStream) };
+        let current = stream.position.load(Ordering::Acquire);
+        let base = match origin {
+            SEEK_SET => 0,
+            SEEK_CUR => current,
+            SEEK_END => stream.total_length,
+            _ => return E_INVALIDARG,
+        };
+        let position = if offset >= 0 {
+            base.checked_add(offset as u64)
+        } else {
+            base.checked_sub(offset.unsigned_abs())
+        };
+        let Some(position) = position else {
+            return E_FAIL;
+        };
+        stream.position.store(position, Ordering::Release);
+        if !new_position.is_null() {
+            unsafe { *new_position = position };
+        }
+        S_OK
+    }
+
     #[repr(C)]
     struct OutStreamVtbl {
         query_interface: QueryInterfaceFn,
@@ -941,6 +1140,305 @@ mod platform_impl {
         match file.set_len(size) {
             Ok(()) => S_OK,
             Err(_) => E_FAIL,
+        }
+    }
+
+    static VOLUME_OUT_STREAM_VTBL: OutStreamVtbl = OutStreamVtbl {
+        query_interface: volume_out_stream_query_interface,
+        add_ref: stream_add_ref,
+        release: volume_out_stream_release,
+        write: volume_out_stream_write,
+        seek: volume_out_stream_seek,
+        set_size: volume_out_stream_set_size,
+    };
+
+    struct VolumePart {
+        path: PathBuf,
+        file: Option<File>,
+        length: u64,
+    }
+
+    struct VolumeOutput {
+        prefix: PathBuf,
+        volume_size: u64,
+        parts: Vec<VolumePart>,
+        position: u64,
+        length: u64,
+        error: Option<ArchiveError>,
+    }
+
+    impl VolumeOutput {
+        fn new(prefix: PathBuf, volume_size: u64) -> Self {
+            Self {
+                prefix,
+                volume_size,
+                parts: Vec::new(),
+                position: 0,
+                length: 0,
+                error: None,
+            }
+        }
+
+        fn part_path(&self, index: usize) -> PathBuf {
+            volume_part_path(&self.prefix, index as u32 + 1)
+        }
+
+        fn remember_error(&mut self, path: impl Into<PathBuf>, error: std::io::Error) {
+            if self.error.is_none() {
+                self.error = Some(ArchiveError::io(path, error));
+            }
+        }
+
+        fn remember_message(&mut self, message: impl Into<String>) {
+            if self.error.is_none() {
+                self.error = Some(ArchiveError::SevenZip(message.into()));
+            }
+        }
+
+        fn ensure_part(&mut self, index: usize) -> Result<(), ()> {
+            while self.parts.len() <= index {
+                let path = self.part_path(self.parts.len());
+                let file = match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.remember_error(&path, error);
+                        return Err(());
+                    }
+                };
+                self.parts.push(VolumePart {
+                    path,
+                    file: Some(file),
+                    length: 0,
+                });
+            }
+            Ok(())
+        }
+
+        fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
+            let mut remaining = bytes;
+            while !remaining.is_empty() {
+                let volume_index = self.position / self.volume_size;
+                let Ok(volume_index) = usize::try_from(volume_index) else {
+                    self.remember_message("too many output volumes");
+                    return Err(());
+                };
+                let local_position = self.position % self.volume_size;
+                if self.ensure_part(volume_index).is_err() {
+                    return Err(());
+                }
+                let available = self.volume_size.saturating_sub(local_position);
+                let amount = remaining.len().min(usize::try_from(available).unwrap_or(remaining.len()));
+                if amount == 0 {
+                    self.remember_message("invalid output volume size");
+                    return Err(());
+                }
+                let path = self.parts[volume_index].path.clone();
+                let write_result = match self.parts[volume_index].file.as_mut() {
+                    Some(file) => file
+                        .seek(SeekFrom::Start(local_position))
+                        .and_then(|_| file.write_all(&remaining[..amount])),
+                    None => {
+                        self.remember_message(format!(
+                            "output volume {} is already closed",
+                            path.display()
+                        ));
+                        return Err(());
+                    }
+                };
+                if let Err(error) = write_result {
+                    self.remember_error(path, error);
+                    return Err(());
+                }
+                let amount = amount as u64;
+                let part = &mut self.parts[volume_index];
+                part.length = part.length.max(local_position.saturating_add(amount));
+                self.position = self.position.saturating_add(amount);
+                self.length = self.length.max(self.position);
+                remaining = &remaining[amount as usize..];
+            }
+            Ok(())
+        }
+
+        fn seek(&mut self, offset: i64, origin: u32) -> Result<u64, ()> {
+            let base = match origin {
+                SEEK_SET => 0,
+                SEEK_CUR => self.position,
+                SEEK_END => self.length,
+                _ => {
+                    self.remember_message("invalid output stream seek origin");
+                    return Err(());
+                }
+            };
+            let position = if offset >= 0 {
+                base.checked_add(offset as u64)
+            } else {
+                base.checked_sub(offset.unsigned_abs())
+            };
+            let Some(position) = position else {
+                self.remember_message("output stream seek moved before the beginning");
+                return Err(());
+            };
+            self.position = position;
+            Ok(position)
+        }
+
+        fn set_size(&mut self, size: u64) -> Result<(), ()> {
+            let required_parts = if size == 0 {
+                0
+            } else {
+                usize::try_from((size - 1) / self.volume_size + 1).map_err(|_| {
+                    self.remember_message("too many output volumes");
+                })?
+            };
+            if required_parts > 0 && self.ensure_part(required_parts - 1).is_err() {
+                return Err(());
+            }
+
+            let mut remaining = size;
+            for index in 0..required_parts {
+                let desired = remaining.min(self.volume_size);
+                let path = self.parts[index].path.clone();
+                let set_result = match self.parts[index].file.as_mut() {
+                    Some(file) => file.set_len(desired),
+                    None => {
+                        self.remember_message(format!(
+                            "output volume {} is already closed",
+                            path.display()
+                        ));
+                        return Err(());
+                    }
+                };
+                if let Err(error) = set_result {
+                    self.remember_error(path, error);
+                    return Err(());
+                }
+                self.parts[index].length = desired;
+                remaining -= desired;
+            }
+            while self.parts.len() > required_parts {
+                let part = self.parts.pop().expect("length checked");
+                drop(part.file);
+                if let Err(error) = fs::remove_file(&part.path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    self.remember_error(part.path, error);
+                    return Err(());
+                }
+            }
+            self.length = size;
+            self.position = self.position.min(size);
+            Ok(())
+        }
+
+        fn close_files(&mut self) {
+            for part in &mut self.parts {
+                drop(part.file.take());
+            }
+        }
+
+        fn paths(&self) -> Vec<PathBuf> {
+            self.parts.iter().map(|part| part.path.clone()).collect()
+        }
+
+        fn take_error(&mut self) -> Option<ArchiveError> {
+            self.error.take()
+        }
+    }
+
+    #[repr(C)]
+    struct VolumeOutStream {
+        vtbl: &'static OutStreamVtbl,
+        refs: AtomicU32,
+        output: Arc<Mutex<VolumeOutput>>,
+    }
+
+    unsafe extern "system" fn volume_out_stream_query_interface(
+        this: *mut c_void,
+        iid: *const Guid,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        stream_query_interface(
+            this,
+            iid,
+            out,
+            &[IID_ISEQUENTIAL_OUT_STREAM, IID_IOUT_STREAM],
+            stream_add_ref,
+        )
+    }
+
+    unsafe extern "system" fn volume_out_stream_release(this: *mut c_void) -> u32 {
+        let stream = unsafe { &*(this as *const VolumeOutStream) };
+        let remaining = stream.refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1);
+        if remaining == 0 {
+            unsafe { drop(Box::from_raw(this as *mut VolumeOutStream)) };
+        }
+        remaining
+    }
+
+    unsafe extern "system" fn volume_out_stream_write(
+        this: *mut c_void,
+        data: *const c_void,
+        size: u32,
+        processed: *mut u32,
+    ) -> i32 {
+        if !processed.is_null() {
+            unsafe { *processed = 0 };
+        }
+        if this.is_null() || (data.is_null() && size != 0) {
+            return E_INVALIDARG;
+        }
+        if size == 0 {
+            return S_OK;
+        }
+        let stream = unsafe { &*(this as *const VolumeOutStream) };
+        let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size as usize) };
+        let mut output = stream
+            .output
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if output.write(bytes).is_err() {
+            return E_FAIL;
+        }
+        if !processed.is_null() {
+            unsafe { *processed = size };
+        }
+        S_OK
+    }
+
+    unsafe extern "system" fn volume_out_stream_seek(
+        this: *mut c_void,
+        offset: i64,
+        origin: u32,
+        new_position: *mut u64,
+    ) -> i32 {
+        let stream = unsafe { &*(this as *const VolumeOutStream) };
+        let mut output = stream
+            .output
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Ok(position) = output.seek(offset, origin) else {
+            return E_FAIL;
+        };
+        if !new_position.is_null() {
+            unsafe { *new_position = position };
+        }
+        S_OK
+    }
+
+    unsafe extern "system" fn volume_out_stream_set_size(this: *mut c_void, size: u64) -> i32 {
+        let stream = unsafe { &*(this as *const VolumeOutStream) };
+        let mut output = stream
+            .output
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if output.set_size(size).is_err() {
+            E_FAIL
+        } else {
+            S_OK
         }
     }
 
@@ -2483,6 +2981,7 @@ mod platform_impl {
         }
 
         fn create_in_archive(&self, format: ReadFormat) -> ArchiveResult<RawInArchive> {
+            let format = format.base();
             let clsid = match format {
                 ReadFormat::SevenZip => &CLSID_C_FORMAT_7Z,
                 ReadFormat::Zip => &self.zip_clsid,
@@ -2496,6 +2995,7 @@ mod platform_impl {
                         "the loaded 7z.dll does not provide a RAR5 reader".to_owned(),
                     )
                 })?,
+                ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
             };
             let mut raw: *mut c_void = ptr::null_mut();
             // SAFETY: the function pointer came from the 7z.dll export table.
@@ -2537,11 +3037,12 @@ mod platform_impl {
         }
 
         fn can_read(&self, format: ReadFormat) -> bool {
-            match format {
+            match format.base() {
                 ReadFormat::SevenZip => true,
                 ReadFormat::Zip => self.zip_reader_available,
                 ReadFormat::Rar4 => self.rar4_clsid.is_some(),
                 ReadFormat::Rar5 => self.rar5_clsid.is_some(),
+                ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
             }
         }
     }
@@ -3142,6 +3643,13 @@ mod platform_impl {
                     options.format
                 )));
             }
+            if let Some(split_size) = options.split_size
+                && split_size == 0
+            {
+                return Err(ArchiveError::InvalidInput(
+                    "split volume size must be greater than zero".to_owned(),
+                ));
+            }
             if options.encrypt_headers && options.format != CreateFormat::SevenZip {
                 return Err(ArchiveError::UnsupportedOption(
                     "header encryption is supported only for 7z archives".to_owned(),
@@ -3200,34 +3708,61 @@ mod platform_impl {
             throttled.report(opening, true);
 
             let temporary_path = temporary_path(&parent, &final_destination);
-            let mut temp_file = Some(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary_path)
-                    .map_err(|error| ArchiveError::io(&temporary_path, error))?,
-            );
+            let mut temp_file = if options.split_size.is_some() {
+                None
+            } else {
+                Some(
+                    OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary_path)
+                        .map_err(|error| ArchiveError::io(&temporary_path, error))?,
+                )
+            };
 
             let out_archive = match self.api.create_out_archive(options.format) {
                 Ok(archive) => archive,
                 Err(error) => {
                     drop(temp_file.take());
-                    let _ = fs::remove_file(&temporary_path);
                     return Err(error);
                 }
             };
+            let mut temporary_volumes: Option<Arc<Mutex<VolumeOutput>>> = None;
             let result: ArchiveResult<OperationSummary> = (|| {
                 match apply_create_properties(&out_archive, options) {
                     Ok(()) => {
-                        let shared_file: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(Some(
-                            temp_file.take().expect("temporary file is live"),
-                        )));
-                        let stream = Box::new(OutStream {
-                            vtbl: &OUT_STREAM_VTBL,
-                            refs: AtomicU32::new(1),
-                            file: Arc::clone(&shared_file),
-                        });
-                        let stream_ptr = Box::into_raw(stream).cast::<c_void>();
+                        let volume_output = options
+                            .split_size
+                            .map(|size| Arc::new(Mutex::new(VolumeOutput::new(
+                                temporary_path.clone(),
+                                size,
+                            ))));
+                        temporary_volumes = volume_output.clone();
+                        let shared_file: Option<Arc<Mutex<Option<File>>>> =
+                            if volume_output.is_none() {
+                                Some(Arc::new(Mutex::new(Some(
+                                    temp_file.take().expect("temporary file is live"),
+                                ))))
+                            } else {
+                                None
+                            };
+                        let stream_ptr = if let Some(output) = &volume_output {
+                            let stream = Box::new(VolumeOutStream {
+                                vtbl: &VOLUME_OUT_STREAM_VTBL,
+                                refs: AtomicU32::new(1),
+                                output: Arc::clone(output),
+                            });
+                            Box::into_raw(stream).cast::<c_void>()
+                        } else {
+                            let stream = Box::new(OutStream {
+                                vtbl: &OUT_STREAM_VTBL,
+                                refs: AtomicU32::new(1),
+                                file: Arc::clone(
+                                    shared_file.as_ref().expect("single-volume file is live"),
+                                ),
+                            });
+                            Box::into_raw(stream).cast::<c_void>()
+                        };
                         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Compressing);
                         snapshot.total_entries = Some(file_count);
                         snapshot.total_bytes = Some(total_bytes);
@@ -3275,15 +3810,25 @@ mod platform_impl {
                         summary.entries_processed = file_count;
                         let mut snapshot = context.snapshot.clone();
                         drop(context);
-                        // 7-Zip released the stream; close the file ourselves
-                        // through the Arc we kept.
-                        let mut guard = shared_file
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner());
-                        if let Some(file) = guard.take() {
-                            drop(file);
+                        if let Some(shared_file) = &shared_file {
+                            // 7-Zip released the stream; close the file
+                            // ourselves through the Arc we kept.
+                            let mut guard = shared_file
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            if let Some(file) = guard.take() {
+                                drop(file);
+                            }
                         }
-                        drop(guard);
+                        if let Some(output) = &volume_output {
+                            let mut output = output
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            output.close_files();
+                            if let Some(error) = output.take_error() {
+                                return create_error(error);
+                            }
+                        }
                         if let Some(error) = error {
                             return create_error(error);
                         }
@@ -3296,7 +3841,24 @@ mod platform_impl {
                                 hr as u32
                             )));
                         }
-                        if let Err(error) =
+                        if let Some(output) = &volume_output {
+                            let paths = output
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .paths();
+                            if paths.is_empty() {
+                                return create_error(ArchiveError::SevenZip(
+                                    "7z creation produced no output volumes".to_owned(),
+                                ));
+                            }
+                            if let Err(error) = install_temporary_volumes(
+                                &parent,
+                                &paths,
+                                &final_destination,
+                            ) {
+                                return create_error(error);
+                            }
+                        } else if let Err(error) =
                             install_temporary(&parent, &temporary_path, &final_destination)
                         {
                             return create_error(error);
@@ -3309,9 +3871,9 @@ mod platform_impl {
                         Ok(summary)
                     }
                     Err(error) => {
-                        // Close the still-owned file before the archive is
-                        // released. The temporary path is removed below, after
-                        // `out_archive` has released any stream references.
+                        // Close the still-owned single-volume file before the
+                        // archive is released. Temporary volume files are
+                        // created lazily by the output stream.
                         drop(temp_file.take());
                         create_error(error)
                     }
@@ -3320,9 +3882,19 @@ mod platform_impl {
             drop(out_archive);
             if result.is_err() {
                 // 7-Zip may retain the output stream until the archive object
-                // is released. Remove the path only after that release so a
-                // cancelled operation cannot strand its temporary file.
-                let _ = fs::remove_file(&temporary_path);
+                // is released. Remove paths only after that release so a
+                // cancelled operation cannot strand temporary files.
+                if let Some(output) = temporary_volumes {
+                    let mut output = output
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    output.close_files();
+                    for path in output.paths() {
+                        let _ = fs::remove_file(path);
+                    }
+                } else {
+                    let _ = fs::remove_file(&temporary_path);
+                }
             }
             result
         }
@@ -3593,7 +4165,60 @@ mod platform_impl {
     // Shared helpers
     // ------------------------------------------------------------------
 
+    fn split_volume_base(path: &Path) -> Option<(PathBuf, u32)> {
+        let name = path.file_name()?.to_str()?;
+        let dot = name.rfind('.')?;
+        let suffix = &name[dot + 1..];
+        if suffix.len() < 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let index = suffix.parse::<u32>().ok()?;
+        (index > 0).then(|| (path.with_file_name(&name[..dot]), index))
+    }
+
+    fn volume_part_path(base: &Path, index: u32) -> PathBuf {
+        let mut name = base
+            .file_name()
+            .map(|value| value.to_os_string())
+            .unwrap_or_else(|| OsString::from("archive"));
+        name.push(format!(".{index:03}"));
+        base.with_file_name(name)
+    }
+
+    fn split_archive_format(path: &Path) -> Option<ReadFormat> {
+        let (base, _) = split_volume_base(path)?;
+        match base.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) if extension.eq_ignore_ascii_case("7z") => {
+                Some(ReadFormat::SevenZipVolume)
+            }
+            Some(extension) if extension.eq_ignore_ascii_case("zip") => {
+                Some(ReadFormat::ZipVolume)
+            }
+            _ => None,
+        }
+    }
+
+    fn split_volume_paths(path: &Path) -> Option<Vec<PathBuf>> {
+        let (base, _) = split_volume_base(path)?;
+        let first = volume_part_path(&base, 1);
+        if !first.is_file() {
+            return None;
+        }
+        let mut paths = Vec::new();
+        for index in 1..=u32::from(u16::MAX) {
+            let candidate = volume_part_path(&base, index);
+            if !candidate.is_file() {
+                break;
+            }
+            paths.push(candidate);
+        }
+        (!paths.is_empty()).then_some(paths)
+    }
+
     fn archive_format(path: &Path) -> Option<ReadFormat> {
+        if let Some(format) = split_archive_format(path) {
+            return Some(format);
+        }
         let Ok(mut file) = File::open(path) else {
             return None;
         };
@@ -3651,7 +4276,7 @@ mod platform_impl {
         requested: u32,
         records: Option<&[ZipNameRecord]>,
     ) -> u32 {
-        if format != ReadFormat::Zip || requested != 0 {
+        if !format.is_zip() || requested != 0 {
             return requested;
         }
         records.map(detect_zip_codepage).unwrap_or(0)
@@ -3955,10 +4580,43 @@ mod platform_impl {
     struct OpenArchive {
         in_archive: RawInArchive,
         /// The input stream handed to 7-Zip. Its reference count includes one
-        /// reference held by this Box; 7-Zip releases its own reference in
-        /// Close, so this Box must outlive `in_archive`.
-        _stream: Box<InStream>,
+        /// reference held by this owner; 7-Zip releases its own reference in
+        /// Close, so the holder must outlive `in_archive`.
+        _stream: InputStream,
         _callback: OpenCallback,
+    }
+
+    enum InputStream {
+        Single(Box<InStream>),
+        Multi(Box<MultiInStream>),
+    }
+
+    impl InputStream {
+        fn as_ptr(&self) -> *mut c_void {
+            match self {
+                Self::Single(stream) => (stream.as_ref() as *const InStream)
+                    .cast_mut()
+                    .cast::<c_void>(),
+                Self::Multi(stream) => (stream.as_ref() as *const MultiInStream)
+                    .cast_mut()
+                    .cast::<c_void>(),
+            }
+        }
+    }
+
+    fn open_input_stream(path: &Path) -> ArchiveResult<InStream> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(path)
+            .map_err(|error| ArchiveError::io(path, error))?;
+        Ok(InStream {
+            vtbl: &IN_STREAM_VTBL,
+            refs: AtomicU32::new(2),
+            file: Mutex::new(BufReader::with_capacity(STREAM_BUFFER_SIZE, file)),
+            position: AtomicU64::new(0),
+            progress: None,
+        })
     }
 
     fn open_for_read(
@@ -3969,19 +4627,22 @@ mod platform_impl {
         _pathname_codepage: u32,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OpenArchive> {
-        let in_archive = api.create_in_archive(format)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
-            .open(path)
-            .map_err(|error| ArchiveError::io(path, error))?;
-        let stream = Box::new(InStream {
-            vtbl: &IN_STREAM_VTBL,
-            refs: AtomicU32::new(2),
-            file: Mutex::new(BufReader::with_capacity(STREAM_BUFFER_SIZE, file)),
-            position: AtomicU64::new(0),
-            progress: None,
-        });
+        let in_archive = api.create_in_archive(format.base())?;
+        let stream = if format.is_volume() {
+            let paths = split_volume_paths(path).ok_or_else(|| {
+                ArchiveError::InvalidInput(format!(
+                    "split archive volume is missing its .001 file: {}",
+                    path.display()
+                ))
+            })?;
+            if paths.len() > 1 {
+                InputStream::Multi(Box::new(MultiInStream::open(&paths)?))
+            } else {
+                InputStream::Single(Box::new(open_input_stream(path)?))
+            }
+        } else {
+            InputStream::Single(Box::new(open_input_stream(path)?))
+        };
         let callback = OpenCallback {
             vtbl: &OPEN_VTBL,
             crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD_VTBL,
@@ -3991,9 +4652,7 @@ mod platform_impl {
             cancel: cancel.clone(),
         };
         let hr = in_archive.open(
-            (stream.as_ref() as *const InStream)
-                .cast_mut()
-                .cast::<c_void>(),
+            stream.as_ptr(),
             (&callback as *const OpenCallback)
                 .cast_mut()
                 .cast::<c_void>(),
@@ -4308,9 +4967,22 @@ mod platform_impl {
     }
 
     fn file_length(path: &Path) -> ArchiveResult<u64> {
-        fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .map_err(|error| ArchiveError::io(path, error))
+        if let Some(paths) = split_volume_paths(path) {
+            let mut total = 0u64;
+            for part in paths {
+                let length = fs::metadata(&part)
+                    .map(|metadata| metadata.len())
+                    .map_err(|error| ArchiveError::io(&part, error))?;
+                total = total.checked_add(length).ok_or_else(|| {
+                    ArchiveError::LimitExceeded("split archive size overflow".to_owned())
+                })?;
+            }
+            Ok(total)
+        } else {
+            fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| ArchiveError::io(path, error))
+        }
     }
 
     fn is_reparse(metadata: &fs::Metadata) -> bool {
@@ -4358,6 +5030,78 @@ mod platform_impl {
             }
             Err(error) => Err(ArchiveError::io(target, error)),
         }
+    }
+
+    fn install_temporary_volumes(
+        root: &Path,
+        temporary_paths: &[PathBuf],
+        target: &Path,
+    ) -> ArchiveResult<()> {
+        let cleanup_installed = |paths: &[PathBuf]| {
+            for path in paths {
+                let _ = fs::remove_file(path);
+            }
+        };
+        let mut installed = Vec::with_capacity(temporary_paths.len());
+        for (index, temporary) in temporary_paths.iter().enumerate() {
+            let index = u32::try_from(index + 1)
+                .map_err(|_| ArchiveError::LimitExceeded("too many output volumes".to_owned()))?;
+            let destination = volume_part_path(target, index);
+            if let Err(error) = install_temporary(root, temporary, &destination) {
+                cleanup_installed(&installed);
+                return Err(error);
+            }
+            installed.push(destination);
+        }
+
+        // A previous archive may have had more parts. Remove only the
+        // contiguous, conventionally named suffix after the newly installed
+        // set so stale volumes cannot be mistaken for part of this archive.
+        let mut index = u32::try_from(temporary_paths.len() + 1)
+            .map_err(|_| ArchiveError::LimitExceeded("too many output volumes".to_owned()))?;
+        while index <= u32::from(u16::MAX) {
+            let stale = volume_part_path(target, index);
+            match fs::symlink_metadata(&stale) {
+                Ok(metadata) => {
+                    if is_reparse(&metadata) {
+                        cleanup_installed(&installed);
+                        return Err(ArchiveError::ReparsePoint(stale));
+                    }
+                    if let Err(error) = fs::remove_file(&stale) {
+                        cleanup_installed(&installed);
+                        return Err(ArchiveError::io(&stale, error));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    cleanup_installed(&installed);
+                    return Err(ArchiveError::io(&stale, error));
+                }
+            }
+            index = index.saturating_add(1);
+        }
+
+        // A previous unsplit archive can have the same base name.  A split
+        // result owns that name's volume set, so remove the obsolete base
+        // file after all new parts have been installed successfully.
+        match fs::symlink_metadata(target) {
+            Ok(metadata) => {
+                if is_reparse(&metadata) {
+                    cleanup_installed(&installed);
+                    return Err(ArchiveError::ReparsePoint(target.to_owned()));
+                }
+                if let Err(error) = fs::remove_file(target) {
+                    cleanup_installed(&installed);
+                    return Err(ArchiveError::io(target, error));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                cleanup_installed(&installed);
+                return Err(ArchiveError::io(target, error));
+            }
+        }
+        Ok(())
     }
 
     fn create_error(error: ArchiveError) -> ArchiveResult<OperationSummary> {
