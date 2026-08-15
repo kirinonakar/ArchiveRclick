@@ -26,10 +26,10 @@ use super::AppState;
 
 type Engine = Arc<dyn ArchiveEngine>;
 
-/// Builds the shared archive engine: 7z archives are handled by the bundled
-/// 7z.dll (multicore LZMA2), every other format by libarchive. When 7z.dll
-/// cannot be loaded, the composite still serves libarchive formats and 7z
-/// operations fail with a clear error.
+/// Builds the shared archive engine: 7z, RAR, and ISO archives are handled by
+/// the bundled 7z.dll when available, while libarchive remains the fallback
+/// for other formats. When 7z.dll cannot be loaded, the composite still serves
+/// libarchive formats and 7z-specific operations fail with a clear error.
 fn load_engine() -> Result<Engine, String> {
     let libarchive = LibArchiveEngine::load().map_err(|error| error.to_string())?;
     let sevenzip = match SevenZipEngine::load() {
@@ -240,6 +240,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
                 path,
                 None,
                 pathname_codepage(ui.get_encoding_selection()),
+                PathBuf::new(),
             );
         } else if path.is_file() {
             ui.set_status_text(format!("Not a supported archive: {}", path.display()).into());
@@ -1005,6 +1006,7 @@ fn handle_file_drop(
         path,
         None,
         pathname_codepage(ui.get_encoding_selection()),
+        PathBuf::new(),
     );
 }
 
@@ -1029,6 +1031,7 @@ fn wire_callbacks(
                         path,
                         None,
                         pathname_codepage(ui.get_encoding_selection()),
+                        PathBuf::new(),
                     );
                 }
             }
@@ -1054,12 +1057,42 @@ fn wire_callbacks(
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
+        let engine = Arc::clone(&engine);
         ui.on_up_requested(move || {
-            state.current_folder.borrow_mut().pop();
-            state.rows.clear_selection();
-            state.rebuild_display();
-            update_folder_ui(&weak, &state);
-            update_selection_ui(&weak, &state);
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if ui.get_busy() {
+                return;
+            }
+            let current = state.current_folder.borrow().clone();
+            if current.as_os_str().is_empty() {
+                return;
+            }
+            let mut parent = current;
+            parent.pop();
+            let Some(path) = state
+                .listing
+                .borrow()
+                .as_ref()
+                .map(|listing| listing.archive_path.clone())
+            else {
+                return;
+            };
+            let password = state
+                .open_password
+                .lock()
+                .expect("password mutex poisoned")
+                .clone();
+            start_listing(
+                &ui,
+                Rc::clone(&state),
+                Arc::clone(&engine),
+                path,
+                password,
+                pathname_codepage(ui.get_encoding_selection()),
+                parent,
+            );
         });
     }
 
@@ -1105,17 +1138,42 @@ fn wire_callbacks(
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
+        let engine = Arc::clone(&engine);
         ui.on_activate_row(move |row| {
             if row < 0 {
                 return;
             }
-            if let Some(folder) = state.activate_row(row as usize) {
-                *state.current_folder.borrow_mut() = folder;
-                state.rows.clear_selection();
-                state.rebuild_display();
-                update_folder_ui(&weak, &state);
-                update_selection_ui(&weak, &state);
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if ui.get_busy() {
+                return;
             }
+            let Some(folder) = state.activate_row(row as usize) else {
+                return;
+            };
+            let Some(path) = state
+                .listing
+                .borrow()
+                .as_ref()
+                .map(|listing| listing.archive_path.clone())
+            else {
+                return;
+            };
+            let password = state
+                .open_password
+                .lock()
+                .expect("password mutex poisoned")
+                .clone();
+            start_listing(
+                &ui,
+                Rc::clone(&state),
+                Arc::clone(&engine),
+                path,
+                password,
+                pathname_codepage(ui.get_encoding_selection()),
+                folder,
+            );
         });
     }
 
@@ -1204,6 +1262,7 @@ fn wire_callbacks(
                 path,
                 password,
                 pathname_codepage(selection),
+                state.current_folder.borrow().clone(),
             );
         });
     }
@@ -1593,6 +1652,16 @@ fn wire_callbacks(
             }) else {
                 return;
             };
+            let same_archive = state
+                .listing
+                .borrow()
+                .as_ref()
+                .is_some_and(|listing| listing.archive_path == path);
+            let directory = if same_archive {
+                state.current_folder.borrow().clone()
+            } else {
+                PathBuf::new()
+            };
             start_listing(
                 &ui,
                 Rc::clone(&state),
@@ -1600,6 +1669,7 @@ fn wire_callbacks(
                 path,
                 Some(password),
                 pathname_codepage(ui.get_encoding_selection()),
+                directory,
             );
         });
     }
@@ -1691,6 +1761,7 @@ fn wire_callbacks(
                     path,
                     None,
                     pathname_codepage(ui.get_encoding_selection()),
+                    PathBuf::new(),
                 );
             }
         });
@@ -1704,6 +1775,7 @@ fn start_listing(
     path: PathBuf,
     password: Option<String>,
     pathname_codepage: u32,
+    directory: PathBuf,
 ) {
     let progress_title = progress_title_with_filename("Opening archive", &path);
     let cancel = CancellationToken::new();
@@ -1717,19 +1789,26 @@ fn start_listing(
     let pending_password_path = Arc::clone(&state.pending_password_path);
     let sort_column = state.sort_column.get();
     let sort_ascending = state.sort_ascending.get();
+    let directory_for_worker = directory.clone();
     let weak = ui.as_weak();
     let progress = |_: ProgressSnapshot| {};
     std::thread::spawn(move || {
         let result = engine
-            .list(
+            .list_directory(
                 &path,
+                &directory_for_worker,
                 password.as_deref(),
                 pathname_codepage,
                 &progress,
                 &cancel,
             )
             .map(|listing| {
-                super::ArchiveRowModel::prepare_listing(listing, sort_column, sort_ascending)
+                super::ArchiveRowModel::prepare_listing_at(
+                    listing,
+                    &directory_for_worker,
+                    sort_column,
+                    sort_ascending,
+                )
             });
         let _ = weak.upgrade_in_event_loop(move |ui| {
             finish_operation(&ui);
@@ -1748,7 +1827,7 @@ fn start_listing(
                         .as_any()
                         .downcast_ref::<super::ArchiveRowModel>()
                     {
-                        rows.set_prepared_listing(listing, display);
+                        rows.set_prepared_listing_at(listing, display, directory.clone());
                     } else {
                         display_operation_error(
                             &ui,
@@ -1760,9 +1839,9 @@ fn start_listing(
                     ui.set_selection_state(0);
                     ui.set_selection_count(0);
                     ui.set_archive_title(archive_name.into());
-                    ui.set_current_folder("".into());
+                    ui.set_current_folder(directory.to_string_lossy().replace('\\', "/").into());
                     ui.set_has_archive(true);
-                    ui.set_can_go_up(false);
+                    ui.set_can_go_up(!directory.as_os_str().is_empty());
                     ui.set_status_text(format!("{format_name} archive").into());
                     ui.set_summary_text(
                         format!("{entry_count} entries  •  {}", compact_bytes(total)).into(),
@@ -2715,14 +2794,6 @@ fn default_archive_name(sources: &[PathBuf], format: CreateFormat) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| "archive".to_owned());
     format!("{stem}.{}", format.default_extension())
-}
-
-fn update_folder_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
-    if let Some(ui) = weak.upgrade() {
-        let current = state.current_folder.borrow();
-        ui.set_current_folder(current.to_string_lossy().replace('\\', "/").into());
-        ui.set_can_go_up(!current.as_os_str().is_empty());
-    }
 }
 
 fn close_archive(ui: &AppWindow, state: &AppState) {

@@ -1,6 +1,6 @@
 //! 7z.dll backend for reading 7z, ZIP, and RAR formats and creating 7z/ZIP.
 //!
-//! 7z, ZIP, and RAR archives are listed, extracted, and tested with the bundled
+//! 7z, ZIP, RAR, and ISO archives are listed, extracted, and tested with the bundled
 //! 7-Zip DLL (`runtime/x64/7z.dll`) so solid RAR archives and the native format
 //! handlers are supported. 7z and ZIP can also be created; other formats
 //! continue to use the libarchive backend.
@@ -115,6 +115,7 @@ mod platform_impl {
         Zip,
         Rar4,
         Rar5,
+        Iso,
         SevenZipVolume,
         ZipVolume,
     }
@@ -125,6 +126,7 @@ mod platform_impl {
                 Self::SevenZip => "7z",
                 Self::Zip => "ZIP",
                 Self::Rar4 | Self::Rar5 => "RAR",
+                Self::Iso => "ISO 9660",
                 Self::SevenZipVolume => "7z split volume",
                 Self::ZipVolume => "ZIP split volume",
             }
@@ -2864,6 +2866,7 @@ mod platform_impl {
         zip_clsid: Guid,
         rar4_clsid: Option<Guid>,
         rar5_clsid: Option<Guid>,
+        iso_clsid: Option<Guid>,
         zip_reader_available: bool,
         zip_writer_available: bool,
     }
@@ -2938,6 +2941,21 @@ mod platform_impl {
                 let zip_vtbl = unsafe { *zip_reader_probe.cast::<*const InArchiveVtbl>() };
                 unsafe { ((*zip_vtbl).release)(zip_reader_probe) };
             }
+            // ISO reading is optional for reduced development DLLs.  Resolve
+            // the handler by name because 7-Zip does not guarantee handler
+            // ordering or class IDs across builds.
+            let iso_clsid = discover_handler_clsid(&library, "iso").and_then(|iso_clsid| {
+                let mut iso_probe: *mut c_void = ptr::null_mut();
+                let iso_hr = unsafe { create_object(&iso_clsid, &IID_IIN_ARCHIVE, &mut iso_probe) };
+                if iso_hr != S_OK || iso_probe.is_null() {
+                    return None;
+                }
+                // SAFETY: the probe is a live IInArchive interface returned
+                // by the DLL and is released exactly once.
+                let iso_vtbl = unsafe { *iso_probe.cast::<*const InArchiveVtbl>() };
+                unsafe { ((*iso_vtbl).release)(iso_probe) };
+                Some(iso_clsid)
+            });
             // RAR reading is optional for reduced development DLLs. Full
             // 7-Zip builds expose distinct RAR4 ("Rar") and RAR5 ("Rar5")
             // handlers, so selecting only by the .rar extension is not enough.
@@ -2975,6 +2993,7 @@ mod platform_impl {
                 zip_clsid,
                 rar4_clsid,
                 rar5_clsid,
+                iso_clsid,
                 zip_reader_available,
                 zip_writer_available,
             })
@@ -2993,6 +3012,11 @@ mod platform_impl {
                 ReadFormat::Rar5 => self.rar5_clsid.as_ref().ok_or_else(|| {
                     ArchiveError::UnsupportedOption(
                         "the loaded 7z.dll does not provide a RAR5 reader".to_owned(),
+                    )
+                })?,
+                ReadFormat::Iso => self.iso_clsid.as_ref().ok_or_else(|| {
+                    ArchiveError::UnsupportedOption(
+                        "the loaded 7z.dll does not provide an ISO reader".to_owned(),
                     )
                 })?,
                 ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
@@ -3042,6 +3066,7 @@ mod platform_impl {
                 ReadFormat::Zip => self.zip_reader_available,
                 ReadFormat::Rar4 => self.rar4_clsid.is_some(),
                 ReadFormat::Rar5 => self.rar5_clsid.is_some(),
+                ReadFormat::Iso => self.iso_clsid.is_some(),
                 ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
             }
         }
@@ -4089,6 +4114,37 @@ mod platform_impl {
                 .list(path, password, pathname_codepage, progress, cancel)
         }
 
+        fn list_directory(
+            &self,
+            path: &Path,
+            directory: &Path,
+            password: Option<&str>,
+            pathname_codepage: u32,
+            progress: &dyn ProgressSink,
+            cancel: &CancellationToken,
+        ) -> ArchiveResult<ArchiveListing> {
+            if let Some(sevenzip) = &self.sevenzip {
+                if archive_format(path).is_some_and(|format| sevenzip.can_read_format(format)) {
+                    return sevenzip.list_directory(
+                        path,
+                        directory,
+                        password,
+                        pathname_codepage,
+                        progress,
+                        cancel,
+                    );
+                }
+            }
+            self.libarchive.list_directory(
+                path,
+                directory,
+                password,
+                pathname_codepage,
+                progress,
+                cancel,
+            )
+        }
+
         fn extract(
             &self,
             archive: &Path,
@@ -4218,6 +4274,13 @@ mod platform_impl {
     fn archive_format(path: &Path) -> Option<ReadFormat> {
         if let Some(format) = split_archive_format(path) {
             return Some(format);
+        }
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("iso"))
+        {
+            return Some(ReadFormat::Iso);
         }
         let Ok(mut file) = File::open(path) else {
             return None;
@@ -5471,11 +5534,14 @@ mod platform_impl {
             let rar4 = directory.join("sample-rar4.rar");
             std::fs::write(&rar4, b"Rar!\x1a\x07\x00junk").expect("create RAR4 file");
             let rar5 = directory.join("sample-rar5.rar");
+            let iso = directory.join("sample.iso");
+            std::fs::write(&iso, b"not an ISO yet").expect("write ISO file");
             std::fs::write(&rar5, b"Rar!\x1a\x07\x01\x00junk").expect("create RAR5 file");
             assert_eq!(archive_format(&sevenzip), Some(ReadFormat::SevenZip));
             assert_eq!(archive_format(&zip), Some(ReadFormat::Zip));
             assert_eq!(archive_format(&rar4), Some(ReadFormat::Rar4));
             assert_eq!(archive_format(&rar5), Some(ReadFormat::Rar5));
+            assert_eq!(archive_format(&iso), Some(ReadFormat::Iso));
             assert_eq!(archive_format(&directory.join("missing.7z")), None);
             let _ = std::fs::remove_dir_all(&directory);
         }

@@ -8,7 +8,7 @@
 #[cfg(windows)]
 mod platform_impl {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         env,
         ffi::{CStr, CString, OsString, c_char, c_int, c_long, c_void},
         fs::{self, File, OpenOptions},
@@ -222,6 +222,7 @@ mod platform_impl {
         read_new: ArchiveReadNew,
         read_filters: Vec<ArchiveReadSupport>,
         read_formats: Vec<ArchiveReadSupport>,
+        read_support_format_iso9660: ArchiveReadSupport,
         read_support_format_raw: Option<ArchiveReadSupport>,
         read_add_passphrase: Option<ArchiveReadAddPassphrase>,
         read_open_filename_w: ArchiveReadOpenFilenameW,
@@ -420,6 +421,11 @@ mod platform_impl {
             // absent: mtree `contents=` entries are allowed to read unrelated
             // filesystem paths, which is not acceptable for an untrusted
             // archive viewer/extractor.
+            let read_support_format_iso9660 = required_symbol!(
+                library,
+                "archive_read_support_format_iso9660",
+                ArchiveReadSupport
+            );
             let format_candidates: [(&str, ArchiveReadSupport); 13] = [
                 (
                     "7zip",
@@ -461,14 +467,7 @@ mod platform_impl {
                         ArchiveReadSupport
                     ),
                 ),
-                (
-                    "iso9660",
-                    required_symbol!(
-                        library,
-                        "archive_read_support_format_iso9660",
-                        ArchiveReadSupport
-                    ),
-                ),
+                ("iso9660", read_support_format_iso9660),
                 (
                     "lha",
                     required_symbol!(
@@ -554,6 +553,7 @@ mod platform_impl {
                 read_new,
                 read_filters,
                 read_formats,
+                read_support_format_iso9660,
                 read_support_format_raw,
                 read_add_passphrase: optional_symbol!(
                     library,
@@ -1033,12 +1033,24 @@ mod platform_impl {
                     "enabling an archive filter",
                 )?;
             }
-            for support in &api.read_formats {
+            if is_iso_path(path) {
+                // ISO 9660 images can begin with bytes that make libarchive's
+                // tar bidder win when every format is enabled.  The ISO
+                // extension is an explicit format hint, so enable only the
+                // ISO reader for these paths and avoid the false tar match.
                 reader.require_ok(
                     // SAFETY: reader owns a live read handle in NEW state.
-                    unsafe { support(raw.as_ptr()) },
-                    "enabling an archive format",
+                    unsafe { (api.read_support_format_iso9660)(raw.as_ptr()) },
+                    "enabling the ISO 9660 archive format",
                 )?;
+            } else {
+                for support in &api.read_formats {
+                    reader.require_ok(
+                        // SAFETY: reader owns a live read handle in NEW state.
+                        unsafe { support(raw.as_ptr()) },
+                        "enabling an archive format",
+                    )?;
+                }
             }
             if is_standalone_filter(path)? {
                 let support_raw = api.read_support_format_raw.ok_or_else(|| {
@@ -1648,6 +1660,186 @@ mod platform_impl {
         Skip,
     }
 
+    fn is_iso_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("iso"))
+    }
+
+    fn archive_path_components(path: &Path) -> Vec<String> {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn archive_entry_from_raw(index: u64, entry: RawEntryInfo) -> ArchiveEntry {
+        ArchiveEntry {
+            index,
+            path: entry.path,
+            display_path: entry.display_path,
+            size: entry.size,
+            compressed_size: None,
+            modified_unix_seconds: entry.modified_unix_seconds,
+            kind: entry.kind,
+            encrypted: entry.encrypted,
+        }
+    }
+
+    fn synthetic_directory_entry(index: u64, components: &[String]) -> ArchiveEntry {
+        let path = components
+            .iter()
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component);
+                path
+            });
+        ArchiveEntry {
+            index,
+            path,
+            display_path: components.join("/"),
+            size: None,
+            compressed_size: None,
+            modified_unix_seconds: None,
+            kind: ArchiveEntryKind::Directory,
+            encrypted: false,
+        }
+    }
+
+    fn insert_iso_child(
+        entries: &mut Vec<ArchiveEntry>,
+        indices: &mut HashMap<String, usize>,
+        key: String,
+        entry: ArchiveEntry,
+    ) {
+        if let Some(&index) = indices.get(&key) {
+            // A synthetic directory can be replaced by the real directory
+            // header when libarchive reaches it later in the ISO stream.
+            if entries[index].size.is_none() && entries[index].kind == ArchiveEntryKind::Directory {
+                let mut entry = entry;
+                entry.index = index as u64;
+                entries[index] = entry;
+            }
+            return;
+        }
+        indices.insert(key, entries.len());
+        entries.push(entry);
+    }
+
+    /// Reads only the current directory's metadata for ISO images.  The
+    /// normal listing path intentionally drains file data to validate every
+    /// entry; that is unnecessary for the first browse view and makes opening
+    /// a large image scale with its entire payload.  libarchive automatically
+    /// skips unread data when the next header is requested, so this pass reads
+    /// headers and names without copying file contents into Rust.
+    fn list_iso_directory(
+        api: &Api,
+        path: &Path,
+        directory: &Path,
+        password: Option<&str>,
+        pathname_codepage: u32,
+        progress: &dyn ProgressSink,
+        cancel: &CancellationToken,
+    ) -> ArchiveResult<ArchiveListing> {
+        check_cancel(cancel)?;
+        let total_input = file_length(path)?;
+        let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
+        throttled.report(opening_snapshot(path, total_input), true);
+        let mut reader = Reader::open(api, path, password)?;
+        let scope = archive_path_components(directory);
+        let mut entries = Vec::new();
+        let mut indices = HashMap::<String, usize>::new();
+        let mut total_uncompressed_size = 0u64;
+        let mut total_path_bytes = 0u64;
+        let mut scan = ScanBudget::new(
+            MAX_LIST_ENTRIES,
+            MAX_LIST_SCAN_DECODED_BYTES,
+            "ISO directory listing",
+        );
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Listing);
+        snapshot.total_bytes = Some(total_input);
+
+        while let Some(entry) = {
+            check_cancel(cancel)?;
+            reader.next_entry(pathname_codepage)?
+        } {
+            scan.visit_entry()?;
+            let path_bytes = u64::try_from(entry.display_path.encode_utf16().count())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2);
+            total_path_bytes = checked_add_with_limit(
+                total_path_bytes,
+                path_bytes,
+                MAX_LIST_PATH_BYTES,
+                "ISO directory listing pathname metadata",
+            )?;
+
+            let components = archive_path_components(&entry.path);
+            let display_path = entry.display_path.clone();
+            if components.len() >= scope.len() && components[..scope.len()] == scope[..] {
+                let relative = &components[scope.len()..];
+                if !relative.is_empty() {
+                    if let Some(size) = entry.size {
+                        total_uncompressed_size = checked_add_with_limit(
+                            total_uncompressed_size,
+                            size,
+                            MAX_LIST_DECLARED_BYTES,
+                            "ISO directory listing declared size",
+                        )?;
+                    }
+
+                    let child_components = &components[..scope.len() + 1];
+                    let child_key = child_components.join("/");
+                    if relative.len() == 1 {
+                        let index = entries.len() as u64;
+                        insert_iso_child(
+                            &mut entries,
+                            &mut indices,
+                            child_key,
+                            archive_entry_from_raw(index, entry),
+                        );
+                    } else {
+                        let index = entries.len() as u64;
+                        insert_iso_child(
+                            &mut entries,
+                            &mut indices,
+                            child_key,
+                            synthetic_directory_entry(index, child_components),
+                        );
+                    }
+                }
+            }
+
+            snapshot.current_file = display_path;
+            snapshot.entries_processed = scan.entries_visited;
+            snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
+            throttled.report(snapshot.clone(), false);
+        }
+
+        let format_name = reader.format_name();
+        let filter_name = reader.filter_name();
+        let archive_encrypted = reader.has_encrypted_entries();
+        if archive_encrypted {
+            for entry in &mut entries {
+                entry.encrypted = true;
+            }
+        }
+        reader.finish()?;
+        snapshot.phase = ProgressPhase::Finished;
+        snapshot.current_file.clear();
+        snapshot.bytes_processed = total_input;
+        snapshot.entries_processed = entries.len() as u64;
+        throttled.report(snapshot, true);
+        Ok(ArchiveListing {
+            archive_path: path.to_path_buf(),
+            format_name,
+            filter_name,
+            entries,
+            total_uncompressed_size,
+        })
+    }
+
     impl ArchiveEngine for LibArchiveEngine {
         fn version(&self) -> String {
             self.version.to_string()
@@ -1671,6 +1863,30 @@ mod platform_impl {
                 formats.push(CreateFormat::TarZstd);
             }
             formats
+        }
+
+        fn list_directory(
+            &self,
+            path: &Path,
+            directory: &Path,
+            password: Option<&str>,
+            pathname_codepage: u32,
+            progress: &dyn ProgressSink,
+            cancel: &CancellationToken,
+        ) -> ArchiveResult<ArchiveListing> {
+            if is_iso_path(path) {
+                return list_iso_directory(
+                    &self.api,
+                    path,
+                    directory,
+                    password,
+                    pathname_codepage,
+                    progress,
+                    cancel,
+                );
+            }
+            self.list(path, password, pathname_codepage, progress, cancel)
+                .map(|listing| listing.restrict_to_directory(directory))
         }
 
         fn list(

@@ -37,6 +37,22 @@ pub trait ArchiveEngine: Send + Sync {
         cancel: &CancellationToken,
     ) -> ArchiveResult<ArchiveListing>;
 
+    /// Lists one archive directory.  Backends with a cheap metadata-only
+    /// reader can override this to avoid loading the whole archive just to
+    /// render the current folder.
+    fn list_directory(
+        &self,
+        path: &Path,
+        directory: &Path,
+        password: Option<&str>,
+        pathname_codepage: u32,
+        progress: &dyn ProgressSink,
+        cancel: &CancellationToken,
+    ) -> ArchiveResult<ArchiveListing> {
+        self.list(path, password, pathname_codepage, progress, cancel)
+            .map(|listing| listing.restrict_to_directory(directory))
+    }
+
     fn extract(
         &self,
         archive: &Path,

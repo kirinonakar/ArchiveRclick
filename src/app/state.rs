@@ -151,24 +151,25 @@ impl ArchiveRowModel {
         self.notify.reset();
     }
 
-    pub(crate) fn prepare_listing(
+    pub(crate) fn prepare_listing_at(
         listing: ArchiveListing,
+        current_folder: &Path,
         sort_column: usize,
         sort_ascending: bool,
     ) -> (ArchiveListing, Vec<DisplayEntry>) {
-        let display = build_display_entries(
-            &listing,
-            Path::new(""),
-            sort_column,
-            sort_ascending,
-        );
+        let display = build_display_entries(&listing, current_folder, sort_column, sort_ascending);
         (listing, display)
     }
 
-    pub(crate) fn set_prepared_listing(&self, listing: ArchiveListing, display: Vec<DisplayEntry>) {
+    pub(crate) fn set_prepared_listing_at(
+        &self,
+        listing: ArchiveListing,
+        display: Vec<DisplayEntry>,
+        current_folder: PathBuf,
+    ) {
         *self.listing.borrow_mut() = Some(listing);
         *self.display.borrow_mut() = display;
-        self.current_folder.borrow_mut().clear();
+        *self.current_folder.borrow_mut() = current_folder;
         self.selected.borrow_mut().clear();
         self.selection_anchor.borrow_mut().take();
         self.notify.reset();
@@ -516,7 +517,7 @@ fn format_timestamp(value: Option<i64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use slint::Model;
 
@@ -525,12 +526,15 @@ mod tests {
     use super::AppState;
 
     fn install_listing(state: &AppState, listing: ArchiveListing) {
-        let (listing, display) = super::ArchiveRowModel::prepare_listing(
+        let (listing, display) = super::ArchiveRowModel::prepare_listing_at(
             listing,
+            Path::new(""),
             state.sort_column.get(),
             state.sort_ascending.get(),
         );
-        state.rows.set_prepared_listing(listing, display);
+        state
+            .rows
+            .set_prepared_listing_at(listing, display, PathBuf::new());
     }
 
     fn entry(
