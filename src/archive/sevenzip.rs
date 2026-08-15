@@ -1,6 +1,6 @@
-//! 7z.dll backend for reading 7z, ZIP, and RAR formats and creating 7z/ZIP.
+//! 7z.dll backend for reading 7z, ZIP, LZH, and RAR formats and creating 7z/ZIP.
 //!
-//! 7z, ZIP, RAR, and ISO archives are listed, extracted, and tested with the bundled
+//! 7z, ZIP, LZH, RAR, and ISO archives are listed, extracted, and tested with the bundled
 //! 7-Zip DLL (`runtime/x64/7z.dll`) so solid RAR archives and the native format
 //! handlers are supported. 7z and ZIP can also be created; other formats
 //! continue to use the libarchive backend.
@@ -113,6 +113,7 @@ mod platform_impl {
     enum ReadFormat {
         SevenZip,
         Zip,
+        Lzh,
         Rar4,
         Rar5,
         Iso,
@@ -125,6 +126,7 @@ mod platform_impl {
             match self {
                 Self::SevenZip => "7z",
                 Self::Zip => "ZIP",
+                Self::Lzh => "LZH",
                 Self::Rar4 | Self::Rar5 => "RAR",
                 Self::Iso => "ISO 9660",
                 Self::SevenZipVolume => "7z split volume",
@@ -244,6 +246,24 @@ mod platform_impl {
         0x01,
         0x10,
         0x01,
+        0,
+        0,
+    );
+
+    // The 7-Zip archive-handler registry assigns format id 6 to LZH/LHA.
+    // Api::from_library still discovers the class id from the DLL so this
+    // fallback only serves reduced or older builds without the enumeration
+    // exports.
+    const CLSID_C_FORMAT_LZH: Guid = guid(
+        0x2317_0F69,
+        0x40C1,
+        0x278A,
+        0x10,
+        0,
+        0,
+        0x01,
+        0x10,
+        0x06,
         0,
         0,
     );
@@ -2864,6 +2884,7 @@ mod platform_impl {
         _library: DynamicLibrary,
         create_object: CreateObjectFn,
         zip_clsid: Guid,
+        lzh_clsid: Option<Guid>,
         rar4_clsid: Option<Guid>,
         rar5_clsid: Option<Guid>,
         iso_clsid: Option<Guid>,
@@ -2941,6 +2962,22 @@ mod platform_impl {
                 let zip_vtbl = unsafe { *zip_reader_probe.cast::<*const InArchiveVtbl>() };
                 unsafe { ((*zip_vtbl).release)(zip_reader_probe) };
             }
+            // LZH is read-only in 7-Zip.  Prefer the advertised class id,
+            // with the stable format-id fallback for reduced builds whose
+            // enumeration exports are unavailable.
+            let lzh_clsid = discover_handler_clsid(&library, "lzh").unwrap_or(CLSID_C_FORMAT_LZH);
+            let mut lzh_reader_probe: *mut c_void = ptr::null_mut();
+            let lzh_reader_hr =
+                unsafe { create_object(&lzh_clsid, &IID_IIN_ARCHIVE, &mut lzh_reader_probe) };
+            let lzh_clsid = if lzh_reader_hr == S_OK && !lzh_reader_probe.is_null() {
+                // SAFETY: the probe is a live IInArchive interface returned
+                // by the DLL and is released exactly once.
+                let lzh_vtbl = unsafe { *lzh_reader_probe.cast::<*const InArchiveVtbl>() };
+                unsafe { ((*lzh_vtbl).release)(lzh_reader_probe) };
+                Some(lzh_clsid)
+            } else {
+                None
+            };
             // ISO reading is optional for reduced development DLLs.  Resolve
             // the handler by name because 7-Zip does not guarantee handler
             // ordering or class IDs across builds.
@@ -2991,6 +3028,7 @@ mod platform_impl {
                 _library: library,
                 create_object,
                 zip_clsid,
+                lzh_clsid,
                 rar4_clsid,
                 rar5_clsid,
                 iso_clsid,
@@ -3004,6 +3042,11 @@ mod platform_impl {
             let clsid = match format {
                 ReadFormat::SevenZip => &CLSID_C_FORMAT_7Z,
                 ReadFormat::Zip => &self.zip_clsid,
+                ReadFormat::Lzh => self.lzh_clsid.as_ref().ok_or_else(|| {
+                    ArchiveError::UnsupportedOption(
+                        "the loaded 7z.dll does not provide an LZH reader".to_owned(),
+                    )
+                })?,
                 ReadFormat::Rar4 => self.rar4_clsid.as_ref().ok_or_else(|| {
                     ArchiveError::UnsupportedOption(
                         "the loaded 7z.dll does not provide a RAR4 reader".to_owned(),
@@ -3064,6 +3107,7 @@ mod platform_impl {
             match format.base() {
                 ReadFormat::SevenZip => true,
                 ReadFormat::Zip => self.zip_reader_available,
+                ReadFormat::Lzh => self.lzh_clsid.is_some(),
                 ReadFormat::Rar4 => self.rar4_clsid.is_some(),
                 ReadFormat::Rar5 => self.rar5_clsid.is_some(),
                 ReadFormat::Iso => self.iso_clsid.is_some(),
@@ -3151,6 +3195,39 @@ mod platform_impl {
             true,
         )?;
         Ok((open_archive, entries))
+    }
+
+    /// 7-Zip's LZH handler decodes legacy names with the process OEM code
+    /// page.  That is not necessarily the archive's code page (a Korean
+    /// Windows installation, for example, misdecodes Japanese Shift_JIS
+    /// names and can turn bytes into literal `?` characters).  The bundled
+    /// libarchive reader already exposes the raw pathname and the selected
+    /// legacy code page correctly, so use its metadata-only pass to repair
+    /// the names while keeping 7-Zip responsible for the reliable LZH data
+    /// decoder.
+    fn repair_lzh_paths(
+        path: &Path,
+        password: Option<&str>,
+        pathname_codepage: u32,
+        entries: &mut [ArchiveEntry],
+        cancel: &CancellationToken,
+    ) -> ArchiveResult<()> {
+        let libarchive = LibArchiveEngine::load()?;
+        let quiet_progress = |_: ProgressSnapshot| {};
+        let listing =
+            libarchive.list(path, password, pathname_codepage, &quiet_progress, cancel)?;
+        if listing.entries.len() != entries.len() {
+            return Err(ArchiveError::SevenZip(format!(
+                "LZH readers disagree about the entry count (7z: {}, libarchive: {})",
+                entries.len(),
+                listing.entries.len()
+            )));
+        }
+        for (entry, repaired) in entries.iter_mut().zip(listing.entries) {
+            entry.path = repaired.path;
+            entry.display_path = repaired.display_path;
+        }
+        Ok(())
     }
 
     fn run_extract_worker(
@@ -3427,6 +3504,9 @@ mod platform_impl {
                 &throttled,
                 cancel,
             )?;
+            if format == ReadFormat::Lzh {
+                repair_lzh_paths(path, password, pathname_codepage, &mut entries, cancel)?;
+            }
             apply_zip_name_records(&mut entries, zip_name_records.as_deref(), pathname_codepage)?;
             let mut archive_encrypted = false;
             let mut archive_prop = PropVariant::empty();
@@ -3535,6 +3615,15 @@ mod platform_impl {
                 false,
                 false,
             )?;
+            if format == ReadFormat::Lzh {
+                repair_lzh_paths(
+                    archive,
+                    options.password.as_deref(),
+                    pathname_codepage,
+                    &mut entries,
+                    cancel,
+                )?;
+            }
             apply_zip_name_records(&mut entries, zip_name_records.as_deref(), pathname_codepage)?;
             open_archive.in_archive.close_now();
             drop(open_archive);
@@ -4063,7 +4152,7 @@ mod platform_impl {
     }
 
     // ------------------------------------------------------------------
-    // Composite engine: 7z/ZIP read and creation -> 7z.dll when available;
+    // Composite engine: 7z/ZIP/LZH read and creation -> 7z.dll when available;
     // libarchive handles all other formats and remains the fallback when the
     // optional 7z DLL is unavailable.
     // ------------------------------------------------------------------
@@ -4286,6 +4375,15 @@ mod platform_impl {
         {
             return Some(ReadFormat::Iso);
         }
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "lha" | "lzh")
+            })
+        {
+            return Some(ReadFormat::Lzh);
+        }
         let Ok(mut file) = File::open(path) else {
             return None;
         };
@@ -4311,6 +4409,15 @@ mod platform_impl {
         }
         if amount >= 8 && signature == *b"Rar!\x1a\x07\x01\x00" {
             return Some(ReadFormat::Rar5);
+        }
+        if amount >= 7
+            && signature[2] == b'-'
+            && signature[3] == b'l'
+            && signature[4] == b'h'
+            && matches!(signature[5], b'0'..=b'7' | b'd')
+            && signature[6] == b'-'
+        {
+            return Some(ReadFormat::Lzh);
         }
         None
     }
@@ -5538,13 +5645,17 @@ mod platform_impl {
             let rar4 = directory.join("sample-rar4.rar");
             std::fs::write(&rar4, b"Rar!\x1a\x07\x00junk").expect("create RAR4 file");
             let rar5 = directory.join("sample-rar5.rar");
+            let lzh = directory.join("sample.lzh");
             let iso = directory.join("sample.iso");
             std::fs::write(&iso, b"not an ISO yet").expect("write ISO file");
             std::fs::write(&rar5, b"Rar!\x1a\x07\x01\x00junk").expect("create RAR5 file");
+            std::fs::write(&lzh, [0x5f, 0x00, b'-', b'l', b'h', b'5', b'-', 0x00])
+                .expect("create LZH file");
             assert_eq!(archive_format(&sevenzip), Some(ReadFormat::SevenZip));
             assert_eq!(archive_format(&zip), Some(ReadFormat::Zip));
             assert_eq!(archive_format(&rar4), Some(ReadFormat::Rar4));
             assert_eq!(archive_format(&rar5), Some(ReadFormat::Rar5));
+            assert_eq!(archive_format(&lzh), Some(ReadFormat::Lzh));
             assert_eq!(archive_format(&iso), Some(ReadFormat::Iso));
             assert_eq!(archive_format(&directory.join("missing.7z")), None);
             let _ = std::fs::remove_dir_all(&directory);
@@ -5582,6 +5693,7 @@ mod platform_impl {
                 let engine =
                     SevenZipEngine::load_from_path(&candidate).expect("bundled 7z.dll loads");
                 assert!(engine.can_read(CreateFormat::Zip));
+                assert!(engine.can_read_format(ReadFormat::Lzh));
                 assert!(engine.can_read_format(ReadFormat::Rar4));
                 assert!(engine.can_read_format(ReadFormat::Rar5));
                 assert_eq!(

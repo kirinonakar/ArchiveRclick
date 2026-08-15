@@ -26,7 +26,7 @@ use super::AppState;
 
 type Engine = Arc<dyn ArchiveEngine>;
 
-/// Builds the shared archive engine: 7z, RAR, and ISO archives are handled by
+/// Builds the shared archive engine: 7z, LZH, RAR, and ISO archives are handled by
 /// the bundled 7z.dll when available, while libarchive remains the fallback
 /// for other formats. When 7z.dll cannot be loaded, the composite still serves
 /// libarchive formats and 7z-specific operations fail with a clear error.
