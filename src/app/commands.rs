@@ -67,12 +67,16 @@ fn is_archive_drop_path(path: &Path) -> bool {
                 .iter()
                 .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         });
-    let split_volume_matches = name.rsplit_once('.').is_some_and(|(base, suffix)| {
-        (base.ends_with(".zip") || base.ends_with(".7z"))
-            && suffix.len() >= 3
-            && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    });
-    extension_matches || split_volume_matches
+    extension_matches || split_archive_volume_base_name(&name).is_some()
+}
+
+fn split_archive_volume_base_name(name: &str) -> Option<&str> {
+    let (base, suffix) = name.rsplit_once('.')?;
+    let base_lower = base.to_ascii_lowercase();
+    (base_lower.ends_with(".zip") || base_lower.ends_with(".7z"))
+        .then_some(())
+        .filter(|_| suffix.len() >= 3 && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|_| base)
 }
 
 // Font choices offered in Settings. The "auto" entry resolves at startup to
@@ -991,7 +995,7 @@ fn handle_file_drop(
         return;
     };
     if !is_archive_drop_path(&path) {
-        ui.set_status_text(format!("Not a supported archive: {}", path.display()).into());
+        set_create_sources(ui, state, vec![path]);
         return;
     }
     start_listing(
@@ -1675,9 +1679,7 @@ fn wire_callbacks(
             }
             if !is_archive_drop_path(&path) {
                 if let Some(ui) = weak.upgrade() {
-                    ui.set_status_text(
-                        format!("Not a supported archive: {}", path.display()).into(),
-                    );
+                    set_create_sources(&ui, &state, vec![path]);
                 }
                 return;
             }
@@ -2685,6 +2687,9 @@ fn archive_directory_name(archive: &Path) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "extracted".to_owned());
+    if let Some(base_length) = split_archive_volume_base_name(&name).map(str::len) {
+        name.truncate(base_length);
+    }
     for extension in [".tar.zst", ".tar.xz", ".tar.gz", ".tar.bz2"] {
         if name.to_ascii_lowercase().ends_with(extension) {
             name.truncate(name.len() - extension.len());
@@ -2962,6 +2967,8 @@ mod tests {
             "backup"
         );
         assert_eq!(archive_directory_name(Path::new("docs.zip")), "docs");
+        assert_eq!(archive_directory_name(Path::new("adf.7z.001")), "adf");
+        assert_eq!(archive_directory_name(Path::new("adf.7Z.001")), "adf");
     }
 
     #[test]

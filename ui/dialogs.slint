@@ -162,7 +162,10 @@ export component CreateOverlay inherits Rectangle {
         drop-shadow-offset-y: 6px;
 
         VerticalLayout {
-            padding: 10px;
+            x: 10px;
+            y: 10px;
+            width: parent.width - 20px;
+            height: parent.height - 55px;
             spacing: 3px;
 
             Text {
@@ -176,8 +179,10 @@ export component CreateOverlay inherits Rectangle {
                 text: root.source-summary;
                 color: Palette.foreground;
                 opacity: 0.72;
-                wrap: word-wrap;
+                height: 20px;
+                wrap: no-wrap;
                 overflow: elide;
+                vertical-alignment: center;
             }
 
             HorizontalLayout {
@@ -336,39 +341,46 @@ export component CreateOverlay inherits Rectangle {
 
             Rectangle { vertical-stretch: 1; }
 
-            HorizontalLayout {
-                spacing: 8px;
+        }
 
-                Rectangle { horizontal-stretch: 1; }
+        // Keep the action buttons fixed inside the dialog, even when the
+        // source path changes the preferred height of the form content.
+        HorizontalLayout {
+            x: 10px;
+            y: parent.height - self.height - 10px;
+            width: parent.width - 20px;
+            height: 32px;
+            spacing: 8px;
 
-                Button {
-                    text: root.language-index == 1 ? "취소" : root.language-index == 2 ? "キャンセル" : "Cancel";
-                    clicked => { root.cancelled(); }
-                }
+            Rectangle { horizontal-stretch: 1; }
 
-                Button {
-                    text: root.language-index == 1 ? "만들기" : root.language-index == 2 ? "作成" : "Create";
-                    primary: true;
-                    enabled: root.has-sources && root.available-formats.length > 0;
-                    clicked => {
-                        if (password.text != password-confirmation.text) {
-                            root.password-error = root.language-index == 1
-                                ? "암호가 일치하지 않습니다."
-                                : root.language-index == 2
-                                    ? "パスワードが一致しません。"
-                                    : "Passwords do not match.";
-                        } else {
-                            root.password-error = "";
-                            root.accepted(
-                                format.current-index,
-                                level.value,
-                                root.thread-index,
-                                root.volume-index,
-                                password.text,
-                                password-confirmation.text,
-                                header-encryption.checked && format.current-value == "7z" && password.text != ""
-                            );
-                        }
+            Button {
+                text: root.language-index == 1 ? "취소" : root.language-index == 2 ? "キャンセル" : "Cancel";
+                clicked => { root.cancelled(); }
+            }
+
+            Button {
+                text: root.language-index == 1 ? "만들기" : root.language-index == 2 ? "作成" : "Create";
+                primary: true;
+                enabled: root.has-sources && root.available-formats.length > 0;
+                clicked => {
+                    if (password.text != password-confirmation.text) {
+                        root.password-error = root.language-index == 1
+                            ? "암호가 일치하지 않습니다."
+                            : root.language-index == 2
+                                ? "パスワードが一致しません。"
+                                : "Passwords do not match.";
+                    } else {
+                        root.password-error = "";
+                        root.accepted(
+                            format.current-index,
+                            level.value,
+                            root.thread-index,
+                            root.volume-index,
+                            password.text,
+                            password-confirmation.text,
+                            header-encryption.checked && format.current-value == "7z" && password.text != ""
+                        );
                     }
                 }
             }

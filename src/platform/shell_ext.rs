@@ -823,6 +823,16 @@ fn is_archive_path(path: &Path) -> bool {
         .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     ARCHIVE_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+        || split_volume_base_name(&name).is_some()
+}
+
+fn split_volume_base_name(name: &str) -> Option<&str> {
+    let (base, suffix) = name.rsplit_once('.')?;
+    let base_lower = base.to_ascii_lowercase();
+    (base_lower.ends_with(".zip") || base_lower.ends_with(".7z"))
+        .then_some(())
+        .filter(|_| suffix.len() >= 3 && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|_| base)
 }
 
 fn archive_stem(path: &Path) -> String {
@@ -830,6 +840,9 @@ fn archive_stem(path: &Path) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "압축파일".to_owned());
+    if let Some(base_length) = split_volume_base_name(&name).map(str::len) {
+        name.truncate(base_length);
+    }
     for extension in [".tar.zst", ".tar.xz", ".tar.gz", ".tar.bz2"] {
         if name.to_ascii_lowercase().ends_with(extension) {
             name.truncate(name.len() - extension.len());
@@ -1565,6 +1578,14 @@ mod tests {
         let single = menu_verbs(std::slice::from_ref(&first));
         assert_eq!(
             single.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Extract]
+        );
+
+        let split = root.join("split.7z.001");
+        std::fs::File::create(&split).expect("create split archive volume placeholder");
+        let split_verbs = menu_verbs(std::slice::from_ref(&split));
+        assert_eq!(
+            split_verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract]
         );
 
