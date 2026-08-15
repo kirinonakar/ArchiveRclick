@@ -160,6 +160,32 @@ pub fn run() -> Result<(), String> {
             let rest: Vec<OsString> = args.collect();
             run_gui_extract(&rest, elevated_retry)
         }
+        // Internal command used by the Explorer right-drag handler. The
+        // first argument is the folder that received the drop; the remaining
+        // arguments are the dragged archive paths.
+        Some("extract-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_extract_to(&rest)
+        }
+        // Internal commands used by the Explorer right-drag handler. The
+        // first argument is the folder that received the drop; the remaining
+        // arguments are the dragged source paths.
+        Some("zip-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_to(&rest, CreateFormat::Zip)
+        }
+        Some("7z-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_to(&rest, CreateFormat::SevenZip)
+        }
+        Some("zip-each-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_each_to(&rest, CreateFormat::Zip)
+        }
+        Some("7z-each-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_create_each_to(&rest, CreateFormat::SevenZip)
+        }
         Some("zip") => {
             let rest: Vec<OsString> = args.collect();
             run_gui_create(&rest, CreateFormat::Zip, elevated_retry)
@@ -470,6 +496,182 @@ fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String
         destination_overrides,
         elevated_retry,
     );
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Extracts archives into a per-archive folder inside the folder that received
+/// a right-drag.
+/// This is intentionally a separate internal command so the public `extract`
+/// command keeps its existing archive-name-folder behavior.
+fn run_gui_extract_to(args: &[OsString]) -> Result<(), String> {
+    let Some(destination_argument) = args.first() else {
+        return Err("Usage: ArchiveRclick extract-to <directory> <archive>...".to_owned());
+    };
+    let archive_arguments = &args[1..];
+    if archive_arguments.is_empty() {
+        return Err("Usage: ArchiveRclick extract-to <directory> <archive>...".to_owned());
+    }
+
+    let requested_destination = PathBuf::from(destination_argument);
+    let destination = match resolve_existing_path(&requested_destination) {
+        Some(path) if path.is_dir() => path,
+        Some(path) => {
+            return Err(format!(
+                "Extraction destination is not a folder: {}",
+                path.display()
+            ));
+        }
+        None => return Err(missing_path_message(&requested_destination)),
+    };
+
+    let mut archives = Vec::with_capacity(archive_arguments.len());
+    let mut destination_overrides = Vec::with_capacity(archive_arguments.len());
+    for argument in archive_arguments {
+        let requested = PathBuf::from(argument);
+        match resolve_existing_path(&requested) {
+            Some(path) if path.is_file() => {
+                let output = unique_path(&destination.join(archive_directory_name(&path)));
+                archives.push(path);
+                destination_overrides.push(Some(output));
+            }
+            Some(path) => return Err(format!("Not an archive file: {}", path.display())),
+            None => return Err(missing_path_message(&requested)),
+        }
+    }
+
+    let engine: Engine = load_engine()?;
+    let (ui, state) = open_progress_window()?;
+    start_extract_batch_window(
+        &ui,
+        &state,
+        Arc::clone(&engine),
+        archives,
+        destination_overrides,
+        false,
+    );
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Creates one archive from the dragged items inside the folder that received
+/// the drop. The archive name still follows the normal source-name rule, but
+/// its parent is the drop destination instead of the source's parent folder.
+fn run_gui_create_to(args: &[OsString], format: CreateFormat) -> Result<(), String> {
+    let verb = match format {
+        CreateFormat::Zip => "zip-to",
+        CreateFormat::SevenZip => "7z-to",
+        _ => unreachable!("only zip and 7z reach the right-drag create flow"),
+    };
+    let Some(destination_argument) = args.first() else {
+        return Err(format!("Usage: ArchiveRclick {verb} <directory> <file-or-folder>..."));
+    };
+    let source_arguments = &args[1..];
+    if source_arguments.is_empty() {
+        return Err(format!("Usage: ArchiveRclick {verb} <directory> <file-or-folder>..."));
+    }
+
+    let requested_destination = PathBuf::from(destination_argument);
+    let destination_folder = match resolve_existing_path(&requested_destination) {
+        Some(path) if path.is_dir() => path,
+        Some(path) => {
+            return Err(format!(
+                "Archive destination is not a folder: {}",
+                path.display()
+            ));
+        }
+        None => return Err(missing_path_message(&requested_destination)),
+    };
+
+    let mut sources = Vec::with_capacity(source_arguments.len());
+    for argument in source_arguments {
+        let requested = PathBuf::from(argument);
+        match resolve_existing_path(&requested) {
+            Some(path) => sources.push(path),
+            None => return Err(missing_path_message(&requested)),
+        }
+    }
+
+    let archive_name = cli_archive_destination(&sources, format)
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| OsString::from(format!("archive.{}", format.default_extension())));
+    let destination = unique_path(&destination_folder.join(archive_name));
+    let engine: Engine = load_engine()?;
+    let options = CreateOptions {
+        format,
+        threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
+        ..CreateOptions::default()
+    };
+    let (ui, state) = open_progress_window()?;
+    start_create_window(
+        &ui,
+        &state,
+        Arc::clone(&engine),
+        destination,
+        sources,
+        options,
+        false,
+    );
+    ui.run()
+        .map_err(|error| format!("UI event loop failed: {error}"))
+}
+
+/// Creates one archive for each dragged folder inside the folder that received
+/// the drop. This is the target-aware counterpart of `zip-each`/`7z-each`.
+fn run_gui_create_each_to(args: &[OsString], format: CreateFormat) -> Result<(), String> {
+    let verb = match format {
+        CreateFormat::Zip => "zip-each-to",
+        CreateFormat::SevenZip => "7z-each-to",
+        _ => unreachable!("only zip and 7z reach the right-drag create flow"),
+    };
+    let Some(destination_argument) = args.first() else {
+        return Err(format!("Usage: ArchiveRclick {verb} <directory> <folder>..."));
+    };
+    let folder_arguments = &args[1..];
+    if folder_arguments.is_empty() {
+        return Err(format!("Usage: ArchiveRclick {verb} <directory> <folder>..."));
+    }
+
+    let requested_destination = PathBuf::from(destination_argument);
+    let destination_folder = match resolve_existing_path(&requested_destination) {
+        Some(path) if path.is_dir() => path,
+        Some(path) => {
+            return Err(format!(
+                "Archive destination is not a folder: {}",
+                path.display()
+            ));
+        }
+        None => return Err(missing_path_message(&requested_destination)),
+    };
+
+    let mut items = Vec::with_capacity(folder_arguments.len());
+    for argument in folder_arguments {
+        let requested = PathBuf::from(argument);
+        let source = match resolve_existing_path(&requested) {
+            Some(path) if path.is_dir() => path,
+            Some(path) => return Err(format!("Not a folder: {}", path.display())),
+            None => return Err(missing_path_message(&requested)),
+        };
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "archive".to_owned());
+        let destination = unique_path(
+            &destination_folder.join(format!("{name}.{}", format.default_extension())),
+        );
+        items.push((source, destination));
+    }
+
+    let engine: Engine = load_engine()?;
+    let options = CreateOptions {
+        format,
+        threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
+        ..CreateOptions::default()
+    };
+    let (ui, state) = open_progress_window()?;
+    start_create_batch_window(&ui, &state, Arc::clone(&engine), items, options, false);
     ui.run()
         .map_err(|error| format!("UI event loop failed: {error}"))
 }

@@ -51,7 +51,7 @@ use windows::{
                 ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl, IEnumExplorerCommand,
                 IExplorerCommand, IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl,
                 IShellItem, IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
-                SIGDN_FILESYSPATH, ShellExecuteW,
+                SHCreateItemFromIDList, SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{
                 DI_NORMAL, DestroyIcon, DrawIconEx, GetSystemMetrics, HICON, HMENU, InsertMenuW,
@@ -183,6 +183,10 @@ fn decrement_live_objects() {
 #[implement(IShellExtInit, IContextMenu)]
 struct ArchiveContextMenu {
     paths: Mutex<Vec<OsString>>,
+    // The folder receiving a right-drag. It is supplied through
+    // IShellExtInit::Initialize's pidlFolder and is only populated for the
+    // drag-and-drop handler registration.
+    target_folder: Mutex<Option<PathBuf>>,
     active_verbs: Mutex<Vec<Verb>>,
     // Classic-menu bitmap shown in front of the verbs; released in Drop.
     menu_bitmap: Mutex<Option<HBITMAP>>,
@@ -211,6 +215,7 @@ impl ArchiveContextMenu {
     fn new() -> Self {
         Self {
             paths: Mutex::new(Vec::new()),
+            target_folder: Mutex::new(None),
             active_verbs: Mutex::new(Vec::new()),
             menu_bitmap: Mutex::new(None),
         }
@@ -222,15 +227,25 @@ impl ArchiveContextMenu {
             .map(|paths| paths.clone())
             .unwrap_or_default()
     }
+
+    fn target_folder(&self) -> Option<PathBuf> {
+        self.target_folder
+            .lock()
+            .ok()
+            .and_then(|path| path.clone())
+    }
 }
 
 impl IShellExtInit_Impl for ArchiveContextMenu_Impl {
     fn Initialize(
         &self,
-        _pidl_folder: *const ITEMIDLIST,
+        pidl_folder: *const ITEMIDLIST,
         data_obj: Ref<'_, IDataObject>,
         _hkey_prog_id: HKEY,
     ) -> WinResult<()> {
+        if let Ok(mut guard) = self.target_folder.lock() {
+            *guard = item_id_list_filesystem_path(pidl_folder).map(PathBuf::from);
+        }
         let paths = data_obj
             .as_ref()
             .and_then(|data| read_hdrop_paths(data).ok())
@@ -360,7 +375,11 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         let Some(exe) = find_exe_path() else {
             return Ok(());
         };
-        run_exe(&exe, &build_args(verb.subcommand(), &paths));
+        let args = self
+            .target_folder()
+            .map(|destination| build_targeted_args(verb, &destination, &paths))
+            .unwrap_or_else(|| build_args(verb.subcommand(), &paths));
+        run_exe(&exe, &args);
         Ok(())
     }
 
@@ -874,6 +893,36 @@ fn build_args(subcommand: &str, paths: &[OsString]) -> String {
     // make the child process fail before it reaches its permission handling.
     // Use the same Windows quoting rules as the UAC relaunch path.
     let mut args = quote_windows_arg(std::ffi::OsStr::new(subcommand));
+    for path in paths {
+        args.push(' ');
+        args.push_str(&quote_windows_arg(path));
+    }
+    args
+}
+
+/// Builds a private target-aware command used by the right-drag handler. The
+/// destination is the folder that received the drop, so it must be passed
+/// separately from the source paths rather than inferred from their original
+/// parent folders.
+fn build_targeted_args(verb: Verb, destination: &Path, paths: &[OsString]) -> String {
+    let subcommand = match verb {
+        Verb::Extract => "extract-to",
+        Verb::Zip => "zip-to",
+        Verb::SevenZip => "7z-to",
+        Verb::ZipEach => "zip-each-to",
+        Verb::SevenZipEach => "7z-each-to",
+    };
+    build_destination_args(subcommand, destination, paths)
+}
+
+fn build_destination_args(
+    subcommand: &str,
+    destination: &Path,
+    paths: &[OsString],
+) -> String {
+    let mut args = quote_windows_arg(std::ffi::OsStr::new(subcommand));
+    args.push(' ');
+    args.push_str(&quote_windows_arg(destination.as_os_str()));
     for path in paths {
         args.push(' ');
         args.push_str(&quote_windows_arg(path));
@@ -1479,6 +1528,16 @@ fn item_array_paths(array: &IShellItemArray) -> Vec<OsString> {
     paths
 }
 
+/// Resolves the target folder PIDL supplied to a drag-and-drop handler.
+fn item_id_list_filesystem_path(pidl: *const ITEMIDLIST) -> Option<OsString> {
+    if pidl.is_null() {
+        return None;
+    }
+    // SAFETY: Explorer owns and keeps `pidl` valid for the Initialize call.
+    let item: IShellItem = unsafe { SHCreateItemFromIDList(pidl).ok()? };
+    item_filesystem_path(&item)
+}
+
 /// Resolves a shell item to its filesystem path (SIGDN_FILESYSPATH).
 fn item_filesystem_path(item: &IShellItem) -> Option<OsString> {
     // SAFETY: item is live; the returned name must be freed with CoTaskMemFree.
@@ -1540,10 +1599,11 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::{ffi::OsString, path::Path};
 
     use super::{
-        Verb, build_args, menu_verbs, shorten_compression_name, shorten_menu_name,
+        Verb, build_args, build_targeted_args, menu_verbs, shorten_compression_name,
+        shorten_menu_name,
     };
 
     #[test]
@@ -1551,6 +1611,32 @@ mod tests {
         assert_eq!(
             build_args("zip", &[OsString::from(r"C:\")]),
             r#""zip" "C:\\""#
+        );
+    }
+
+    #[test]
+    fn right_drag_extract_arguments_use_the_drop_destination() {
+        let args = build_targeted_args(
+            Verb::Extract,
+            Path::new(r"C:\Drop Folder"),
+            &[OsString::from(r"C:\Source Folder\sample.zip")],
+        );
+        assert_eq!(
+            args,
+            r#""extract-to" "C:\Drop Folder" "C:\Source Folder\sample.zip""#
+        );
+    }
+
+    #[test]
+    fn right_drag_compress_arguments_use_the_drop_destination() {
+        let args = build_targeted_args(
+            Verb::Zip,
+            Path::new(r"C:\Drop Folder"),
+            &[OsString::from(r"C:\Source Folder\sample")],
+        );
+        assert_eq!(
+            args,
+            r#""zip-to" "C:\Drop Folder" "C:\Source Folder\sample""#
         );
     }
 
