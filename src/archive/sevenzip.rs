@@ -3351,6 +3351,9 @@ mod platform_impl {
                     summary.bytes_processed = summary
                         .bytes_processed
                         .saturating_add(worker_summary.bytes_processed);
+                    if summary.warning.is_none() {
+                        summary.warning = worker_summary.warning;
+                    }
                 }
                 Ok(Err(error)) => {
                     if first_error.is_none() {
@@ -3457,6 +3460,7 @@ mod platform_impl {
                 archive_path: path.to_path_buf(),
                 format_name: format.label().to_owned(),
                 filter_name: None,
+                warning: None,
                 entries,
                 total_uncompressed_size: total_uncompressed,
             })

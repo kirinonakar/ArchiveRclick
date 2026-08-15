@@ -3,9 +3,10 @@
 //! Static registry verbs cannot show per-file labels, so this DLL computes
 //! the menu items from the selected paths and displays the real names, e.g.
 //! "보고서.zip으로 압축하기", "보고서.7z로 압축하기" and "보고서\ 에 풀기".
-//! IContextMenu feeds the classic menu and Windows 11's "추가 옵션 표시";
-//! separate IExplorerCommand classes show the same verbs as top-level items in
-//! the Windows 11 default menu.
+//! IContextMenu feeds the classic menu, Windows 11's "추가 옵션 표시", and
+//! the menu shown after a right-drag onto a folder; separate IExplorerCommand
+//! classes show the same verbs as top-level items in the Windows 11 default
+//! menu.
 //! Invoking an item launches archive-rclick.exe directly with Unicode
 //! arguments (no PowerShell, no cmd), and the app shows its progress window.
 #![cfg(windows)]
@@ -135,6 +136,8 @@ const LEGACY_CONTEXT_MENU_KEY: &str =
     r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick";
 const LEGACY_DIRECTORY_CONTEXT_MENU_KEY: &str =
     r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick";
+const DRAG_DROP_HANDLER_KEY: &str =
+    r"Software\Classes\Directory\Background\shellex\DragDropHandlers\ArchiveRclick";
 const EXPLORER_COMMAND_HANDLER_VALUE: &str = "ExplorerCommandHandler";
 
 // IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
@@ -1122,10 +1125,35 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
     ] {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
     }
-    // The old CLSID was only used by those legacy ContextMenuHandlers entries.
-    delete_registry_tree(
+    // The classic handler is still needed for Explorer's right-drag menu.
+    // Unlike the normal file/folder menu, that menu is populated through the
+    // DragDropHandlers registration and passes the dragged files as CF_HDROP.
+    let shell_ext_clsid = guid_string_for(CLSID_SHELL_EXT);
+    let shell_ext_clsid_key = format!(r"Software\Classes\CLSID\{shell_ext_clsid}");
+    let shell_ext_inproc = format!(r"{shell_ext_clsid_key}\InprocServer32");
+    set_registry_string(
         HKEY_CURRENT_USER,
-        &format!(r"Software\Classes\CLSID\{}", guid_string_for(CLSID_SHELL_EXT)),
+        &shell_ext_clsid_key,
+        None,
+        "ArchiveRclick drag-and-drop command",
+    )?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        &shell_ext_inproc,
+        None,
+        &dll_path.to_string_lossy(),
+    )?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        &shell_ext_inproc,
+        Some("ThreadingModel"),
+        "Apartment",
+    )?;
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        DRAG_DROP_HANDLER_KEY,
+        None,
+        &shell_ext_clsid,
     )?;
     for (command_clsid, description) in [
         (CLSID_EXTRACT_COMMAND, "ArchiveRclick extract command"),
@@ -1240,6 +1268,7 @@ pub fn unregister_context_menu() -> Result<(), String> {
         MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
         LEGACY_CONTEXT_MENU_KEY,
         LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
+        DRAG_DROP_HANDLER_KEY,
     ] {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
     }
@@ -1257,6 +1286,13 @@ fn notify_shell_change() {
 
 /// Whether the context-menu handler is currently registered for this user.
 pub fn is_context_menu_registered() -> bool {
+    let drag_drop_registered = registry_key_exists(
+        HKEY_CURRENT_USER,
+        &format!(
+            r"Software\Classes\CLSID\{}\InprocServer32",
+            guid_string_for(CLSID_SHELL_EXT)
+        ),
+    ) && registry_key_exists(HKEY_CURRENT_USER, DRAG_DROP_HANDLER_KEY);
     let classes_registered = [
         CLSID_EXTRACT_COMMAND,
         CLSID_ZIP_COMMAND,
@@ -1294,7 +1330,8 @@ pub fn is_context_menu_registered() -> bool {
         registry_key_exists(HKEY_CURRENT_USER, LEGACY_CONTEXT_MENU_KEY)
             || registry_key_exists(HKEY_CURRENT_USER, LEGACY_DIRECTORY_CONTEXT_MENU_KEY);
 
-    classes_registered
+    drag_drop_registered
+        && classes_registered
         && modern_entries_present
         && !old_cascade_present
         && !old_legacy_handler_present

@@ -223,6 +223,7 @@ mod platform_impl {
         read_filters: Vec<ArchiveReadSupport>,
         read_formats: Vec<ArchiveReadSupport>,
         read_support_format_iso9660: ArchiveReadSupport,
+        read_support_format_lha: ArchiveReadSupport,
         read_support_format_raw: Option<ArchiveReadSupport>,
         read_add_passphrase: Option<ArchiveReadAddPassphrase>,
         read_open_filename_w: ArchiveReadOpenFilenameW,
@@ -426,6 +427,11 @@ mod platform_impl {
                 "archive_read_support_format_iso9660",
                 ArchiveReadSupport
             );
+            let read_support_format_lha = required_symbol!(
+                library,
+                "archive_read_support_format_lha",
+                ArchiveReadSupport
+            );
             let format_candidates: [(&str, ArchiveReadSupport); 13] = [
                 (
                     "7zip",
@@ -470,11 +476,7 @@ mod platform_impl {
                 ("iso9660", read_support_format_iso9660),
                 (
                     "lha",
-                    required_symbol!(
-                        library,
-                        "archive_read_support_format_lha",
-                        ArchiveReadSupport
-                    ),
+                    read_support_format_lha,
                 ),
                 (
                     "rar",
@@ -554,6 +556,7 @@ mod platform_impl {
                 read_filters,
                 read_formats,
                 read_support_format_iso9660,
+                read_support_format_lha,
                 read_support_format_raw,
                 read_add_passphrase: optional_symbol!(
                     library,
@@ -1042,6 +1045,15 @@ mod platform_impl {
                     // SAFETY: reader owns a live read handle in NEW state.
                     unsafe { (api.read_support_format_iso9660)(raw.as_ptr()) },
                     "enabling the ISO 9660 archive format",
+                )?;
+            } else if is_lha_path(path) {
+                // LHA/LZH has no fixed magic signature.  A compressed LHA
+                // member can contain a ZIP signature, so enabling every
+                // bidder lets libarchive select the nested ZIP by mistake.
+                reader.require_ok(
+                    // SAFETY: reader owns a live read handle in NEW state.
+                    unsafe { (api.read_support_format_lha)(raw.as_ptr()) },
+                    "enabling the LHA archive format",
                 )?;
             } else {
                 for support in &api.read_formats {
@@ -1666,6 +1678,50 @@ mod platform_impl {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("iso"))
     }
 
+    fn is_lha_path(path: &Path) -> bool {
+        path.extension().and_then(|extension| extension.to_str()).is_some_and(
+            |extension| matches!(extension.to_ascii_lowercase().as_str(), "lha" | "lzh"),
+        )
+    }
+
+    fn effective_lha_codepage(path: &Path, requested: u32) -> u32 {
+        // LHA/LZH archives in the wild conventionally store Japanese names
+        // as Shift_JIS.  The generic detector can mistake long Japanese
+        // names for CP949 when the UI is set to Auto, so keep Auto useful for
+        // other formats while giving this legacy Japanese format its stable
+        // default.  An explicit user choice still wins.
+        (is_lha_path(path) && requested == 0)
+            .then_some(932)
+            .unwrap_or(requested)
+    }
+
+    fn is_recoverable_archive_corruption(error: &ArchiveError) -> bool {
+        let ArchiveError::LibArchive { operation, message } = error else {
+            return false;
+        };
+        if !matches!(
+            *operation,
+            "reading archive header" | "reading archive entry data" | "closing archive"
+        ) {
+            return false;
+        }
+        let message = message.to_ascii_lowercase();
+        [
+            "bad lzh data",
+            "data error",
+            "truncated",
+            "unexpected end",
+            "invalid header",
+            "checksum",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
+    }
+
+    fn partial_warning(error: &ArchiveError) -> String {
+        format!("partial archive: {error}")
+    }
+
     fn archive_path_components(path: &Path) -> Vec<String> {
         path.to_string_lossy()
             .replace('\\', "/")
@@ -1835,6 +1891,7 @@ mod platform_impl {
             archive_path: path.to_path_buf(),
             format_name,
             filter_name,
+            warning: None,
             entries,
             total_uncompressed_size,
         })
@@ -1899,6 +1956,7 @@ mod platform_impl {
         ) -> ArchiveResult<ArchiveListing> {
             check_cancel(cancel)?;
             let total_input = file_length(path)?;
+            let pathname_codepage = effective_lha_codepage(path, pathname_codepage);
             let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
             throttled.report(opening_snapshot(path, total_input), true);
             let mut reader = Reader::open(&self.api, path, password)?;
@@ -1910,14 +1968,24 @@ mod platform_impl {
                 MAX_LIST_SCAN_DECODED_BYTES,
                 "archive listing",
             );
-            let mut buffer = vec![0u8; IO_BUFFER_SIZE];
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Listing);
             snapshot.total_bytes = Some(total_input);
+            let mut warning = None;
 
-            while let Some(entry) = {
+            loop {
                 check_cancel(cancel)?;
-                reader.next_entry(pathname_codepage)?
-            } {
+                let entry = match reader.next_entry(pathname_codepage) {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(error)
+                        if !entries.is_empty()
+                            && is_recoverable_archive_corruption(&error) =>
+                    {
+                        warning = Some(partial_warning(&error));
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let index = entries.len() as u64;
                 scan.visit_entry()?;
                 let path_bytes = u64::try_from(entry.display_path.encode_utf16().count())
@@ -1939,22 +2007,12 @@ mod platform_impl {
                 }
                 snapshot.current_file.clone_from(&entry.display_path);
                 snapshot.entries_processed = index + 1;
-                // libarchive treats directory entries as header-only.  Some
-                // RAR5 archives reject archive_read_data() for those entries
-                // with "Can't decompress an entry marked as a directory".
-                // Only drain regular-file data while building the listing;
-                // next_header() advances over header-only entries for us.
-                if entry.kind == ArchiveEntryKind::File {
-                    reader.drain_current_entry(
-                        &mut buffer,
-                        cancel,
-                        &mut scan,
-                        |_, consumed_input| {
-                            snapshot.bytes_processed = consumed_input.min(total_input);
-                            throttled.report(snapshot.clone(), false);
-                        },
-                    )?;
-                }
+                // Listing is metadata-only. Asking libarchive to decompress
+                // every file here turns a damaged payload into an all-or-
+                // nothing open failure and needlessly exercises the codec
+                // before the user asks to extract or test it. next_header()
+                // still advances safely; a later parser error becomes a
+                // partial listing.
                 snapshot.bytes_processed = reader.consumed_bytes().min(total_input);
                 throttled.report(snapshot.clone(), false);
                 entries.push(ArchiveEntry {
@@ -1980,7 +2038,12 @@ mod platform_impl {
                     entry.encrypted = true;
                 }
             }
-            reader.finish()?;
+            if let Err(error) = reader.finish() {
+                if entries.is_empty() || !is_recoverable_archive_corruption(&error) {
+                    return Err(error);
+                }
+                warning.get_or_insert_with(|| partial_warning(&error));
+            }
             snapshot.phase = ProgressPhase::Finished;
             snapshot.current_file.clear();
             snapshot.bytes_processed = total_input;
@@ -1989,6 +2052,7 @@ mod platform_impl {
                 archive_path: path.to_path_buf(),
                 format_name,
                 filter_name,
+                warning,
                 entries,
                 total_uncompressed_size,
             })
@@ -2010,6 +2074,8 @@ mod platform_impl {
                 .map_err(|error| ArchiveError::io(destination, error))?;
             verify_directory_handle(&root, &root)?;
             let total_input = file_length(archive)?;
+            let pathname_codepage =
+                effective_lha_codepage(archive, options.pathname_codepage);
             let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
             throttled.report(opening_snapshot(archive, total_input), true);
             let mut reader = Reader::open(&self.api, archive, options.password.as_deref())?;
@@ -2027,11 +2093,21 @@ mod platform_impl {
             snapshot.total_entries = options.total_entries_hint;
             snapshot.total_bytes = options.total_bytes_hint;
             let mut buffer = vec![0u8; IO_BUFFER_SIZE];
+            let mut warning = None;
+            let mut visited_entries = 0u64;
 
-            while let Some(entry) = {
+            'entries: loop {
                 check_cancel(cancel)?;
-                reader.next_entry(options.pathname_codepage)?
-            } {
+                let entry = match reader.next_entry(pathname_codepage) {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(error) if visited_entries > 0 && is_recoverable_archive_corruption(&error) => {
+                        warning = Some(partial_warning(&error));
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
+                visited_entries = visited_entries.saturating_add(1);
                 scan.visit_entry()?;
                 let relative = safe_relative_path(&entry.path)?;
                 if !options.selection.includes(&relative) {
@@ -2041,7 +2117,7 @@ mod platform_impl {
                         .or_else(|| (entry.kind == ArchiveEntryKind::Directory).then_some(0));
                     snapshot.current_file_bytes_processed = 0;
                     if entry.kind == ArchiveEntryKind::File {
-                        reader.drain_current_entry(
+                        let drained = reader.drain_current_entry(
                             &mut buffer,
                             cancel,
                             &mut scan,
@@ -2049,7 +2125,14 @@ mod platform_impl {
                                 snapshot.current_file_bytes_processed = entry_bytes;
                                 throttled.report(snapshot.clone(), false)
                             },
-                        )?;
+                        );
+                        if let Err(error) = drained {
+                            if is_recoverable_archive_corruption(&error) {
+                                warning = Some(partial_warning(&error));
+                                break 'entries;
+                            }
+                            return Err(error);
+                        }
                     }
                     continue;
                 }
@@ -2107,7 +2190,15 @@ mod platform_impl {
                                         snapshot.entries_processed = progress_entries;
                                         throttled.report(snapshot.clone(), false);
                                     },
-                                )?;
+                                );
+                                let drained = match drained {
+                                    Ok(drained) => drained,
+                                    Err(error) if is_recoverable_archive_corruption(&error) => {
+                                        warning = Some(partial_warning(&error));
+                                        break 'entries;
+                                    }
+                                    Err(error) => return Err(error),
+                                };
                                 completed_progress_bytes = completed_progress_bytes.max(drained);
                                 summary.entries_skipped += 1;
                             }
@@ -2124,7 +2215,16 @@ mod platform_impl {
                                 let mut file_bytes = 0u64;
                                 loop {
                                     check_cancel(cancel)?;
-                                    let amount = reader.read(&mut buffer)?;
+                                    let amount = match reader.read(&mut buffer) {
+                                        Ok(amount) => amount,
+                                        Err(error)
+                                            if is_recoverable_archive_corruption(&error) =>
+                                        {
+                                            warning = Some(partial_warning(&error));
+                                            break 'entries;
+                                        }
+                                        Err(error) => return Err(error),
+                                    };
                                     if amount == 0 {
                                         break;
                                     }
@@ -2193,7 +2293,17 @@ mod platform_impl {
                 throttled.report(snapshot.clone(), false);
             }
 
-            reader.finish()?;
+            if let Err(error) = reader.finish() {
+                if warning.is_none() && visited_entries > 0 {
+                    if is_recoverable_archive_corruption(&error) {
+                        warning = Some(partial_warning(&error));
+                    } else {
+                        return Err(error);
+                    }
+                } else if warning.is_none() {
+                    return Err(error);
+                }
+            }
             snapshot.phase = ProgressPhase::Finished;
             snapshot.current_file.clear();
             snapshot.current_file_bytes_processed = 0;
@@ -2207,6 +2317,7 @@ mod platform_impl {
                 .unwrap_or(progress_bytes)
                 .max(progress_bytes);
             throttled.report(snapshot, true);
+            summary.warning = warning;
             Ok(summary)
         }
 
@@ -2334,6 +2445,7 @@ mod platform_impl {
             let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
             throttled.report(opening_snapshot(archive, total_input), true);
             let mut reader = Reader::open(&self.api, archive, password)?;
+            let pathname_codepage = effective_lha_codepage(archive, 0);
             let mut summary = OperationSummary::default();
             let mut snapshot = ProgressSnapshot::new(ProgressPhase::Testing);
             snapshot.total_bytes = Some(total_input);
@@ -2341,7 +2453,7 @@ mod platform_impl {
 
             while let Some(entry) = {
                 check_cancel(cancel)?;
-                reader.next_entry(0)?
+                reader.next_entry(pathname_codepage)?
             } {
                 enforce_limit(
                     summary.entries_processed.saturating_add(1),

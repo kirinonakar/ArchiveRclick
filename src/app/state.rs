@@ -560,6 +560,7 @@ mod tests {
             archive_path: PathBuf::from("test.zip"),
             format_name: "ZIP".to_owned(),
             filter_name: None,
+            warning: None,
             entries,
             total_uncompressed_size: 0,
         }

@@ -26,6 +26,9 @@ pub struct ArchiveListing {
     pub archive_path: PathBuf,
     pub format_name: String,
     pub filter_name: Option<String>,
+    /// Non-fatal parser warning. A value means the listing contains the
+    /// entries recovered before the archive became unreadable.
+    pub warning: Option<String>,
     pub entries: Vec<ArchiveEntry>,
     pub total_uncompressed_size: u64,
 }
@@ -73,6 +76,9 @@ pub struct OperationSummary {
     pub entries_processed: u64,
     pub bytes_processed: u64,
     pub entries_skipped: u64,
+    /// Non-fatal extraction warning. A value means the operation completed
+    /// with the entries that could be recovered from a damaged archive.
+    pub warning: Option<String>,
 }
 
 #[cfg(test)]
@@ -99,6 +105,7 @@ mod tests {
             archive_path: PathBuf::from("sample.iso"),
             format_name: "ISO 9660".to_owned(),
             filter_name: None,
+            warning: None,
             entries: vec![
                 entry(0, "root.txt", 1),
                 entry(1, "dir/a.txt", 2),

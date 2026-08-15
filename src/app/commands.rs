@@ -1817,6 +1817,7 @@ fn start_listing(
                     let entry_count = listing.entries.len();
                     let total = listing.total_uncompressed_size;
                     let format_name = listing.format_name.clone();
+                    let warning = listing.warning.clone();
                     let archive_name = listing
                         .archive_path
                         .file_name()
@@ -1842,7 +1843,11 @@ fn start_listing(
                     ui.set_current_folder(directory.to_string_lossy().replace('\\', "/").into());
                     ui.set_has_archive(true);
                     ui.set_can_go_up(!directory.as_os_str().is_empty());
-                    ui.set_status_text(format!("{format_name} archive").into());
+                    let status = warning.map_or_else(
+                        || format!("{format_name} archive"),
+                        |warning| format!("{format_name} archive — {warning}"),
+                    );
+                    ui.set_status_text(status.into());
                     ui.set_summary_text(
                         format!("{entry_count} entries  •  {}", compact_bytes(total)).into(),
                     );
@@ -1948,14 +1953,20 @@ fn start_extract(
             }
             match result {
                 Ok(summary) => {
-                    ui.set_status_text(
-                        format!(
+                    let status = match summary.warning {
+                        Some(warning) => format!(
+                            "Extracted {} entries to {} — {}",
+                            summary.entries_processed,
+                            destination_for_ui.display(),
+                            warning
+                        ),
+                        None => format!(
                             "Extracted {} entries to {}",
                             summary.entries_processed,
                             destination_for_ui.display()
-                        )
-                        .into(),
-                    );
+                        ),
+                    };
+                    ui.set_status_text(status.into());
                 }
                 Err(error) => display_operation_error(&ui, "Extract archive", error),
             }

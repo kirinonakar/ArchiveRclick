@@ -10,3 +10,4 @@
 *.dll
 !/runtime/x64/*.dll
 ArchiveRclick.log
+$work
