@@ -50,8 +50,8 @@ fn create_formats_for_ui(formats: Vec<CreateFormat>) -> Vec<CreateFormat> {
 }
 
 const ARCHIVE_DROP_EXTENSIONS: &[&str] = &[
-    "zip", "zipx", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "cab", "lha", "lzh",
-    "tgz", "tbz2", "txz",
+    "zip", "zipx", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "cab", "lha", "lzh", "tgz",
+    "tbz2", "txz", "iso",
 ];
 
 fn is_archive_drop_path(path: &Path) -> bool {
@@ -2984,6 +2984,7 @@ mod tests {
         assert!(!is_archive_drop_path(Path::new("movie.mkv")));
         assert!(is_archive_drop_path(Path::new("backup.ZIP")));
         assert!(is_archive_drop_path(Path::new("backup.7z.001")));
+        assert!(is_archive_drop_path(Path::new("installer.ISO")));
         assert!(!is_archive_drop_path(Path::new("movie.mkv.001")));
     }
 
