@@ -258,6 +258,7 @@ component ArchiveTextCell inherits Rectangle {
     in property <string> value;
     in property <bool> selected;
     in property <bool> is-folder: false;
+    in property <bool> folder-activation: false;
     in property <bool> emphasize: false;
     in property <bool> right-aligned: false;
     in property <length> text-left-padding: 4px;
@@ -265,6 +266,9 @@ component ArchiveTextCell inherits Rectangle {
     private property <bool> drag-active: false;
     private property <length> drag-start-x: 0px;
     private property <length> drag-start-y: 0px;
+    // Slint emits double-clicked before the second pointer-up. Folder
+    // navigation rebuilds the list in between, so suppress that stale click.
+    private property <bool> suppress-next-click: false;
     out property <bool> has-hover: touch.has-hover;
     callback clicked(bool);
     callback double-clicked;
@@ -302,7 +306,12 @@ component ArchiveTextCell inherits Rectangle {
         width: parent.width;
         height: parent.height;
         mouse-cursor: root.is-folder ? pointer : default;
-        double-clicked => { root.double-clicked(); }
+        double-clicked => {
+            if root.folder-activation {
+                root.suppress-next-click = true;
+            }
+            root.double-clicked();
+        }
 
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
@@ -321,8 +330,11 @@ component ArchiveTextCell inherits Rectangle {
                 if (event.kind == PointerEventKind.up
                         && event.button == PointerEventButton.left
                         && !root.drag-active) {
-                    root.clicked(event.modifiers.shift);
+                    if !root.suppress-next-click {
+                        root.clicked(event.modifiers.shift);
+                    }
                 }
+                root.suppress-next-click = false;
                 root.drag-active = false;
             }
         }
@@ -469,6 +481,8 @@ component ArchiveListRow inherits Rectangle {
     in property <length> packed-column-width;
     in property <length> modified-column-width;
     in property <bool> context-menu-enabled: true;
+    // A folder double-click rebuilds the model before the second pointer-up.
+    private property <bool> suppress-next-click: false;
     callback toggle(int, bool);
     callback activate(int);
     callback extract-context(int);
@@ -501,10 +515,20 @@ component ArchiveListRow inherits Rectangle {
         width: parent.width - 36px;
         height: parent.height;
         mouse-cursor: root.entry.is-folder ? pointer : default;
-        double-clicked => { root.activate(root.row-index); }
+        double-clicked => {
+            if root.entry.is-folder {
+                root.suppress-next-click = true;
+            }
+            root.activate(root.row-index);
+        }
         pointer-event(event) => {
             if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
-                root.toggle(root.row-index, event.modifiers.shift);
+                if !root.suppress-next-click {
+                    root.toggle(root.row-index, event.modifiers.shift);
+                }
+                root.suppress-next-click = false;
+            } else if event.kind == PointerEventKind.cancel {
+                root.suppress-next-click = false;
             }
         }
     }
@@ -516,6 +540,7 @@ component ArchiveListRow inherits Rectangle {
         value: root.entry.name;
         selected: root.entry.selected;
         is-folder: root.entry.is-folder;
+        folder-activation: root.entry.is-folder;
         emphasize: root.entry.is-folder;
         text-left-padding: 4px;
         text-right-padding: 0px;
@@ -530,6 +555,7 @@ component ArchiveListRow inherits Rectangle {
         height: parent.height;
         value: root.entry.size;
         selected: root.entry.selected;
+        folder-activation: root.entry.is-folder;
         right-aligned: true;
         text-left-padding: 6px;
         text-right-padding: 6px;
@@ -544,6 +570,7 @@ component ArchiveListRow inherits Rectangle {
         height: parent.height;
         value: root.entry.packed;
         selected: root.entry.selected;
+        folder-activation: root.entry.is-folder;
         right-aligned: true;
         text-left-padding: 6px;
         text-right-padding: 6px;
@@ -558,6 +585,7 @@ component ArchiveListRow inherits Rectangle {
         height: parent.height;
         value: root.entry.modified;
         selected: root.entry.selected;
+        folder-activation: root.entry.is-folder;
         text-left-padding: 8px;
         text-right-padding: 8px;
         clicked(shift) => { root.toggle(root.row-index, shift); }
