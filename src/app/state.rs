@@ -12,6 +12,7 @@ use slint::{Model, ModelNotify, ModelTracker};
 use crate::{
     ArchiveRow,
     archive::{ArchiveEntryKind, ArchiveListing, ConflictChoice},
+    platform::utc_to_local_seconds,
     tasks::CancellationToken,
 };
 
@@ -492,6 +493,9 @@ fn format_timestamp(value: Option<i64>) -> String {
     let Some(seconds) = value else {
         return String::new();
     };
+    // Archive entries store UTC timestamps; display them in the system's local
+    // time zone just like Explorer does.
+    let seconds = utc_to_local_seconds(seconds);
     // Civil date conversion adapted from Howard Hinnant's public-domain algorithm.
     let days = seconds.div_euclid(86_400);
     let day_seconds = seconds.rem_euclid(86_400);
@@ -700,7 +704,9 @@ mod tests {
         assert!(row.is_folder);
         assert_eq!(row.size.as_str(), "0 B");
         assert_eq!(row.packed.as_str(), "0 B");
-        assert_eq!(row.modified.as_str(), "1970-01-01 00:00");
+        // The exact string depends on the system time zone; require it to match
+        // the same display path used by the table.
+        assert_eq!(row.modified.as_str(), super::format_timestamp(Some(0)));
         assert_eq!(row.path.as_str(), "folder");
     }
 }

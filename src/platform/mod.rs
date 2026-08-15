@@ -41,5 +41,5 @@ pub use shell::reveal_in_explorer;
 pub use titlebar::apply_window_theme;
 pub use windows::{
     center_window, center_window_with_logical_size, pick_archive, pick_files, pick_folder,
-    run_elevated, save_archive, show_error, show_info,
+    run_elevated, save_archive, show_error, show_info, utc_to_local_seconds,
 };

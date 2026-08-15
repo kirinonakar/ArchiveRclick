@@ -394,6 +394,51 @@ mod imp {
         quoted.push('"');
         quoted
     }
+
+    /// Converts a UTC Unix timestamp to the corresponding wall-clock time in
+    /// the system's local time zone, so archive entry times match Explorer.
+    pub fn utc_to_local_seconds(seconds: i64) -> i64 {
+        use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+        use windows::Win32::System::Time::{
+            FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
+        };
+
+        // Unix seconds -> UTC FILETIME (epoch 1601-01-01). Values outside the
+        // FILETIME range fall back to the unchanged timestamp.
+        let Some(quad) = (seconds as i128)
+            .checked_add(116_444_736_00)
+            .and_then(|value| value.checked_mul(10_000_000))
+        else {
+            return seconds;
+        };
+        if !(0..=i64::MAX as i128).contains(&quad) {
+            return seconds;
+        }
+        let quad = quad as u64;
+        let utc_filetime = FILETIME {
+            dwLowDateTime: quad as u32,
+            dwHighDateTime: (quad >> 32) as u32,
+        };
+        let mut utc_systemtime = SYSTEMTIME::default();
+        if unsafe { FileTimeToSystemTime(&utc_filetime, &mut utc_systemtime) }.is_err() {
+            return seconds;
+        }
+        let mut local_systemtime = SYSTEMTIME::default();
+        if unsafe {
+            SystemTimeToTzSpecificLocalTime(None, &utc_systemtime, &mut local_systemtime)
+        }
+        .is_err()
+        {
+            return seconds;
+        }
+        let mut local_filetime = FILETIME::default();
+        if unsafe { SystemTimeToFileTime(&local_systemtime, &mut local_filetime) }.is_err() {
+            return seconds;
+        }
+        let quad =
+            (u64::from(local_filetime.dwHighDateTime) << 32) | u64::from(local_filetime.dwLowDateTime);
+        (quad / 10_000_000) as i64 - 116_444_736_00
+    }
 }
 
 #[cfg(not(windows))]
@@ -439,11 +484,15 @@ mod imp {
     pub fn run_elevated(_args: &[OsString]) -> Result<bool, String> {
         Err(unsupported("Elevation"))
     }
+
+    pub fn utc_to_local_seconds(seconds: i64) -> i64 {
+        seconds
+    }
 }
 
 pub use super::shell::reveal_in_explorer;
 pub use imp::{
     center_window, center_window_with_logical_size, pick_archive, pick_files, pick_folder,
-    run_elevated, save_archive, show_error, show_info,
+    run_elevated, save_archive, show_error, show_info, utc_to_local_seconds,
 };
 pub(crate) use imp::quote_windows_arg;
