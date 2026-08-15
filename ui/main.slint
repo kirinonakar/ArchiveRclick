@@ -70,7 +70,7 @@ component CodePageComboBox inherits Rectangle {
     height: 32px;
     background: root.enabled ? Palette.control-background : Palette.background;
     border-width: 1px;
-    border-color: root.enabled ? #D6D9DE : Palette.background;
+    border-color: root.enabled ? Palette.border : Palette.background;
     border-radius: 3px;
     clip: true;
     accessible-role: combobox;
@@ -144,7 +144,7 @@ component CodePageComboBox inherits Rectangle {
             height: parent.height;
             background: Palette.alternate-background;
             border-width: 1px;
-            border-color: #D6D9DE;
+            border-color: Palette.border;
             border-radius: 4px;
             clip: true;
 
@@ -849,7 +849,7 @@ export component AppWindow inherits Window {
                 // path bar below.
                 Rectangle {
                     height: 1px;
-                    background: #D6D9DE;
+                    background: Palette.border;
                 }
 
                 // ---------------- Path bar ----------------
@@ -884,7 +884,7 @@ export component AppWindow inherits Window {
                             border-radius: 8px;
                             background: Palette.control-background;
                             border-width: 1px;
-                            border-color: #D6D9DE;
+                            border-color: Palette.border;
                             clip: true;
 
                             folder-path-text := Text {
@@ -1075,7 +1075,7 @@ export component AppWindow inherits Window {
                 // ---------------- Status bar ----------------
                 Rectangle {
                     height: 1px;
-                    background: #D6D9DE;
+                    background: Palette.border;
                 }
 
                 Rectangle {
