@@ -136,8 +136,12 @@ const LEGACY_CONTEXT_MENU_KEY: &str =
     r"Software\Classes\*\shellex\ContextMenuHandlers\ArchiveRclick";
 const LEGACY_DIRECTORY_CONTEXT_MENU_KEY: &str =
     r"Software\Classes\Directory\shellex\ContextMenuHandlers\ArchiveRclick";
-const DRAG_DROP_HANDLER_KEY: &str =
+// Older builds briefly used the Background branch. Remove it during the next
+// registration so Explorer is left with only the actual drag-and-drop key.
+const LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY: &str =
     r"Software\Classes\Directory\Background\shellex\DragDropHandlers\ArchiveRclick";
+const DRAG_DROP_HANDLER_KEY: &str =
+    r"Software\Classes\Directory\shellex\DragDropHandlers\ArchiveRclick";
 const EXPLORER_COMMAND_HANDLER_VALUE: &str = "ExplorerCommandHandler";
 
 // IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
@@ -1122,6 +1126,7 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
         LEGACY_MODERN_MENU_KEY,
         LEGACY_MODERN_DIRECTORY_MENU_KEY,
+        LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY,
     ] {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
     }
@@ -1268,6 +1273,7 @@ pub fn unregister_context_menu() -> Result<(), String> {
         MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
         LEGACY_CONTEXT_MENU_KEY,
         LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
+        LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY,
         DRAG_DROP_HANDLER_KEY,
     ] {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
