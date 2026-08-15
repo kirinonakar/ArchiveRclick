@@ -12,6 +12,7 @@ import { ConflictOverlay } from "progress.slint";
 export struct ArchiveRow {
     selected: bool,
     is-folder: bool,
+    is-executable: bool,
     name: string,
     size: string,
     packed: string,
@@ -258,6 +259,7 @@ component ArchiveTextCell inherits Rectangle {
     in property <string> value;
     in property <bool> selected;
     in property <bool> is-folder: false;
+    in property <bool> is-executable: false;
     in property <bool> folder-activation: false;
     in property <bool> emphasize: false;
     in property <bool> right-aligned: false;
@@ -281,14 +283,28 @@ component ArchiveTextCell inherits Rectangle {
         text: "\u{E8B7}";
         font-family: "Segoe MDL2 Assets";
         font-size: 14px;
-        color: root.selected ? Palette.selection-foreground : Palette.accent-background;
+        color: #FFC83D;
         horizontal-alignment: center;
         vertical-alignment: center;
         visible: root.is-folder;
     }
 
+    executable-icon := Text {
+        x: root.text-left-padding;
+        width: 16px;
+        height: parent.height;
+        text: "\u{E171}";
+        font-family: "Segoe MDL2 Assets";
+        font-size: 14px;
+        color: #E81123;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        visible: root.is-executable;
+    }
+
     cell-text := Text {
-        x: root.is-folder ? root.text-left-padding + 20px : root.text-left-padding;
+        x: root.is-folder || root.is-executable
+            ? root.text-left-padding + 20px : root.text-left-padding;
         width: max(0px, parent.width - self.x - root.text-right-padding);
         height: parent.height;
         text: root.value;
@@ -540,6 +556,7 @@ component ArchiveListRow inherits Rectangle {
         value: root.entry.name;
         selected: root.entry.selected;
         is-folder: root.entry.is-folder;
+        is-executable: root.entry.is-executable;
         folder-activation: root.entry.is-folder;
         emphasize: root.entry.is-folder;
         text-left-padding: 4px;

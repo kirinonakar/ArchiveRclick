@@ -14,7 +14,7 @@ and libarchive for broader archive-format support.
 
 ## Features
 
-- Open and browse ZIP, 7z, RAR/RAR5, TAR, CAB, ISO, LHA/LZH, CPIO, AR, XAR,
+- Open and browse ZIP, 7z, RAR/RAR5, TAR, CAB, ISO/IMG, LHA/LZH, CPIO, AR, XAR,
   WARC, and other formats supported by the bundled libarchive runtime. Formats
   are detected from archive contents rather than filename extensions.
 - Navigate folders, sort and resize columns, select individual entries or a

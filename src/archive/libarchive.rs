@@ -1675,7 +1675,9 @@ mod platform_impl {
     fn is_iso_path(path: &Path) -> bool {
         path.extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("iso"))
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "iso" | "img")
+            })
     }
 
     fn is_lha_path(path: &Path) -> bool {

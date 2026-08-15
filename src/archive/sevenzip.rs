@@ -4371,7 +4371,9 @@ mod platform_impl {
         if path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("iso"))
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "iso" | "img")
+            })
         {
             return Some(ReadFormat::Iso);
         }
@@ -5648,6 +5650,8 @@ mod platform_impl {
             let lzh = directory.join("sample.lzh");
             let iso = directory.join("sample.iso");
             std::fs::write(&iso, b"not an ISO yet").expect("write ISO file");
+            let img = directory.join("sample.img");
+            std::fs::write(&img, b"not an ISO yet").expect("write IMG file");
             std::fs::write(&rar5, b"Rar!\x1a\x07\x01\x00junk").expect("create RAR5 file");
             std::fs::write(&lzh, [0x5f, 0x00, b'-', b'l', b'h', b'5', b'-', 0x00])
                 .expect("create LZH file");
@@ -5657,6 +5661,7 @@ mod platform_impl {
             assert_eq!(archive_format(&rar5), Some(ReadFormat::Rar5));
             assert_eq!(archive_format(&lzh), Some(ReadFormat::Lzh));
             assert_eq!(archive_format(&iso), Some(ReadFormat::Iso));
+            assert_eq!(archive_format(&img), Some(ReadFormat::Iso));
             assert_eq!(archive_format(&directory.join("missing.7z")), None);
             let _ = std::fs::remove_dir_all(&directory);
         }

@@ -234,6 +234,7 @@ impl Model for ArchiveRowModel {
                 .borrow()
                 .contains(&display_entry.relative_path),
             is_folder: display_entry.is_folder,
+            is_executable: !display_entry.is_folder && is_executable_name(&display_entry.name),
             name: display_entry.name.clone().into(),
             size: size.into(),
             packed: packed.into(),
@@ -460,6 +461,13 @@ fn compare_ascii_case_insensitive(left: &str, right: &str) -> Ordering {
     left.bytes()
         .map(|byte| byte.to_ascii_lowercase())
         .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+}
+
+fn is_executable_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [".exe", ".ps1", ".bat", ".cmd"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
 }
 
 fn normalize_archive_path(path: &Path) -> PathBuf {
@@ -713,5 +721,15 @@ mod tests {
         // the same display path used by the table.
         assert_eq!(row.modified.as_str(), super::format_timestamp(Some(0)));
         assert_eq!(row.path.as_str(), "folder");
+    }
+
+    #[test]
+    fn command_file_extensions_share_the_executable_icon() {
+        for name in ["program.exe", "script.PS1", "build.BAT", "run.CmD"] {
+            assert!(super::is_executable_name(name), "expected {name} to match");
+        }
+        for name in ["notes.txt", "program.exe.bak", "script.psm1"] {
+            assert!(!super::is_executable_name(name), "expected {name} not to match");
+        }
     }
 }

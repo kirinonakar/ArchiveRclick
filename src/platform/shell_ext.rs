@@ -110,7 +110,7 @@ const CLSID_SEVENZIP_EACH_COMMAND: GUID = GUID {
 
 const ARCHIVE_EXTENSIONS: &[&str] = &[
     ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".lha", ".lzh",
-    ".tgz", ".tbz2", ".txz", ".iso",
+    ".tgz", ".tbz2", ".txz", ".iso", ".img",
 ];
 const EXE_NAME: &str = "archive-rclick.exe";
 const SETTINGS_KEY: &str = r"Software\ArchiveRclick";
@@ -1723,6 +1723,14 @@ mod tests {
         let iso_verbs = menu_verbs(std::slice::from_ref(&iso));
         assert_eq!(
             iso_verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Extract]
+        );
+
+        let img = root.join("installer.img");
+        std::fs::File::create(&img).expect("create IMG placeholder");
+        let img_verbs = menu_verbs(std::slice::from_ref(&img));
+        assert_eq!(
+            img_verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract]
         );
 
