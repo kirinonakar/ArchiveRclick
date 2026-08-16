@@ -235,6 +235,7 @@ impl Model for ArchiveRowModel {
                 .contains(&display_entry.relative_path),
             is_folder: display_entry.is_folder,
             is_executable: !display_entry.is_folder && is_executable_name(&display_entry.name),
+            is_archive: !display_entry.is_folder && is_archive_name(&display_entry.name),
             name: display_entry.name.clone().into(),
             size: size.into(),
             packed: packed.into(),
@@ -468,6 +469,28 @@ fn is_executable_name(name: &str) -> bool {
     [".exe", ".ps1", ".bat", ".cmd"]
         .iter()
         .any(|extension| name.ends_with(extension))
+}
+
+const ARCHIVE_FILE_EXTENSIONS: &[&str] = &[
+    ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".lha",
+    ".lzh", ".tgz", ".tbz2", ".txz", ".iso", ".img",
+];
+
+fn is_archive_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ARCHIVE_FILE_EXTENSIONS
+        .iter()
+        .any(|extension| name.ends_with(extension))
+        || is_numbered_archive_volume_name(&name)
+}
+
+fn is_numbered_archive_volume_name(name: &str) -> bool {
+    let Some((base, suffix)) = name.rsplit_once('.') else {
+        return false;
+    };
+    (base.ends_with(".zip") || base.ends_with(".7z"))
+        && suffix.len() >= 3
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn normalize_archive_path(path: &Path) -> PathBuf {
@@ -730,6 +753,23 @@ mod tests {
         }
         for name in ["notes.txt", "program.exe.bak", "script.psm1"] {
             assert!(!super::is_executable_name(name), "expected {name} not to match");
+        }
+    }
+
+    #[test]
+    fn archive_file_extensions_share_the_archive_icon() {
+        for name in [
+            "backup.zip",
+            "backup.7Z",
+            "backup.tar.gz",
+            "backup.iso",
+            "backup.zip.001",
+            "backup.7z.002",
+        ] {
+            assert!(super::is_archive_name(name), "expected {name} to match");
+        }
+        for name in ["notes.txt", "backup.zip.bak", "backup.tar.001"] {
+            assert!(!super::is_archive_name(name), "expected {name} not to match");
         }
     }
 }
