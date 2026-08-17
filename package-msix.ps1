@@ -245,7 +245,7 @@ foreach ($asset in $assetSizes.GetEnumerator()) {
 # logo on a system backplate and scales the artwork down inside it. Keep the
 # default, dark-theme, and light-theme variants transparent; the artwork is
 # already suitable for all three backgrounds.
-$appListTargetSizes = @(16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256)
+$appListTargetSizes = @(16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256)
 foreach ($size in $appListTargetSizes) {
     $targetAssets = @(
         "Square44x44Logo.targetsize-$size.png",
@@ -262,6 +262,30 @@ foreach ($size in $appListTargetSizes) {
 
 $manifestPath = Join-Path $packageRoot "AppxManifest.xml"
 New-PackageManifest -Template $templatePath -Destination $manifestPath
+
+# Qualifier-based assets such as targetsize and altform-unplated are selected
+# through the package resource index. Without resources.pri Windows ignores
+# those transparent, full-size variants and falls back to the scaled/plated
+# Square44x44Logo in Start and on the taskbar.
+$makePri = Find-WindowsKitTool -Name "makepri.exe"
+$priConfigPath = Join-Path $output "priconfig.xml"
+$resourcesPriPath = Join-Path $packageRoot "resources.pri"
+Invoke-Native -FilePath $makePri -ArgumentList @(
+    "createconfig", "/cf", $priConfigPath, "/dq", "en-US", "/o"
+)
+try {
+    Invoke-Native -FilePath $makePri -ArgumentList @(
+        "new",
+        "/pr", $packageRoot,
+        "/cf", $priConfigPath,
+        "/mn", $manifestPath,
+        "/of", $resourcesPriPath,
+        "/o"
+    )
+}
+finally {
+    Remove-Item -LiteralPath $priConfigPath -Force -ErrorAction SilentlyContinue
+}
 
 $safeVersion = $Version.Replace('.', '_')
 $packageFileName = "${IdentityName}_${safeVersion}_x64.msix"
@@ -341,6 +365,7 @@ try {
         throw "The generated MSIX does not contain AppxManifest.xml"
     }
     $requiredAssets = @(
+        "resources.pri",
         "Assets\StoreLogo.png",
         "Assets\Square150x150Logo.png",
         "Assets\Square44x44Logo.png"

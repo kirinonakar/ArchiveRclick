@@ -477,6 +477,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     language := ComboBox {
+                        height: 28px;
                         horizontal-stretch: 1;
                         model: root.language-options;
                         current-index: root.selected-language;
@@ -515,6 +516,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     font := ComboBox {
+                        height: 28px;
                         horizontal-stretch: 1;
                         model: root.font-options;
                         current-index: root.font-index;
@@ -532,6 +534,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     thread-picker := ComboBox {
+                        height: 28px;
                         horizontal-stretch: 1;
                         model: root.language-selection == 1
                             ? ["자동", "4", "6", "8", "10", "16", "전체"]
@@ -553,6 +556,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     theme := ComboBox {
+                        height: 28px;
                         horizontal-stretch: 1;
                         model: root.language-selection == 1
                             ? ["시스템", "라이트", "다크"]
@@ -670,6 +674,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     Button {
+                        height: 28px;
                         text: root.language-selection == 1 ? "고지 열기" : root.language-selection == 2 ? "告知を開く" : "Open notices";
                         clicked => { root.open-third-party-licenses(); }
                     }
