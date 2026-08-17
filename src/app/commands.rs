@@ -1550,13 +1550,14 @@ fn wire_callbacks(
     {
         let weak = ui.as_weak();
         ui.on_third_party_licenses_requested(move || {
-            let result = third_party_licenses_path().and_then(|path| platform::open_file(&path));
+            let result = third_party_runtime_licenses_path()
+                .and_then(|path| platform::reveal_in_explorer(&path));
             if let Some(ui) = weak.upgrade() {
                 match result {
-                    Ok(()) => ui.set_status_text("Third-party licenses opened".into()),
+                    Ok(()) => ui.set_status_text("Runtime licenses opened".into()),
                     Err(error) => {
                         ui.set_status_text(error.clone().into());
-                        platform::show_error("Open third-party licenses", &error);
+                        platform::show_error("Open runtime licenses", &error);
                     }
                 }
             }
@@ -3189,8 +3190,24 @@ fn third_party_notices_path() -> Result<PathBuf, String> {
     third_party_file_path("THIRD-PARTY-NOTICES.md", "notice")
 }
 
-fn third_party_licenses_path() -> Result<PathBuf, String> {
-    third_party_file_path("THIRD-PARTY-LICENSES.md", "license list")
+fn third_party_runtime_licenses_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))?;
+    let directory = executable.parent().unwrap_or_else(|| Path::new("."));
+    let candidates = [
+        directory.join("licenses"),
+        directory.join("runtime").join("licenses"),
+    ];
+    candidates
+        .iter()
+        .find(|path| path.is_dir())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "The bundled runtime licenses were not found next to the app. Expected {}.",
+                candidates[0].display()
+            )
+        })
 }
 
 fn display_operation_error(ui: &AppWindow, title: &str, error: ArchiveError) {
