@@ -22,7 +22,9 @@
   </Properties>
 
   <Resources>
-    <Resource Language="en-us" />
+    <Resource Language="en-US" />
+    <Resource Language="ko-KR" />
+    <Resource Language="ja-JP" />
   </Resources>
 
   <Dependencies>
