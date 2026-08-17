@@ -1476,6 +1476,9 @@ fn wire_callbacks(
         ui.on_settings_requested(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_context_menu_state(context_menu_state_text().into());
+                ui.set_context_menu_managed_by_package(
+                    platform::shell_ext::is_context_menu_managed_by_package(),
+                );
                 ui.set_settings_thread_selection(
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
                 );
@@ -3055,7 +3058,13 @@ fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppState) {
 
 /// Human-readable state of the Explorer context-menu registration.
 fn context_menu_state_text() -> &'static str {
-    if platform::shell_ext::is_context_menu_registered() {
+    if platform::shell_ext::is_context_menu_managed_by_package() {
+        if platform::shell_ext::is_context_menu_registered() {
+            "Registered (MSIX)"
+        } else {
+            "Not registered (MSIX)"
+        }
+    } else if platform::shell_ext::is_context_menu_registered() {
         "Registered"
     } else {
         "Not registered"

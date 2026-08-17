@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:desktop9="http://schemas.microsoft.com/appx/manifest/desktop/windows10/9"
+  IgnorableNamespaces="uap uap10 rescap com desktop4 desktop5 desktop9">
+  <Identity
+    Name="__PACKAGE_NAME__"
+    Publisher="__PUBLISHER__"
+    Version="__VERSION__"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>__DISPLAY_NAME__</DisplayName>
+    <PublisherDisplayName>__PUBLISHER_DISPLAY_NAME__</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.17763.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application
+      Id="ArchiveRclick"
+      Executable="archive-rclick.exe"
+      EntryPoint="Windows.FullTrustApplication"
+      uap10:RuntimeBehavior="packagedClassicApp"
+      uap10:TrustLevel="mediumIL">
+      <uap:VisualElements
+        DisplayName="__DISPLAY_NAME__"
+        Description="A fast, lightweight Windows archive manager"
+        BackgroundColor="#1F2937"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+        <!-- The same native DLL implements all IExplorerCommand CLSIDs. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="ArchiveRclick Explorer commands">
+              <com:Class
+                Id="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+              <com:Class
+                Id="6B2B1C4B-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+              <com:Class
+                Id="6B2B1C4C-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+              <com:Class
+                Id="6B2B1C4D-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+              <com:Class
+                Id="6B2B1C4E-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+              <com:Class
+                Id="6B2B1C4F-9D3E-4F5A-8C7B-1E2F3A4B5C6D"
+                Path="archive_rclick_core.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!--
+          desktop4/desktop5 is the manifest registration that makes these
+          IExplorerCommand implementations appear in Windows 11's default
+          context menu instead of only under "Show more options".
+        -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="ArchiveRclickExtractFile" Clsid="6B2B1C4B-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickZipFile" Clsid="6B2B1C4C-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickSevenZipFile" Clsid="6B2B1C4D-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickZipEachFile" Clsid="6B2B1C4E-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickSevenZipEachFile" Clsid="6B2B1C4F-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="ArchiveRclickExtractDirectory" Clsid="6B2B1C4B-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickZipDirectory" Clsid="6B2B1C4C-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickSevenZipDirectory" Clsid="6B2B1C4D-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickZipEachDirectory" Clsid="6B2B1C4E-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+              <desktop5:Verb Id="ArchiveRclickSevenZipEachDirectory" Clsid="6B2B1C4F-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+
+        <!--
+          Register the same classic IContextMenu handler for the legacy
+          context menu and Explorer's right-drag menu. The modern menu above
+          uses IExplorerCommand; these desktop9 extensions cover the classic
+          and drag-and-drop paths separately.
+        -->
+        <desktop9:Extension Category="windows.fileExplorerClassicContextMenuHandler">
+          <desktop9:FileExplorerClassicContextMenuHandler>
+            <desktop9:ExtensionHandler Type="*" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+            <desktop9:ExtensionHandler Type="Directory" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+          </desktop9:FileExplorerClassicContextMenuHandler>
+        </desktop9:Extension>
+
+        <desktop9:Extension Category="windows.fileExplorerClassicDragDropContextMenuHandler">
+          <desktop9:FileExplorerClassicDragDropContextMenuHandler>
+            <desktop9:ExtensionHandler Type="Directory" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+            <desktop9:ExtensionHandler Type="Drive" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
+          </desktop9:FileExplorerClassicDragDropContextMenuHandler>
+        </desktop9:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

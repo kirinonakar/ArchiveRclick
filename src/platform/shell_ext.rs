@@ -115,6 +115,7 @@ const ARCHIVE_EXTENSIONS: &[&str] = &[
 const EXE_NAME: &str = "archive-rclick.exe";
 const SETTINGS_KEY: &str = r"Software\ArchiveRclick";
 const EXE_PATH_VALUE: &str = "ExePath";
+const CONTEXT_MENU_ENABLED_VALUE: &str = "ContextMenuEnabled";
 const LEGACY_MODERN_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclick";
 const LEGACY_MODERN_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\ArchiveRclick";
 const MODERN_EXTRACT_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickExtract";
@@ -143,6 +144,54 @@ const LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY: &str =
 const DRAG_DROP_HANDLER_KEY: &str =
     r"Software\Classes\Directory\shellex\DragDropHandlers\ArchiveRclick";
 const EXPLORER_COMMAND_HANDLER_VALUE: &str = "ExplorerCommandHandler";
+
+// GetCurrentPackageFullName returns ERROR_INSUFFICIENT_BUFFER on its first
+// probe when the calling process has package identity. The app is also built
+// as a portable unpackaged executable, so use the API directly instead of
+// making the MSIX path a compile-time-only distinction.
+const ERROR_INSUFFICIENT_BUFFER_CODE: i32 = 122;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentPackageFullName(
+        package_full_name_length: *mut u32,
+        package_full_name: *mut u16,
+    ) -> i32;
+}
+
+fn is_package_managed_process() -> bool {
+    let mut length = 0u32;
+    // SAFETY: the first call is the documented size probe and passes a valid
+    // out-parameter with a null output buffer.
+    unsafe {
+        GetCurrentPackageFullName(&mut length, ptr::null_mut())
+            == ERROR_INSUFFICIENT_BUFFER_CODE
+    }
+}
+
+/// Returns the user's opt-in state for the Explorer menu. Packaged apps keep
+/// their shell registrations in the manifest, so the same per-user flag lets
+/// Settings hide/show those commands without trying to remove package-owned
+/// registration data.
+fn is_context_menu_enabled() -> bool {
+    match read_registry_string(
+        HKEY_CURRENT_USER,
+        SETTINGS_KEY,
+        CONTEXT_MENU_ENABLED_VALUE,
+    ) {
+        Some(value) => value.to_string_lossy() != "0",
+        None => true,
+    }
+}
+
+fn set_context_menu_enabled(enabled: bool) -> Result<(), String> {
+    set_registry_string(
+        HKEY_CURRENT_USER,
+        SETTINGS_KEY,
+        Some(CONTEXT_MENU_ENABLED_VALUE),
+        if enabled { "1" } else { "0" },
+    )
+}
 
 // IContextMenu::InvokeCommand receives the zero-based command offset in lpVerb.
 // The visible verbs are dynamic, so keep the actual menu order per instance
@@ -272,6 +321,9 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if u_flags & CMF_DEFAULTONLY != 0 {
             return S_OK;
         }
+        if !is_context_menu_enabled() {
+            return S_OK;
+        }
         let paths = self.selected_paths();
         if paths.is_empty() {
             return S_OK;
@@ -345,6 +397,9 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
     fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> WinResult<()> {
         if pici.is_null() {
             return Err(E_POINTER.into());
+        }
+        if !is_context_menu_enabled() {
+            return Ok(());
         }
         // For a numeric verb, Explorer passes the zero-based command offset
         // directly in the low word of lpVerb; it is NOT the absolute menu id.
@@ -600,6 +655,9 @@ impl Drop for ArchiveVerbCommand {
 
 impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     fn GetTitle(&self, psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
+        if !is_context_menu_enabled() {
+            return Ok(PWSTR::null());
+        }
         let paths = psiitemarray
             .as_ref()
             .map(item_array_paths)
@@ -642,7 +700,7 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
         psiitemarray: Ref<'_, IShellItemArray>,
         _foktobeslow: BOOL,
     ) -> WinResult<u32> {
-        let visible = psiitemarray.as_ref().is_some_and(|array| {
+        let visible = is_context_menu_enabled() && psiitemarray.as_ref().is_some_and(|array| {
             let paths_buf: Vec<PathBuf> =
                 item_array_paths(array).iter().map(PathBuf::from).collect();
             !paths_buf.is_empty() && self.label(&paths_buf).is_some()
@@ -659,6 +717,9 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
         psiitemarray: Ref<'_, IShellItemArray>,
         _pbc: Ref<'_, IBindCtx>,
     ) -> WinResult<()> {
+        if !is_context_menu_enabled() {
+            return Ok(());
+        }
         let paths = psiitemarray
             .as_ref()
             .map(item_array_paths)
@@ -988,16 +1049,25 @@ fn read_hdrop(medium: &STGMEDIUM) -> WinResult<Vec<OsString>> {
 }
 
 fn find_exe_path() -> Option<OsString> {
+    // Prefer the executable beside the loaded shell-extension DLL. This is
+    // the package-local executable for an MSIX shell extension and prevents a
+    // stale HKCU path left by an older portable registration from redirecting
+    // the packaged menu action to a different installation.
+    if let Some(module) = module_file_name() {
+        if let Some(directory) = Path::new(&module).parent() {
+            let candidate = directory.join(EXE_NAME);
+            if candidate.is_file() {
+                return Some(candidate.into_os_string());
+            }
+        }
+    }
     if let Some(configured) = read_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)
     {
         if Path::new(&configured).is_file() {
             return Some(configured);
         }
     }
-    let module = module_file_name()?;
-    let directory = Path::new(&module).parent()?;
-    let candidate = directory.join(EXE_NAME);
-    candidate.is_file().then(|| candidate.into_os_string())
+    None
 }
 
 /// Loads the small app icon from the executable into a transparent 32bpp DIB
@@ -1153,10 +1223,16 @@ fn read_registry_string(hive: HKEY, key_path: &str, value: &str) -> Option<OsStr
     (!text.is_empty()).then(|| OsString::from(text))
 }
 
-/// Writes the per-user registry entries that attach this shell extension to
-/// Explorer's right-click menu. `dll_path` is the registered InprocServer32
-/// module (archive_rclick_core.dll next to the app executable).
+/// Registers the portable shell extension, or enables the manifest-owned
+/// package extension when called from an MSIX process. `dll_path` is the
+/// portable InprocServer32 module (archive_rclick_core.dll next to the app
+/// executable).
 pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
+    if is_package_managed_process() {
+        set_context_menu_enabled(true)?;
+        notify_shell_change();
+        return Ok(());
+    }
     if !dll_path.is_file() {
         return Err(format!(
             "The shell extension DLL does not exist: {}",
@@ -1286,14 +1362,21 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         Some(EXE_PATH_VALUE),
         &exe.to_string_lossy(),
     )?;
+    set_context_menu_enabled(true)?;
     notify_shell_change();
     Ok(())
 }
 
-/// Removes the registry entries written by [`register_context_menu`]. The
-/// `Software\ArchiveRclick` key itself is kept because it also holds the app's
-/// settings; only the recorded executable path is deleted.
+/// Unregisters the portable shell extension, or disables the manifest-owned
+/// package extension when called from an MSIX process. The package manifest
+/// remains installed, but the COM handlers hide and reject commands while the
+/// per-user flag is disabled.
 pub fn unregister_context_menu() -> Result<(), String> {
+    if is_package_managed_process() {
+        set_context_menu_enabled(false)?;
+        notify_shell_change();
+        return Ok(());
+    }
     for clsid in [
         CLSID_SHELL_EXT,
         CLSID_EXTRACT_COMMAND,
@@ -1328,6 +1411,11 @@ pub fn unregister_context_menu() -> Result<(), String> {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
     }
     delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
+    delete_registry_value(
+        HKEY_CURRENT_USER,
+        SETTINGS_KEY,
+        CONTEXT_MENU_ENABLED_VALUE,
+    )?;
     notify_shell_change();
     Ok(())
 }
@@ -1341,6 +1429,9 @@ fn notify_shell_change() {
 
 /// Whether the context-menu handler is currently registered for this user.
 pub fn is_context_menu_registered() -> bool {
+    if is_package_managed_process() {
+        return is_context_menu_enabled();
+    }
     let drag_drop_registered = registry_key_exists(
         HKEY_CURRENT_USER,
         &format!(
@@ -1390,6 +1481,13 @@ pub fn is_context_menu_registered() -> bool {
         && modern_entries_present
         && !old_cascade_present
         && !old_legacy_handler_present
+        && is_context_menu_enabled()
+}
+
+/// Returns true when the installed MSIX manifest, rather than per-user
+/// registry entries, owns the Explorer context-menu registration.
+pub fn is_context_menu_managed_by_package() -> bool {
+    is_package_managed_process()
 }
 
 fn registry_key_exists(hive: HKEY, key_path: &str) -> bool {

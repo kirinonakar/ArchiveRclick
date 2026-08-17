@@ -736,6 +736,7 @@ export component AppWindow inherits Window {
     in-out property <int> selection-count: 0;
     in-out property <bool> settings-visible;
     in-out property <string> context-menu-state;
+    in-out property <bool> context-menu-managed-by-package;
     in-out property <int> sort-column: 0;
     in-out property <bool> sort-ascending: true;
     in-out property <float> column-name-boundary: 0.28;
@@ -1223,6 +1224,7 @@ export component AppWindow inherits Window {
         language-options: root.language-options;
         language-selection: root.language-selection;
         context-menu-state: root.context-menu-state;
+        context-menu-managed-by-package: root.context-menu-managed-by-package;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
         accepted(font-selection, thread-index, theme-index, language-index, header_encryption) => {

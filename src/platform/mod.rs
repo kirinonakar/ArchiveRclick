@@ -24,6 +24,10 @@ pub mod shell_ext {
     pub fn is_context_menu_registered() -> bool {
         false
     }
+
+    pub fn is_context_menu_managed_by_package() -> bool {
+        false
+    }
 }
 pub mod windows;
 

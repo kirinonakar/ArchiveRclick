@@ -397,6 +397,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <[string]> language-options;
     in property <int> language-selection;
     in property <string> context-menu-state;
+    in property <bool> context-menu-managed-by-package: false;
 
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
