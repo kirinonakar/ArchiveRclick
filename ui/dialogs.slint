@@ -396,6 +396,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <int> theme-selection;
     in property <[string]> language-options;
     in property <int> language-selection;
+    in property <int> language-preference-selection;
     in property <string> app-version;
     in property <string> context-menu-state;
     in property <bool> context-menu-managed-by-package: false;
@@ -405,7 +406,7 @@ export component SettingsOverlay inherits Rectangle {
     private property <bool> header-encryption-value: root.header-encryption;
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
-    private property <int> selected-language: root.language-selection;
+    private property <int> selected-language: root.language-preference-selection;
 
     callback accepted(int, int, int, int, bool);
     callback cancelled();

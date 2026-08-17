@@ -239,6 +239,27 @@ foreach ($asset in $assetSizes.GetEnumerator()) {
         -Size $asset.Value
 }
 
+# Square44x44Logo is also the package's AppList icon. Windows uses exact
+# target-size variants for the taskbar, Start pins, search results, and other
+# unplated surfaces. Without the unplated variants Windows puts the normal
+# logo on a system backplate and scales the artwork down inside it. Keep the
+# default, dark-theme, and light-theme variants transparent; the artwork is
+# already suitable for all three backgrounds.
+$appListTargetSizes = @(16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256)
+foreach ($size in $appListTargetSizes) {
+    $targetAssets = @(
+        "Square44x44Logo.targetsize-$size.png",
+        "Square44x44Logo.targetsize-${size}_altform-unplated.png",
+        "Square44x44Logo.targetsize-${size}_altform-lightunplated.png"
+    )
+    foreach ($assetName in $targetAssets) {
+        New-ScaledPng `
+            -Source $sourceArtwork `
+            -Destination (Join-Path $assetsRoot $assetName) `
+            -Size $size
+    }
+}
+
 $manifestPath = Join-Path $packageRoot "AppxManifest.xml"
 New-PackageManifest -Template $templatePath -Destination $manifestPath
 
@@ -319,7 +340,17 @@ try {
     if (-not (Test-Path -LiteralPath $verifyManifest -PathType Leaf)) {
         throw "The generated MSIX does not contain AppxManifest.xml"
     }
-    foreach ($required in @("archive-rclick.exe", "archive_rclick_core.dll", "Assets\Square44x44Logo.png")) {
+    $requiredAssets = @(
+        "Assets\StoreLogo.png",
+        "Assets\Square150x150Logo.png",
+        "Assets\Square44x44Logo.png"
+    )
+    foreach ($size in $appListTargetSizes) {
+        foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {
+            $requiredAssets += "Assets\Square44x44Logo.targetsize-${size}${suffix}.png"
+        }
+    }
+    foreach ($required in @("archive-rclick.exe", "archive_rclick_core.dll") + $requiredAssets) {
         if (-not (Test-Path -LiteralPath (Join-Path $unpacked $required) -PathType Leaf)) {
             throw "The generated MSIX is missing $required"
         }

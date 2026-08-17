@@ -38,10 +38,14 @@ mod imp {
     use windows::{
         Win32::{
             Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
-            System::Registry::{
-                HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, REG_VALUE_TYPE,
-                RegCloseKey, RegCreateKeyW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW,
-                RegSetValueExW,
+            Globalization::GetUserDefaultUILanguage,
+            System::{
+                Registry::{
+                    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, REG_VALUE_TYPE,
+                    RegCloseKey, RegCreateKeyW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW,
+                    RegSetValueExW,
+                },
+                SystemServices::{LANG_JAPANESE, LANG_KOREAN},
             },
         },
         core::{HSTRING, PCWSTR, PWSTR},
@@ -67,6 +71,7 @@ mod imp {
     const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
 
     const AUTO: &str = "auto";
+    const DEFAULT_LANGUAGE: &str = "default";
     const PREFERRED_FONT: &str = "Noto Sans JP";
     const FALLBACK_FONT: &str = "Yu Gothic";
 
@@ -316,23 +321,44 @@ mod imp {
         Ok(())
     }
 
-    /// Loads the stored interface language; returns "en" when unset.
-    pub fn load_language_preference() -> String {
-        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
-            return "en".to_owned();
-        };
-        match read_string_value(key.0, LANGUAGE_VALUE) {
-            Some(value) if matches!(value.as_str(), "en" | "ko" | "ja") => value,
-            _ => "en".to_owned(),
+    /// Returns the language selected by Windows for the current user.
+    pub fn default_language_preference() -> &'static str {
+        let primary_language = unsafe { GetUserDefaultUILanguage() } & 0x03ff;
+        match primary_language as u32 {
+            LANG_KOREAN => "ko",
+            LANG_JAPANESE => "ja",
+            _ => "en",
         }
     }
 
-    /// Persists the interface language ("en", "ko", or "ja").
+    /// Resolves an interface language preference to the language used by the
+    /// UI. Explicit choices remain stable; only "default" follows Windows.
+    pub fn resolve_language_preference(preference: &str) -> &'static str {
+        match preference {
+            DEFAULT_LANGUAGE => default_language_preference(),
+            "ko" => "ko",
+            "ja" => "ja",
+            _ => "en",
+        }
+    }
+
+    /// Loads the stored interface language; returns "default" when unset.
+    pub fn load_language_preference() -> String {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return DEFAULT_LANGUAGE.to_owned();
+        };
+        match read_string_value(key.0, LANGUAGE_VALUE) {
+            Some(value) if matches!(value.as_str(), "default" | "en" | "ko" | "ja") => value,
+            _ => DEFAULT_LANGUAGE.to_owned(),
+        }
+    }
+
+    /// Persists the interface language ("default", "en", "ko", or "ja").
     pub fn save_language_preference(preference: &str) -> Result<(), String> {
-        let preference = if matches!(preference, "en" | "ko" | "ja") {
+        let preference = if matches!(preference, "default" | "en" | "ko" | "ja") {
             preference
         } else {
-            "en"
+            DEFAULT_LANGUAGE
         };
         let key_name = HSTRING::from(SETTINGS_KEY);
         let mut raw = HKEY(ptr::null_mut());
@@ -639,11 +665,23 @@ mod imp {
     }
 
     pub fn load_language_preference() -> String {
-        "en".to_owned()
+        "default".to_owned()
     }
 
     pub fn save_language_preference(_preference: &str) -> Result<(), String> {
         Err("Settings persistence is only available on Windows".to_owned())
+    }
+
+    pub fn default_language_preference() -> &'static str {
+        "en"
+    }
+
+    pub fn resolve_language_preference(preference: &str) -> &'static str {
+        match preference {
+            "ko" => "ko",
+            "ja" => "ja",
+            _ => "en",
+        }
     }
 
     pub fn load_window_geometry() -> Option<super::WindowGeometry> {
@@ -666,6 +704,7 @@ mod imp {
 pub use imp::{
     load_column_boundaries, load_font_preference, load_header_encryption_preference,
     load_language_preference, load_theme_preference, load_thread_preference, load_window_geometry,
+    default_language_preference, resolve_language_preference,
     resolve_font_family, save_column_boundaries, save_font_preference,
     save_header_encryption_preference, save_language_preference, save_theme_preference,
     save_thread_preference, save_window_geometry,

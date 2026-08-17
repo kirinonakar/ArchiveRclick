@@ -731,6 +731,7 @@ export component AppWindow inherits Window {
     in-out property <int> theme-selection: 0;
     in-out property <[string]> language-options;
     in-out property <int> language-selection: 0;
+    in-out property <int> language-preference-selection: 0;
     in-out property <[string]> encoding-options;
     in-out property <int> encoding-selection: 0;
     in-out property <int> selection-state: 0;
@@ -1227,6 +1228,7 @@ export component AppWindow inherits Window {
         theme-selection: root.theme-selection;
         language-options: root.language-options;
         language-selection: root.language-selection;
+        language-preference-selection: root.language-preference-selection;
         context-menu-state: root.context-menu-state;
         context-menu-managed-by-package: root.context-menu-managed-by-package;
         register-context-menu => { root.context-menu-register-requested(); }

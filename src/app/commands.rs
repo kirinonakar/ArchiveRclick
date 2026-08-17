@@ -109,7 +109,12 @@ fn theme_registry_key(index: i32) -> &'static str {
     }
 }
 
-const LANGUAGE_OPTIONS: &[(&str, &str)] = &[("English", "en"), ("한국어", "ko"), ("日本語", "ja")];
+const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
+    ("Default", "default"),
+    ("English", "en"),
+    ("한국어", "ko"),
+    ("日本語", "ja"),
+];
 const PROJECT_GITHUB_URL: &str = "https://github.com/kirinonakar/ArchiveRclick";
 
 const CODEPAGE_OPTIONS: &[(&str, u32)] = &[
@@ -127,6 +132,14 @@ const CODEPAGE_OPTIONS: &[(&str, u32)] = &[
 ];
 
 fn language_selection_index(preference: &str) -> i32 {
+    match platform::resolve_language_preference(preference) {
+        "ko" => 1,
+        "ja" => 2,
+        _ => 0,
+    }
+}
+
+fn language_preference_selection_index(preference: &str) -> i32 {
     LANGUAGE_OPTIONS
         .iter()
         .position(|(_, key)| *key == preference)
@@ -137,7 +150,7 @@ fn language_registry_key(index: i32) -> &'static str {
     LANGUAGE_OPTIONS
         .get(index.max(0) as usize)
         .map(|(_, key)| *key)
-        .unwrap_or("en")
+        .unwrap_or("default")
 }
 
 fn pathname_codepage(index: i32) -> u32 {
@@ -345,8 +358,10 @@ fn open_main_window(
             .collect::<Vec<_>>()
             .as_slice(),
     ));
-    ui.set_language_selection(language_selection_index(
-        &platform::load_language_preference(),
+    let language_preference = platform::load_language_preference();
+    ui.set_language_selection(language_selection_index(&language_preference));
+    ui.set_language_preference_selection(language_preference_selection_index(
+        &language_preference,
     ));
     ui.set_encoding_options(ModelRc::from(
         CODEPAGE_OPTIONS
@@ -1489,8 +1504,10 @@ fn wire_callbacks(
                 );
                 ui.set_settings_header_encryption(platform::load_header_encryption_preference());
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
-                ui.set_language_selection(language_selection_index(
-                    &platform::load_language_preference(),
+                let language_preference = platform::load_language_preference();
+                ui.set_language_selection(language_selection_index(&language_preference));
+                ui.set_language_preference_selection(language_preference_selection_index(
+                    &language_preference,
                 ));
                 ui.set_settings_visible(true);
             }
@@ -1576,7 +1593,7 @@ fn wire_callbacks(
             move |font_selection,
                   thread_selection,
                   theme_selection,
-                  language_selection,
+                  language_preference_selection,
                   header_encryption| {
                 let preference = FONT_OPTIONS
                     .get(font_selection.max(0) as usize)
@@ -1597,8 +1614,9 @@ fn wire_callbacks(
                     platform::save_theme_preference(theme_registry_key(theme_selection))
                 {
                     failure = Some(format!("Could not save settings: {error}"));
-                } else if let Err(error) =
-                    platform::save_language_preference(language_registry_key(language_selection))
+                } else if let Err(error) = platform::save_language_preference(
+                    language_registry_key(language_preference_selection),
+                )
                 {
                     failure = Some(format!("Could not save settings: {error}"));
                 }
@@ -1614,7 +1632,9 @@ fn wire_callbacks(
                     ui.set_settings_header_encryption(header_encryption);
                     ui.set_create_header_encryption(header_encryption);
                     ui.set_theme_selection(theme_selection);
-                    ui.set_language_selection(language_selection);
+                    let language_preference = language_registry_key(language_preference_selection);
+                    ui.set_language_selection(language_selection_index(language_preference));
+                    ui.set_language_preference_selection(language_preference_selection);
                     platform::apply_window_theme(ui.window(), theme_selection);
                 }
             },
@@ -3304,7 +3324,8 @@ mod tests {
         archive_directory_name, cli_archive_destination, common_parent_folder,
         create_formats_for_ui, is_archive_drop_path, parse_dropped_path, parse_elevated_batch_output,
         parse_elevated_extract, parse_elevated_output, progress_ui_text, run_with_startup_argument,
-        unique_path,
+        unique_path, language_preference_selection_index, language_registry_key,
+        language_selection_index,
     };
     use crate::archive::CreateFormat;
     use crate::tasks::{ProgressPhase, ProgressSnapshot};
@@ -3354,6 +3375,20 @@ mod tests {
     #[test]
     fn help_command_does_not_load_libarchive() {
         assert!(run_with_startup_argument(Some("--help".into())).is_ok());
+    }
+
+    #[test]
+    fn default_language_is_a_separate_preference_from_the_effective_ui_language() {
+        assert_eq!(language_preference_selection_index("default"), 0);
+        assert_eq!(language_preference_selection_index("en"), 1);
+        assert_eq!(language_preference_selection_index("ko"), 2);
+        assert_eq!(language_preference_selection_index("ja"), 3);
+        assert_eq!(language_registry_key(0), "default");
+
+        assert_eq!(language_selection_index("en"), 0);
+        assert_eq!(language_selection_index("ko"), 1);
+        assert_eq!(language_selection_index("ja"), 2);
+        assert!(matches!(language_selection_index("default"), 0..=2));
     }
 
     #[test]

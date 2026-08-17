@@ -41,7 +41,8 @@ pub use explorer_drag::start_file_drag;
 pub use settings::{
     ColumnBoundaries, WindowGeometry, load_column_boundaries, load_font_preference,
     load_header_encryption_preference, load_language_preference, load_theme_preference,
-    load_thread_preference, load_window_geometry, resolve_font_family, save_column_boundaries,
+    load_thread_preference, load_window_geometry, default_language_preference,
+    resolve_font_family, resolve_language_preference, save_column_boundaries,
     save_font_preference, save_header_encryption_preference, save_language_preference,
     save_theme_preference, save_thread_preference, save_window_geometry,
 };
