@@ -396,9 +396,13 @@ export component SettingsOverlay inherits Rectangle {
     in property <int> theme-selection;
     in property <[string]> language-options;
     in property <int> language-selection;
+    in property <string> app-version;
     in property <string> context-menu-state;
     in property <bool> context-menu-managed-by-package: false;
 
+    private property <int> active-tab: 0;
+    private property <int> font-index: root.font-selection;
+    private property <bool> header-encryption-value: root.header-encryption;
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
     private property <int> selected-language: root.language-selection;
@@ -407,16 +411,20 @@ export component SettingsOverlay inherits Rectangle {
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
+    callback open-github();
+    callback open-third-party-licenses();
 
     background: #00000080;
     accessible-role: region;
-    accessible-label: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
+    accessible-label: root.active-tab == 1
+        ? (root.language-selection == 1 ? "정보" : root.language-selection == 2 ? "情報" : "About")
+        : (root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings");
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 420px;
-        height: 330px;
+        width: 460px;
+        height: 420px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -437,135 +445,247 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: root.language-selection == 1 ? "언어" : root.language-selection == 2 ? "言語" : "Language";
-                    color: Palette.foreground;
-                    font-weight: 600;
-                    width: 150px;
-                    vertical-alignment: center;
-                }
-                language := ComboBox {
+                spacing: 6px;
+
+                settings-tab := Button {
                     horizontal-stretch: 1;
-                    model: root.language-options;
-                    current-index: root.selected-language;
-                    changed current-index => { root.selected-language = self.current-index; }
+                    text: root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings";
+                    primary: root.active-tab == 0;
+                    clicked => { root.active-tab = 0; }
                 }
-            }
 
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: root.language-selection == 1 ? "7z 파일명 암호화" : root.language-selection == 2 ? "7z ファイル名暗号化" : "7z Header Encryption";
-                    color: Palette.foreground;
-                    font-weight: 600;
-                    width: 150px;
-                    vertical-alignment: center;
-                }
-                header-encryption := CheckBox {
+                about-tab := Button {
                     horizontal-stretch: 1;
-                    checked: root.header-encryption;
-                    text: root.language-selection == 1
-                        ? "암호 설정 시 파일명 숨기기"
-                        : root.language-selection == 2
-                            ? "パスワード設定時にファイル名を隠す"
-                            : "Hide names when a password is set";
+                    text: root.language-selection == 1 ? "정보" : root.language-selection == 2 ? "情報" : "About";
+                    primary: root.active-tab == 1;
+                    clicked => { root.active-tab = 1; }
                 }
             }
 
-            HorizontalLayout {
-                spacing: 8px;
+            if root.active-tab == 0 : VerticalLayout {
+                spacing: 4px;
+                vertical-stretch: 1;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "언어" : root.language-selection == 2 ? "言語" : "Language";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    language := ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.language-options;
+                        current-index: root.selected-language;
+                        changed current-index => { root.selected-language = self.current-index; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "7z 파일명 암호화" : root.language-selection == 2 ? "7z ファイル名暗号化" : "7z Header Encryption";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    header-encryption := CheckBox {
+                        horizontal-stretch: 1;
+                        checked: root.header-encryption-value;
+                        changed checked => { root.header-encryption-value = self.checked; }
+                        text: root.language-selection == 1
+                            ? "암호 설정 시 파일명 숨기기"
+                            : root.language-selection == 2
+                                ? "パスワード設定時にファイル名を隠す"
+                                : "Hide names when a password is set";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "인터페이스 글꼴" : root.language-selection == 2 ? "インターフェースフォント" : "Interface font";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    font := ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.font-options;
+                        current-index: root.font-index;
+                        changed current-index => { root.font-index = self.current-index; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "CPU 스레드 (7z)" : root.language-selection == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    thread-picker := ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.language-selection == 1
+                            ? ["자동", "4", "6", "8", "10", "16", "전체"]
+                            : root.language-selection == 2
+                                ? ["自動", "4", "6", "8", "10", "16", "すべて"]
+                                : ["Auto", "4", "6", "8", "10", "16", "All"];
+                        current-index: root.thread-index;
+                        changed current-index => { root.thread-index = self.current-index; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "테마" : root.language-selection == 2 ? "テーマ" : "Theme";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    theme := ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.language-selection == 1
+                            ? ["시스템", "라이트", "다크"]
+                            : root.language-selection == 2
+                                ? ["システム", "ライト", "ダーク"]
+                                : ["System", "Light", "Dark"];
+                        current-index: root.theme-index;
+                        changed current-index => { root.theme-index = self.current-index; }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: AppTheme.border;
+                }
+
                 Text {
-                    text: root.language-selection == 1 ? "인터페이스 글꼴" : root.language-selection == 2 ? "インターフェースフォント" : "Interface font";
-                    color: Palette.foreground;
+                    text: root.language-selection == 1 ? "Explorer 우클릭 메뉴" : root.language-selection == 2 ? "Explorer 右クリックメニュー" : "Explorer right-click menu";
                     font-weight: 600;
-                    width: 150px;
-                    vertical-alignment: center;
-                }
-                font := ComboBox {
-                    horizontal-stretch: 1;
-                    model: root.font-options;
-                    current-index: root.font-selection;
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: root.language-selection == 1 ? "CPU 스레드 (7z)" : root.language-selection == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
                     color: Palette.foreground;
-                    font-weight: 600;
-                    width: 150px;
-                    vertical-alignment: center;
                 }
-                thread-picker := ComboBox {
-                    horizontal-stretch: 1;
-                    model: root.language-selection == 1
-                        ? ["자동", "4", "6", "8", "10", "16", "전체"]
-                        : root.language-selection == 2
-                            ? ["自動", "4", "6", "8", "10", "16", "すべて"]
-                            : ["Auto", "4", "6", "8", "10", "16", "All"];
-                    current-index: root.thread-index;
-                    changed current-index => { root.thread-index = self.current-index; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: root.context-menu-state;
+                        color: Palette.foreground;
+                        font-size: 12px;
+                        opacity: 0.72;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Button {
+                        text: root.language-selection == 1 ? "등록" : root.language-selection == 2 ? "登録" : "Register";
+                        clicked => { root.register-context-menu(); }
+                    }
+
+                    Button {
+                        text: root.language-selection == 1 ? "제거" : root.language-selection == 2 ? "削除" : "Remove";
+                        clicked => { root.unregister-context-menu(); }
+                    }
                 }
             }
 
-            HorizontalLayout {
+            if root.active-tab == 1 : VerticalLayout {
                 spacing: 8px;
-                Text {
-                    text: root.language-selection == 1 ? "테마" : root.language-selection == 2 ? "テーマ" : "Theme";
-                    color: Palette.foreground;
-                    font-weight: 600;
-                    width: 150px;
-                    vertical-alignment: center;
+                vertical-stretch: 1;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    height: 78px;
+
+                    Image {
+                        source: @image-url("../app.png");
+                        width: 78px;
+                        height: 78px;
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        vertical-stretch: 1;
+
+                        Text {
+                            text: "ArchiveRclick";
+                            font-size: 22px;
+                            font-weight: 700;
+                            color: Palette.foreground;
+                        }
+
+                        Text {
+                            text: root.language-selection == 1 ? "버전 " + root.app-version : root.language-selection == 2 ? "バージョン " + root.app-version : "Version " + root.app-version;
+                            color: Palette.foreground;
+                            opacity: 0.78;
+                        }
+                    }
                 }
-                theme := ComboBox {
-                    horizontal-stretch: 1;
-                    model: root.language-selection == 1
-                        ? ["시스템", "라이트", "다크"]
-                        : root.language-selection == 2
-                            ? ["システム", "ライト", "ダーク"]
-                            : ["System", "Light", "Dark"];
-                    current-index: root.theme-index;
-                    changed current-index => { root.theme-index = self.current-index; }
+
+                Rectangle {
+                    height: 1px;
+                    background: AppTheme.border;
                 }
-            }
 
-            Rectangle {
-                height: 1px;
-                background: AppTheme.border;
-            }
-
-            Text {
-                text: root.language-selection == 1 ? "Explorer 우클릭 메뉴" : root.language-selection == 2 ? "Explorer 右クリックメニュー" : "Explorer right-click menu";
-                font-weight: 600;
-                color: Palette.foreground;
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "프로젝트 GitHub" : root.language-selection == 2 ? "プロジェクト GitHub" : "Project GitHub";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: root.language-selection == 1 ? "GitHub 열기" : root.language-selection == 2 ? "GitHubを開く" : "Open GitHub";
+                        clicked => { root.open-github(); }
+                    }
+                }
 
                 Text {
-                    text: root.context-menu-state;
+                    text: "https://github.com/kirinonakar/ArchiveRclick";
                     color: Palette.foreground;
                     font-size: 12px;
                     opacity: 0.72;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
+                    wrap: word-wrap;
                 }
 
-                Button {
-                    text: root.language-selection == 1 ? "등록" : root.language-selection == 2 ? "登録" : "Register";
-                    clicked => { root.register-context-menu(); }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "Third-party 라이선스" : root.language-selection == 2 ? "サードパーティライセンス" : "Third-party licenses";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: root.language-selection == 1 ? "고지 열기" : root.language-selection == 2 ? "告知を開く" : "Open notices";
+                        clicked => { root.open-third-party-licenses(); }
+                    }
                 }
 
-                Button {
-                    text: root.language-selection == 1 ? "제거" : root.language-selection == 2 ? "削除" : "Remove";
-                    clicked => { root.unregister-context-menu(); }
+                Text {
+                    text: root.language-selection == 1
+                        ? "THIRD-PARTY-NOTICES.md에 포함된 라이선스 고지를 기본 프로그램으로 엽니다."
+                        : root.language-selection == 2
+                            ? "THIRD-PARTY-NOTICES.md に含まれるライセンス告知を既定のアプリで開きます。"
+                            : "Opens the bundled THIRD-PARTY-NOTICES.md in the default application.";
+                    color: Palette.foreground;
+                    font-size: 12px;
+                    opacity: 0.72;
+                    wrap: word-wrap;
                 }
             }
-
-            Rectangle { vertical-stretch: 1; }
 
             HorizontalLayout {
                 spacing: 8px;
@@ -577,7 +697,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(font.current-index, root.thread-index, root.theme-index, root.selected-language, header-encryption.checked); }
+                    clicked => { root.accepted(root.font-index, root.thread-index, root.theme-index, root.selected-language, root.header-encryption-value); }
                 }
             }
         }

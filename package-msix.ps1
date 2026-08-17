@@ -1,11 +1,10 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = "dist\msix",
-    [string]$IdentityName = "ArchiveRclick",
-    [string]$Publisher = "CN=ArchiveRclick",
-    [string]$PublisherDisplayName = "ArchiveRclick",
+    [string]$IdentityName = "kirinonakar.ArchiveRclick",
+    [string]$Publisher = "CN=5F40B554-380B-47DB-92AD-D044EB10269C",
+    [string]$PublisherDisplayName = "kirinonakar",
     [string]$DisplayName = "ArchiveRclick",
-    [string]$Version = "1.0.0.0",
     [switch]$StoreSubmission,
     [switch]$SkipBuild
 )
@@ -14,6 +13,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repository = $PSScriptRoot
+$cargoManifestPath = Join-Path $repository "Cargo.toml"
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $repository "dist"))
 $output = [System.IO.Path]::GetFullPath((Join-Path $repository $OutputDirectory))
 $templatePath = Join-Path $repository "packaging\msix\Package.appxmanifest.template.xml"
@@ -44,6 +44,59 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) {
         throw "$([System.IO.Path]::GetFileName($FilePath)) failed with exit code $LASTEXITCODE"
     }
+}
+
+function New-ScaledPng {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$Size
+    )
+
+    Add-Type -AssemblyName System.Drawing
+    $sourceImage = $null
+    $bitmap = $null
+    $graphics = $null
+    try {
+        $sourceImage = [System.Drawing.Image]::FromFile($Source)
+        $bitmap = [System.Drawing.Bitmap]::new(
+            $Size,
+            $Size,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.Clear([System.Drawing.Color]::Transparent)
+        $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.DrawImage($sourceImage, 0, 0, $Size, $Size)
+        $bitmap.Save($Destination, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally {
+        if ($graphics) { $graphics.Dispose() }
+        if ($bitmap) { $bitmap.Dispose() }
+        if ($sourceImage) { $sourceImage.Dispose() }
+    }
+}
+
+function Get-CargoPackageVersion {
+    param([string]$ManifestPath)
+
+    $inPackageTable = $false
+    foreach ($line in Get-Content -LiteralPath $ManifestPath) {
+        if ($line -match '^\s*\[package\]\s*$') {
+            $inPackageTable = $true
+            continue
+        }
+        if ($inPackageTable -and $line -match '^\s*\[') {
+            break
+        }
+        if ($inPackageTable -and $line -match '^\s*version\s*=\s*"([^"]+)"') {
+            return $Matches[1]
+        }
+    }
+    throw "Could not find the [package] version in $ManifestPath"
 }
 
 function Find-WindowsKitTool {
@@ -101,13 +154,11 @@ if ($IdentityName -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,49}$') {
 if ([string]::IsNullOrWhiteSpace($Publisher) -or $Publisher.Contains('"') -or $Publisher.Contains('<')) {
     throw "Publisher must be the exact Publisher string from Partner Center"
 }
-if ($Version -notmatch '^[1-9][0-9]{0,4}\.[0-9]{1,5}\.[0-9]{1,5}\.0$') {
-    throw "Version must be a four-part Store version such as 1.0.0.0; the fourth part must be 0"
+$cargoVersion = Get-CargoPackageVersion -ManifestPath $cargoManifestPath
+if ($cargoVersion -notmatch '^(?<major>[1-9][0-9]{0,4})\.(?<minor>[0-9]{1,5})\.(?<patch>[0-9]{1,5})$') {
+    throw "Cargo package version '$cargoVersion' must be a stable Store-compatible x.y.z version with a non-zero major component"
 }
-if ($StoreSubmission -and $IdentityName -eq "ArchiveRclick" -and $Publisher -eq "CN=ArchiveRclick") {
-    throw "StoreSubmission requires the exact Identity Name and Publisher from Partner Center. Pass -IdentityName and -Publisher explicitly."
-}
-
+$Version = "$($Matches.major).$($Matches.minor).$($Matches.patch).0"
 if (-not $SkipBuild) {
     Push-Location $repository
     try {
@@ -168,11 +219,24 @@ Copy-Item -LiteralPath (Join-Path $repository "THIRD-PARTY-LICENSES.md") -Destin
 Copy-Item -LiteralPath $runtimeHashesPath -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $repository "runtime\licenses") -Destination $packageRoot -Recurse
 
-# The source artwork is square and already contains the application icon. The
-# same unqualified asset works for the manifest's package logo slots and keeps
-# packaging deterministic without requiring an image-editing dependency.
-foreach ($assetName in @("StoreLogo.png", "Square150x150Logo.png", "Square44x44Logo.png")) {
-    Copy-Item -LiteralPath (Join-Path $repository "app.png") -Destination (Join-Path $assetsRoot $assetName)
+# Generate the manifest logos at their actual target sizes. Using the 980px
+# source directly in every slot makes Explorer resample the package icon again
+# for small context-menu surfaces, which can make it look soft or squashed.
+$sourceArtwork = Join-Path $repository "app.png"
+$assetSizes = [ordered]@{
+    "StoreLogo.png" = 50
+    "StoreLogo.scale-200.png" = 100
+    "Square150x150Logo.png" = 150
+    "Square150x150Logo.scale-200.png" = 300
+    "Square44x44Logo.png" = 44
+    "Square44x44Logo.scale-200.png" = 88
+    "Square44x44Logo.scale-400.png" = 176
+}
+foreach ($asset in $assetSizes.GetEnumerator()) {
+    New-ScaledPng `
+        -Source $sourceArtwork `
+        -Destination (Join-Path $assetsRoot $asset.Key) `
+        -Size $asset.Value
 }
 
 $manifestPath = Join-Path $packageRoot "AppxManifest.xml"
@@ -184,59 +248,64 @@ $msixPath = Join-Path $output $packageFileName
 $makeAppx = Find-WindowsKitTool -Name "makeappx.exe"
 Invoke-Native -FilePath $makeAppx -ArgumentList @("pack", "/d", $packageRoot, "/p", $msixPath, "/o")
 
-# A locally sideloaded MSIX must be signed, and the certificate subject must
-# exactly match the Publisher value in AppxManifest.xml. Reuse the same
-# development certificate from the current user's certificate store so the
-# exported .cer remains stable across packaging runs. Only the public
-# certificate is written next to the MSIX.
-foreach ($certificateCommand in @("New-SelfSignedCertificate", "Export-Certificate")) {
-    if (-not (Get-Command $certificateCommand -ErrorAction SilentlyContinue)) {
-        throw "Could not find $certificateCommand. Run this script on Windows with the PKI PowerShell module installed."
-    }
-}
-
 $certificatePath = Join-Path $output "${IdentityName}_signing.cer"
-$certificateFriendlyName = "$IdentityName MSIX development certificate"
-$certificate = Get-ChildItem -LiteralPath "Cert:\CurrentUser\My" |
-    Where-Object {
-        $_.Subject -eq $Publisher -and
-        $_.FriendlyName -eq $certificateFriendlyName -and
-        $_.HasPrivateKey -and
-        $_.NotAfter -gt (Get-Date)
-    } |
-    Sort-Object NotBefore -Descending |
-    Select-Object -First 1
 
-if ($certificate) {
-    Write-Host "Reusing development certificate: $($certificate.Thumbprint)"
+if ($StoreSubmission) {
+    # Partner Center signs the package during Store publication. Do not create
+    # or attach a local development certificate to the upload artifact.
+    Write-Host "Skipping local development certificate for Store submission."
 }
 else {
-    $certificateParameters = @{
-        Type = "Custom"
-        Subject = $Publisher
-        FriendlyName = $certificateFriendlyName
-        KeyUsage = "DigitalSignature"
-        KeyAlgorithm = "RSA"
-        KeyLength = 2048
-        HashAlgorithm = "SHA256"
-        KeyExportPolicy = "NonExportable"
-        CertStoreLocation = "Cert:\CurrentUser\My"
-        NotAfter = (Get-Date).AddYears(3)
-        TextExtension = @(
-            "2.5.29.37={text}1.3.6.1.5.5.7.3.3"
-            "2.5.29.19={text}"
-        )
+    # A locally sideloaded MSIX must be signed, and the certificate subject must
+    # exactly match the Publisher value in AppxManifest.xml. Reuse the same
+    # development certificate from the current user's certificate store so the
+    # exported .cer remains stable across packaging runs. Only the public
+    # certificate is written next to the MSIX.
+    foreach ($certificateCommand in @("New-SelfSignedCertificate", "Export-Certificate")) {
+        if (-not (Get-Command $certificateCommand -ErrorAction SilentlyContinue)) {
+            throw "Could not find $certificateCommand. Run this script on Windows with the PKI PowerShell module installed."
+        }
     }
-    $certificate = New-SelfSignedCertificate @certificateParameters
-    if (-not $certificate) {
-        throw "Could not create the MSIX development certificate"
+
+    $certificateFriendlyName = "$IdentityName MSIX development certificate"
+    $certificate = Get-ChildItem -LiteralPath "Cert:\CurrentUser\My" |
+        Where-Object {
+            $_.Subject -eq $Publisher -and
+            $_.FriendlyName -eq $certificateFriendlyName -and
+            $_.HasPrivateKey -and
+            $_.NotAfter -gt (Get-Date)
+        } |
+        Sort-Object NotBefore -Descending |
+        Select-Object -First 1
+
+    if ($certificate) {
+        Write-Host "Reusing development certificate: $($certificate.Thumbprint)"
     }
-    Write-Host "Created development certificate: $($certificate.Thumbprint)"
-}
+    else {
+        $certificateParameters = @{
+            Type = "Custom"
+            Subject = $Publisher
+            FriendlyName = $certificateFriendlyName
+            KeyUsage = "DigitalSignature"
+            KeyAlgorithm = "RSA"
+            KeyLength = 2048
+            HashAlgorithm = "SHA256"
+            KeyExportPolicy = "NonExportable"
+            CertStoreLocation = "Cert:\CurrentUser\My"
+            NotAfter = (Get-Date).AddYears(3)
+            TextExtension = @(
+                "2.5.29.37={text}1.3.6.1.5.5.7.3.3"
+                "2.5.29.19={text}"
+            )
+        }
+        $certificate = New-SelfSignedCertificate @certificateParameters
+        if (-not $certificate) {
+            throw "Could not create the MSIX development certificate"
+        }
+        Write-Host "Created development certificate: $($certificate.Thumbprint)"
+    }
 
-Export-Certificate -Cert $certificate -FilePath $certificatePath -Type CERT | Out-Null
-
-if (-not $StoreSubmission) {
+    Export-Certificate -Cert $certificate -FilePath $certificatePath -Type CERT | Out-Null
     $signTool = Find-WindowsKitTool -Name "signtool.exe"
     Invoke-Native -FilePath $signTool -ArgumentList @(
         "sign", "/fd", "SHA256", "/sha1", $certificate.Thumbprint, $msixPath
@@ -284,14 +353,13 @@ Compress-Archive -Path (Join-Path $uploadRoot "*") -DestinationPath $uploadPath 
 Remove-Item -LiteralPath $uploadRoot -Recurse -Force
 
 Write-Host "MSIX package: $msixPath"
-Write-Host "Certificate: $certificatePath"
+if (-not $StoreSubmission) {
+    Write-Host "Certificate: $certificatePath"
+}
 Write-Host "Store upload file: $uploadPath"
 if ($StoreSubmission) {
-    Write-Warning "The generated .cer is for local testing only; Microsoft signs the MSIX during Store publication."
+    Write-Host "The .msixupload contains the unsigned package for Partner Center submission."
 }
 if (-not $StoreSubmission) {
     Write-Host "The MSIX is signed with the development certificate. Trust the .cer before installing it."
-    if ($IdentityName -eq "ArchiveRclick" -and $Publisher -eq "CN=ArchiveRclick") {
-        Write-Warning "This build uses the default development identity. For Partner Center, pass the exact Name and Publisher shown in the app's identity details with -StoreSubmission."
-    }
 }

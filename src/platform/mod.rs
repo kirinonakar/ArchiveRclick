@@ -21,6 +21,10 @@ pub mod shell_ext {
         Err("The Explorer right-click menu is only available on Windows".to_owned())
     }
 
+    pub fn cleanup_portable_context_menu_entries() -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn is_context_menu_registered() -> bool {
         false
     }
@@ -41,7 +45,7 @@ pub use settings::{
     save_font_preference, save_header_encryption_preference, save_language_preference,
     save_theme_preference, save_thread_preference, save_window_geometry,
 };
-pub use shell::reveal_in_explorer;
+pub use shell::{open_file, open_url, reveal_in_explorer};
 pub use titlebar::apply_window_theme;
 pub use windows::{
     center_window, center_window_with_logical_size, pick_archive, pick_files, pick_folder,

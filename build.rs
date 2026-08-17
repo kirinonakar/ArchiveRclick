@@ -36,7 +36,10 @@ fn main() {
         .expect("failed to compile Slint progress-window UI");
 
     if env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        embed_resource::compile("app.rc", embed_resource::NONE)
+        // The Explorer shell extension is the component that supplies the
+        // modern context-menu icon, so embed the same icon resource into every
+        // Windows artifact, including the cdylib.
+        embed_resource::compile_for_everything("app.rc", embed_resource::NONE)
             .manifest_optional()
             .unwrap_or_else(|error| panic!("failed to embed app icon resource: {error}"));
         let target_arch =

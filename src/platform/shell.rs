@@ -35,11 +35,33 @@ mod imp {
         let code = result.0 as isize;
         if code <= 32 {
             Err(format!(
-                "Explorer could not reveal the path (ShellExecuteW returned {code})"
+                "Windows could not open the target (ShellExecuteW returned {code})"
             ))
         } else {
             Ok(())
         }
+    }
+
+    pub fn open_file(path: &Path) -> Result<(), String> {
+        let absolute: PathBuf = std::path::absolute(path)
+            .map_err(|error| format!("Could not resolve {}: {error}", path.display()))?;
+        let metadata = absolute
+            .metadata()
+            .map_err(|error| format!("Could not inspect {}: {error}", absolute.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("The target is not a file: {}", absolute.display()));
+        }
+
+        let target = path_string(absolute.as_os_str())?;
+        shell_execute(&target, PCWSTR::null())
+    }
+
+    pub fn open_url(url: &str) -> Result<(), String> {
+        if url.contains('\0') {
+            return Err("The URL cannot contain a null character".to_owned());
+        }
+        let target = HSTRING::from(url);
+        shell_execute(&target, PCWSTR::null())
     }
 
     pub fn reveal_in_explorer(path: &Path) -> Result<(), String> {
@@ -70,9 +92,17 @@ mod imp {
 mod imp {
     use std::path::Path;
 
+    pub fn open_file(_path: &Path) -> Result<(), String> {
+        Err("Opening files is only available on Windows".to_owned())
+    }
+
+    pub fn open_url(_url: &str) -> Result<(), String> {
+        Err("Opening links is only available on Windows".to_owned())
+    }
+
     pub fn reveal_in_explorer(_path: &Path) -> Result<(), String> {
         Err("Reveal in Explorer is only available on Windows".to_owned())
     }
 }
 
-pub use imp::reveal_in_explorer;
+pub use imp::{open_file, open_url, reveal_in_explorer};

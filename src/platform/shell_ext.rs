@@ -368,8 +368,8 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         // Bitmaps only accepts monochrome masks; passing the color bitmap
         // returned by GetIconInfo makes its transparent pixels render black.
         // Use MIIM_BITMAP with an alpha-capable DIB instead.
-        if let Some(exe) = find_exe_path() {
-            if let Some(bitmap) = load_menu_icon_bitmap(&exe) {
+        if let Some(icon_module) = find_icon_module_path() {
+            if let Some(bitmap) = load_menu_icon_bitmap(&icon_module) {
                 for offset in 0..count {
                     let item = index_menu.saturating_add(offset);
                     let mut menu_item = MENUITEMINFOW {
@@ -540,24 +540,27 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
 }
 
 fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    // Show the same destination name that the command will use. In
+    // particular, selecting several folders creates one archive beside their
+    // common parent, so a generic "selected folders" label hides the actual
+    // output file from the user.
+    let zip_name = compression_destination_name(paths, CreateFormat::Zip);
+    let seven_name = compression_destination_name(paths, CreateFormat::SevenZip);
     if is_multi_folder_selection(paths) {
         return vec![
-            (Verb::Zip, "선택한 폴더를 하나의 ZIP으로 압축하기".to_owned()),
-            (Verb::SevenZip, "선택한 폴더를 하나의 7z으로 압축하기".to_owned()),
+            (
+                Verb::Zip,
+                format!("{}으로 압축하기", shorten_compression_name(&zip_name)),
+            ),
+            (
+                Verb::SevenZip,
+                format!("{}로 압축하기", shorten_compression_name(&seven_name)),
+            ),
             (Verb::ZipEach, "각 폴더를 각각 ZIP으로 압축하기".to_owned()),
             (Verb::SevenZipEach, "각 폴더를 각각 7z으로 압축하기".to_owned()),
         ];
     }
 
-    // 실제 압축 파일명 (이미 있으면 _2, _3 ...)
-    let zip_name = unique_path(&cli_archive_destination(paths, CreateFormat::Zip))
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "archive.zip".to_owned());
-    let seven_name = unique_path(&cli_archive_destination(paths, CreateFormat::SevenZip))
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "archive.7z".to_owned());
     vec![
         (
             Verb::Zip,
@@ -568,6 +571,15 @@ fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
             format!("{}로 압축하기", shorten_compression_name(&seven_name)),
         ),
     ]
+}
+
+/// Returns the actual file name that the create command will choose for the
+/// given sources, including the next `_2`, `_3`, ... name when needed.
+fn compression_destination_name(paths: &[PathBuf], format: CreateFormat) -> String {
+    unique_path(&cli_archive_destination(paths, format))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("archive.{}", format.default_extension()))
 }
 
 fn is_multi_folder_selection(paths: &[PathBuf]) -> bool {
@@ -671,12 +683,15 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     }
 
     fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        let Some(exe) = find_exe_path() else {
+        let Some(icon_module) = find_icon_module_path() else {
             return Err(E_NOTIMPL.into());
         };
-        // Explorer resolves "path,index" against the executable's icon
-        // resources, so the Windows 11 default menu shows the app icon.
-        wide_alloc(&format!("{},0", exe.to_string_lossy())).ok_or_else(|| E_OUTOFMEMORY.into())
+        // Use a negative resource id, the standard IExplorerCommand icon
+        // format. The icon is embedded in the shell-extension DLL itself, so
+        // an MSIX package never falls back to a differently scaled package
+        // logo or a stale executable path.
+        wide_alloc(&format!("{},-1", icon_module.to_string_lossy()))
+            .ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
@@ -1070,19 +1085,38 @@ fn find_exe_path() -> Option<OsString> {
     None
 }
 
-/// Loads the small app icon from the executable into a transparent 32bpp DIB
-/// for the classic Explorer menu. The caller owns the returned bitmap.
-fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
-    let exe_wide = wide(&exe.to_string_lossy())?;
+fn find_icon_module_path() -> Option<OsString> {
+    module_file_name().or_else(find_exe_path)
+}
+
+/// Loads the app icon from the executable or shell-extension DLL into a
+/// transparent 32bpp DIB for the classic Explorer menu. The caller owns the
+/// returned bitmap.
+fn load_menu_icon_bitmap(icon_source: &OsString) -> Option<HBITMAP> {
+    let source_wide = wide(&icon_source.to_string_lossy())?;
     // LoadImageW with LR_LOADFROMFILE cannot extract icons from .exe files
     // (it only reads .ico/.cur/.ani files), so use ExtractIconExW, the API
     // the shell itself uses to resolve file icons.
+    let mut large = HICON(ptr::null_mut());
     let mut small = HICON(ptr::null_mut());
-    // SAFETY: exe_wide is NUL-terminated and phiconsmall is an out-parameter.
-    let count = unsafe { ExtractIconExW(PCWSTR(exe_wide.as_ptr()), 0, None, Some(&mut small), 1) };
-    if count == 0 || small.0.is_null() {
+    // SAFETY: source_wide is NUL-terminated and both icon handles are valid
+    // out-parameters for ExtractIconExW.
+    let count = unsafe {
+        ExtractIconExW(
+            PCWSTR(source_wide.as_ptr()),
+            0,
+            Some(&mut large),
+            Some(&mut small),
+            1,
+        )
+    };
+    if count == 0 || (large.0.is_null() && small.0.is_null()) {
         return None;
     }
+    // Prefer the large source icon when shrinking it to the menu bitmap. The
+    // small handle can already be a low-resolution raster and becomes soft
+    // or visibly compressed in the classic menu.
+    let icon = if !large.0.is_null() { large } else { small };
     let width = unsafe { GetSystemMetrics(SM_CXMENUCHECK) }.max(1);
     let height = unsafe { GetSystemMetrics(SM_CYMENUCHECK) }.max(1);
     let bitmap_info = BITMAPINFO {
@@ -1105,6 +1139,9 @@ fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
             .ok()?;
     if pixels.is_null() {
         let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
+        if !large.0.is_null() {
+            let _ = unsafe { DestroyIcon(large) };
+        }
         let _ = unsafe { DestroyIcon(small) };
         return None;
     }
@@ -1119,16 +1156,41 @@ fn load_menu_icon_bitmap(exe: &OsString) -> Option<HBITMAP> {
     let dc = unsafe { CreateCompatibleDC(None) };
     if dc.0.is_null() {
         let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
-        let _ = unsafe { DestroyIcon(small) };
+        if !large.0.is_null() {
+            let _ = unsafe { DestroyIcon(large) };
+        }
+        if !small.0.is_null() {
+            let _ = unsafe { DestroyIcon(small) };
+        }
         return None;
     }
     let previous = unsafe { SelectObject(dc, HGDIOBJ(bitmap.0)) };
-    let draw_result = unsafe { DrawIconEx(dc, 0, 0, small, width, height, 0, None, DI_NORMAL) };
+    let icon_size = width.min(height);
+    let icon_x = (width - icon_size) / 2;
+    let icon_y = (height - icon_size) / 2;
+    let draw_result = unsafe {
+        DrawIconEx(
+            dc,
+            icon_x,
+            icon_y,
+            icon,
+            icon_size,
+            icon_size,
+            0,
+            None,
+            DI_NORMAL,
+        )
+    };
     if !previous.0.is_null() {
         let _ = unsafe { SelectObject(dc, previous) };
     }
     let _ = unsafe { DeleteDC(dc) };
-    let _ = unsafe { DestroyIcon(small) };
+    if !large.0.is_null() {
+        let _ = unsafe { DestroyIcon(large) };
+    }
+    if !small.0.is_null() {
+        let _ = unsafe { DestroyIcon(small) };
+    }
     if draw_result.is_err() {
         let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
         None
@@ -1245,16 +1307,8 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
     let exe = directory.join(EXE_NAME);
     // Register only the dedicated IExplorerCommand entries below. Older
     // versions registered the same operation through IContextMenu as well,
-    // which makes Windows 11 show a second, duplicate Extract item.
-    for key in [
-        LEGACY_CONTEXT_MENU_KEY,
-        LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
-        LEGACY_MODERN_MENU_KEY,
-        LEGACY_MODERN_DIRECTORY_MENU_KEY,
-        LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY,
-    ] {
-        delete_registry_tree(HKEY_CURRENT_USER, key)?;
-    }
+    // which makes Windows 11 show a second, duplicate item.
+    remove_portable_context_menu_entries()?;
     // The classic handler is still needed for Explorer's right-drag menu.
     // Unlike the normal file/folder menu, that menu is populated through the
     // DragDropHandlers registration and passes the dragged files as CF_HDROP.
@@ -1377,6 +1431,33 @@ pub fn unregister_context_menu() -> Result<(), String> {
         notify_shell_change();
         return Ok(());
     }
+    remove_portable_context_menu_entries()?;
+    delete_registry_value(
+        HKEY_CURRENT_USER,
+        SETTINGS_KEY,
+        CONTEXT_MENU_ENABLED_VALUE,
+    )?;
+    notify_shell_change();
+    Ok(())
+}
+
+/// Removes registrations written by the unpackaged/portable build. A user
+/// can have launched the portable build before installing the MSIX; leaving
+/// those HKCU entries behind makes Explorer load both registration paths and
+/// show duplicate commands in its expanded context menu.
+pub fn cleanup_portable_context_menu_entries() -> Result<(), String> {
+    if !is_package_managed_process() {
+        return Ok(());
+    }
+    // Do not delete the shared CLSID keys here: the package manifest owns
+    // those COM classes in the package registry view. Only remove the old
+    // unpackaged association keys that make Explorer invoke the handler twice.
+    remove_portable_context_menu_associations()?;
+    notify_shell_change();
+    Ok(())
+}
+
+fn remove_portable_context_menu_entries() -> Result<(), String> {
     for clsid in [
         CLSID_SHELL_EXT,
         CLSID_EXTRACT_COMMAND,
@@ -1390,6 +1471,10 @@ pub fn unregister_context_menu() -> Result<(), String> {
             &format!(r"Software\Classes\CLSID\{}", guid_string_for(clsid)),
         )?;
     }
+    remove_portable_context_menu_associations()
+}
+
+fn remove_portable_context_menu_associations() -> Result<(), String> {
     for key in [
         LEGACY_MODERN_MENU_KEY,
         LEGACY_MODERN_DIRECTORY_MENU_KEY,
@@ -1410,13 +1495,9 @@ pub fn unregister_context_menu() -> Result<(), String> {
     ] {
         delete_registry_tree(HKEY_CURRENT_USER, key)?;
     }
-    delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
-    delete_registry_value(
-        HKEY_CURRENT_USER,
-        SETTINGS_KEY,
-        CONTEXT_MENU_ENABLED_VALUE,
-    )?;
-    notify_shell_change();
+    if registry_key_exists(HKEY_CURRENT_USER, SETTINGS_KEY) {
+        delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE)?;
+    }
     Ok(())
 }
 
@@ -1856,8 +1937,14 @@ mod tests {
             verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Zip, Verb::SevenZip, Verb::ZipEach, Verb::SevenZipEach]
         );
-        assert_eq!(verbs[0].1, "선택한 폴더를 하나의 ZIP으로 압축하기");
-        assert_eq!(verbs[1].1, "선택한 폴더를 하나의 7z으로 압축하기");
+        let common_archive_stem = root
+            .file_name()
+            .expect("temporary folder has a name")
+            .to_string_lossy();
+        let common_zip_name = shorten_compression_name(&format!("{common_archive_stem}.zip"));
+        let common_seven_name = shorten_compression_name(&format!("{common_archive_stem}.7z"));
+        assert_eq!(verbs[0].1, format!("{common_zip_name}으로 압축하기"));
+        assert_eq!(verbs[1].1, format!("{common_seven_name}로 압축하기"));
         assert_eq!(verbs[2].1, "각 폴더를 각각 ZIP으로 압축하기");
         assert_eq!(verbs[3].1, "각 폴더를 각각 7z으로 압축하기");
         assert_eq!(Verb::Zip.subcommand(), "zip");

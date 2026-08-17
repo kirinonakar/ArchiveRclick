@@ -108,18 +108,12 @@
         </desktop4:Extension>
 
         <!--
-          Register the same classic IContextMenu handler for the legacy
-          context menu and Explorer's right-drag menu. The modern menu above
-          uses IExplorerCommand; these desktop9 extensions cover the classic
-          and drag-and-drop paths separately.
+          Keep the legacy registration only for Explorer's right-drag menu.
+          Registering the same operations through both desktop4/IExplorerCommand
+          and desktop9/IContextMenu makes Windows 11 merge two copies into
+          "Show more options". The desktop4 commands above remain available in
+          the modern menu and its expanded view.
         -->
-        <desktop9:Extension Category="windows.fileExplorerClassicContextMenuHandler">
-          <desktop9:FileExplorerClassicContextMenuHandler>
-            <desktop9:ExtensionHandler Type="*" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
-            <desktop9:ExtensionHandler Type="Directory" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />
-          </desktop9:FileExplorerClassicContextMenuHandler>
-        </desktop9:Extension>
-
         <desktop9:Extension Category="windows.fileExplorerClassicDragDropContextMenuHandler">
           <desktop9:FileExplorerClassicDragDropContextMenuHandler>
             <desktop9:ExtensionHandler Type="Directory" Clsid="6B2B1C4A-9D3E-4F5A-8C7B-1E2F3A4B5C6D" />

@@ -110,6 +110,7 @@ fn theme_registry_key(index: i32) -> &'static str {
 }
 
 const LANGUAGE_OPTIONS: &[(&str, &str)] = &[("English", "en"), ("한국어", "ko"), ("日本語", "ja")];
+const PROJECT_GITHUB_URL: &str = "https://github.com/kirinonakar/ArchiveRclick";
 
 const CODEPAGE_OPTIONS: &[(&str, u32)] = &[
     ("Auto", 0),
@@ -147,6 +148,9 @@ fn pathname_codepage(index: i32) -> u32 {
 }
 
 pub fn run() -> Result<(), String> {
+    // If this is the packaged build, remove any stale HKCU registrations left
+    // by a previous portable build before Explorer can merge both handlers.
+    platform::shell_ext::cleanup_portable_context_menu_entries()?;
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     let elevated_retry = first.as_deref() == Some(OsStr::new("--elevated-retry"));
@@ -289,6 +293,7 @@ fn open_main_window(
 ) -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let column_boundaries = platform::load_column_boundaries();
     ui.set_column_name_boundary(column_boundaries.name);
     ui.set_column_size_boundary(column_boundaries.size);
@@ -1488,6 +1493,38 @@ fn wire_callbacks(
                     &platform::load_language_preference(),
                 ));
                 ui.set_settings_visible(true);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_github_requested(move || {
+            let result = platform::open_url(PROJECT_GITHUB_URL);
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => ui.set_status_text("GitHub project opened".into()),
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Open GitHub project", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_third_party_licenses_requested(move || {
+            let result = third_party_notices_path().and_then(|path| platform::open_file(&path));
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => ui.set_status_text("Third-party license notices opened".into()),
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Open third-party license notices", &error);
+                    }
+                }
             }
         });
     }
@@ -3087,6 +3124,29 @@ fn context_menu_dll_path() -> Result<PathBuf, String> {
             dll.display()
         ))
     }
+}
+
+/// Locates the bundled third-party notice file in portable, packaged, and
+/// Cargo build output layouts.
+fn third_party_notices_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))?;
+    let directory = executable.parent().unwrap_or_else(|| Path::new("."));
+    let candidates = [
+        directory.join("THIRD-PARTY-NOTICES.md"),
+        directory.join("runtime").join("THIRD-PARTY-NOTICES.md"),
+        directory.join("THIRD-PARTY-LICENSES.md"),
+    ];
+    candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "The bundled third-party license notice was not found next to the app. Expected {}.",
+                candidates[0].display()
+            )
+        })
 }
 
 fn display_operation_error(ui: &AppWindow, title: &str, error: ArchiveError) {

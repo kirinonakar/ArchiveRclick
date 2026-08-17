@@ -702,6 +702,7 @@ export component AppWindow inherits Window {
     in-out property <string> status-text;
     in-out property <string> summary-text;
     in-out property <string> libarchive-version;
+    in-out property <string> app-version;
     in-out property <bool> has-archive;
     in-out property <bool> busy;
     in-out property <bool> can-go-up;
@@ -768,6 +769,8 @@ export component AppWindow inherits Window {
     callback settings-requested();
     callback settings-applied(int, int, int, int, bool);
     callback settings-cancelled();
+    callback github-requested();
+    callback third-party-licenses-requested();
     callback column-widths-changed(float, float, float);
     callback context-menu-register-requested();
     callback context-menu-unregister-requested();
@@ -1216,6 +1219,7 @@ export component AppWindow inherits Window {
     }
 
     if root.settings-visible : SettingsOverlay {
+        app-version: root.app-version;
         font-options: root.font-options;
         font-selection: root.font-selection;
         thread-selection: root.settings-thread-selection;
@@ -1227,6 +1231,8 @@ export component AppWindow inherits Window {
         context-menu-managed-by-package: root.context-menu-managed-by-package;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
+        open-github => { root.github-requested(); }
+        open-third-party-licenses => { root.third-party-licenses-requested(); }
         accepted(font-selection, thread-index, theme-index, language-index, header_encryption) => {
             root.settings-visible = false;
             root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption);
