@@ -31,11 +31,13 @@ fn main() {
     println!("cargo:rerun-if-changed=THIRD-PARTY-LICENSES.md");
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=app.ico");
+    println!("cargo:rerun-if-changed=app.png");
     slint_build::compile("ui/main.slint").expect("failed to compile Slint UI");
     slint_build::compile("ui/progress_window.slint")
         .expect("failed to compile Slint progress-window UI");
 
     if env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        generate_menu_icon_bitmaps();
         // The Explorer shell extension is the component that supplies the
         // modern context-menu icon, so embed the same icon resource into every
         // Windows artifact, including the cdylib.
@@ -49,6 +51,44 @@ fn main() {
             "ArchiveRclick currently bundles only the Windows x86_64 native runtime"
         );
         copy_runtime_bundle();
+    }
+}
+
+/// Generates menu-sized, premultiplied BGRA pixels at build time.
+///
+/// Passing an HICON through DrawIconEx leaves alpha interpretation up to the
+/// host process. In particular, the MSIX COM surrogate can turn the icon's
+/// transparent area into opaque black. Embedding ready-to-use pixels makes
+/// the classic right-drag menu independent of that rendering path.
+fn generate_menu_icon_bitmaps() {
+    const MENU_ICON_SIZES: &[u32] = &[16, 20, 24, 28, 32, 36, 40, 44, 48, 56, 64];
+
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("missing OUT_DIR"));
+    let source_path = manifest_dir.join("app.png");
+    let source = image::open(&source_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+
+    for &size in MENU_ICON_SIZES {
+        let resized = source
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .into_rgba8();
+        let mut bgra = Vec::with_capacity((size * size * 4) as usize);
+        for pixel in resized.pixels() {
+            let [red, green, blue, alpha] = pixel.0;
+            let premultiply =
+                |channel: u8| ((u16::from(channel) * u16::from(alpha) + 127) / 255) as u8;
+            bgra.extend_from_slice(&[
+                premultiply(blue),
+                premultiply(green),
+                premultiply(red),
+                alpha,
+            ]);
+        }
+        let destination = out_dir.join(format!("menu-icon-{size}.bgra"));
+        fs::write(&destination, bgra)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", destination.display()));
     }
 }
 

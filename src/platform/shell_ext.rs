@@ -23,10 +23,10 @@ use std::{
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::{
     Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HINSTANCE, HMODULE},
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HMODULE},
         Graphics::Gdi::{
-            BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HGDIOBJ, SelectObject,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
+            HBITMAP, HGDIOBJ,
         },
         System::{
             Com::{
@@ -49,14 +49,13 @@ use windows::{
             HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi},
             Shell::{
                 CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, DragQueryFileW, ECS_ENABLED, ECS_HIDDEN,
-                ExtractIconExW, HDROP, IContextMenu, IContextMenu_Impl, IEnumExplorerCommand,
-                IExplorerCommand, IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl,
-                IShellItem, IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
+                HDROP, IContextMenu, IContextMenu_Impl, IEnumExplorerCommand, IExplorerCommand,
+                IExplorerCommand_Impl, IShellExtInit, IShellExtInit_Impl, IShellItem,
+                IShellItemArray, SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify,
                 SHCreateItemFromIDList, SIGDN_FILESYSPATH, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                DI_NORMAL, DestroyIcon, DrawIconEx, GetForegroundWindow, HICON, HMENU, IMAGE_ICON,
-                InsertMenuW, LR_DEFAULTCOLOR, LoadImageW, MENUITEMINFOW, MF_BYPOSITION, MF_STRING,
+                GetForegroundWindow, HMENU, InsertMenuW, MENUITEMINFOW, MF_BYPOSITION, MF_STRING,
                 MIIM_BITMAP, SM_CXSMICON, SM_CYSMICON, SW_SHOWNORMAL, SetMenuItemInfoW,
             },
         },
@@ -365,12 +364,12 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         if let Ok(mut guard) = self.active_verbs.lock() {
             *guard = inserted;
         }
-        // Show the app icon in front of the classic-menu verbs. SetMenuItem-
-        // Bitmaps only accepts monochrome masks; passing the color bitmap
-        // returned by GetIconInfo makes its transparent pixels render black.
-        // Use MIIM_BITMAP with an alpha-capable DIB instead.
-        if let Some(icon_module) = find_icon_module_path() {
-            if let Some(bitmap) = load_menu_icon_bitmap(&icon_module) {
+        // Show the app icon in front of the classic-menu verbs. Use a standard
+        // 32bpp BI_RGB DIB containing premultiplied BGRA pixels; rendering an
+        // HICON inside the MSIX COM surrogate can make transparent pixels
+        // opaque black.
+        if find_icon_module_path().is_some() {
+            if let Some(bitmap) = load_menu_icon_bitmap() {
                 for offset in 0..count {
                     let item = index_menu.saturating_add(offset);
                     let mut menu_item = MENUITEMINFOW {
@@ -1090,101 +1089,62 @@ fn find_icon_module_path() -> Option<OsString> {
     module_file_name().or_else(find_exe_path)
 }
 
-/// Loads the app icon from the executable or shell-extension DLL into a
-/// transparent 32bpp DIB for the classic Explorer menu. The caller owns the
-/// returned bitmap.
-fn load_menu_icon_bitmap(icon_source: &OsString) -> Option<HBITMAP> {
-    let icon_size = menu_icon_size();
-    let side = usize::try_from(icon_size).ok()?;
-    let pixel_count = side.checked_mul(side)?.checked_mul(4)?;
-    let icon =
-        load_embedded_icon(icon_size).or_else(|| extract_file_icon(icon_source, icon_size))?;
-    // BITMAPV5HEADER declares the alpha channel explicitly. A plain BI_RGB
-    // DIB happens to preserve the fourth byte in memory, but some classic-menu
-    // rendering paths treat it as unused padding and paint transparent pixels
-    // black. BI_BITFIELDS plus bV5AlphaMask makes the bitmap unambiguously
-    // BGRA to Explorer.
-    let bitmap_header = BITMAPV5HEADER {
-        bV5Size: std::mem::size_of::<BITMAPV5HEADER>() as u32,
-        bV5Width: icon_size,
-        // A top-down DIB keeps DrawIconEx's origin intuitive and avoids
-        // having to reverse the rows before Explorer consumes the bitmap.
-        bV5Height: -icon_size,
-        bV5Planes: 1,
-        bV5BitCount: 32,
-        bV5Compression: BI_BITFIELDS,
-        bV5RedMask: 0x00ff_0000,
-        bV5GreenMask: 0x0000_ff00,
-        bV5BlueMask: 0x0000_00ff,
-        bV5AlphaMask: 0xff00_0000,
+const MENU_ICON_IMAGES: &[(i32, &[u8])] = &[
+    (16, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-16.bgra"))),
+    (20, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-20.bgra"))),
+    (24, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-24.bgra"))),
+    (28, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-28.bgra"))),
+    (32, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-32.bgra"))),
+    (36, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-36.bgra"))),
+    (40, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-40.bgra"))),
+    (44, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-44.bgra"))),
+    (48, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-48.bgra"))),
+    (56, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-56.bgra"))),
+    (64, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-64.bgra"))),
+];
+
+/// Creates the transparent 32bpp menu bitmap from premultiplied BGRA pixels
+/// generated from app.png at build time. The caller owns the returned bitmap.
+fn load_menu_icon_bitmap() -> Option<HBITMAP> {
+    let requested_size = menu_icon_size();
+    let &(icon_size, source_pixels) = MENU_ICON_IMAGES
+        .iter()
+        .min_by_key(|(size, _)| (requested_size - size).unsigned_abs())?;
+    let pixel_count = usize::try_from(icon_size)
+        .ok()?
+        .checked_mul(usize::try_from(icon_size).ok()?)?
+        .checked_mul(4)?;
+    if source_pixels.len() != pixel_count {
+        return None;
+    }
+    // A top-down 32bpp BI_RGB DIB is the format expected by hbmpItem. Its
+    // fourth byte carries premultiplied alpha even though BI_RGB calls it
+    // reserved; Explorer alpha-blends those pixels in classic menus.
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: icon_size,
+            biHeight: -icon_size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: u32::try_from(pixel_count).ok()?,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut pixels: *mut c_void = ptr::null_mut();
-    // CreateDIBSection reads the header type from its leading size field. A
-    // BITMAPV5HEADER is therefore passed through the API's BITMAPINFO pointer.
-    let bitmap_info = (&raw const bitmap_header).cast::<BITMAPINFO>();
-    let bitmap = match unsafe {
-        CreateDIBSection(None, bitmap_info, DIB_RGB_COLORS, &mut pixels, None, 0)
-    } {
-        Ok(bitmap) => bitmap,
-        Err(_) => {
-            let _ = unsafe { DestroyIcon(icon) };
-            return None;
-        }
-    };
+    let bitmap =
+        unsafe { CreateDIBSection(None, &bitmap_info, DIB_RGB_COLORS, &mut pixels, None, 0) }
+            .ok()?;
     if pixels.is_null() {
         let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
-        let _ = unsafe { DestroyIcon(icon) };
         return None;
     }
-    // A DIB section is not required to be zero-initialized. Clear it before
-    // drawing so pixels outside the icon remain fully transparent.
-    unsafe { ptr::write_bytes(pixels.cast::<u8>(), 0, pixel_count) };
-
-    let dc = unsafe { CreateCompatibleDC(None) };
-    if dc.0.is_null() {
-        let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
-        let _ = unsafe { DestroyIcon(icon) };
-        return None;
+    unsafe {
+        ptr::copy_nonoverlapping(source_pixels.as_ptr(), pixels.cast::<u8>(), pixel_count);
     }
-    let previous = unsafe { SelectObject(dc, HGDIOBJ(bitmap.0)) };
-    let draw_result =
-        unsafe { DrawIconEx(dc, 0, 0, icon, icon_size, icon_size, 0, None, DI_NORMAL) };
-    if draw_result.is_ok() {
-        // Menu bitmaps use premultiplied BGRA. DrawIconEx normally produces
-        // that for 32-bit icons, but normalize it here as a defensive measure
-        // for icon resources that arrive as straight-alpha pixels.
-        let pixels = unsafe { std::slice::from_raw_parts_mut(pixels.cast::<u8>(), pixel_count) };
-        normalize_menu_bitmap_alpha(pixels);
-    }
-    if !previous.0.is_null() {
-        let _ = unsafe { SelectObject(dc, previous) };
-    }
-    let _ = unsafe { DeleteDC(dc) };
-    let _ = unsafe { DestroyIcon(icon) };
-    if draw_result.is_err() {
-        let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
-        None
-    } else {
-        Some(bitmap)
-    }
-}
-
-fn normalize_menu_bitmap_alpha(pixels: &mut [u8]) {
-    let uses_straight_alpha = pixels.chunks_exact(4).any(|pixel| {
-        let alpha = pixel[3];
-        pixel[..3].iter().any(|channel| *channel > alpha)
-    });
-    for pixel in pixels.chunks_exact_mut(4) {
-        let alpha = pixel[3];
-        if alpha == 0 {
-            pixel[..3].fill(0);
-        } else if uses_straight_alpha && alpha < 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((u16::from(*channel) * u16::from(alpha) + 127) / 255) as u8;
-            }
-        }
-    }
+    Some(bitmap)
 }
 
 /// Returns the square pixel size Explorer expects for a context-menu icon.
@@ -1210,58 +1170,6 @@ fn menu_icon_size() -> i32 {
     let width = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.max(1);
     let height = unsafe { GetSystemMetricsForDpi(SM_CYSMICON, dpi) }.max(1);
     width.min(height)
-}
-
-/// Loads resource 1 from this DLL at the exact size needed by the current
-/// Explorer window. LoadImageW selects the closest image from the multi-size
-/// ICO embedded by app.rc.
-fn load_embedded_icon(size: i32) -> Option<HICON> {
-    let module = current_module_handle()?;
-    // MAKEINTRESOURCEW(1): integer resources are represented by a pointer
-    // whose high word is zero. app.rc declares the application icon as ID 1.
-    let resource = PCWSTR(ptr::without_provenance(1usize));
-    let handle = unsafe {
-        LoadImageW(
-            Some(HINSTANCE(module.0)),
-            resource,
-            IMAGE_ICON,
-            size,
-            size,
-            LR_DEFAULTCOLOR,
-        )
-    }
-    .ok()?;
-    (!handle.0.is_null()).then_some(HICON(handle.0))
-}
-
-/// Fallback for builds whose current DLL does not contain the icon resource.
-fn extract_file_icon(icon_source: &OsString, size: i32) -> Option<HICON> {
-    let source_wide = wide(&icon_source.to_string_lossy())?;
-    let mut large = HICON(ptr::null_mut());
-    let mut small = HICON(ptr::null_mut());
-    let count = unsafe {
-        ExtractIconExW(
-            PCWSTR(source_wide.as_ptr()),
-            0,
-            Some(&mut large),
-            Some(&mut small),
-            1,
-        )
-    };
-    if count == 0 || (large.0.is_null() && small.0.is_null()) {
-        return None;
-    }
-
-    // ExtractIconEx supplies the conventional 32px and 16px handles. Select
-    // the closer one, and dispose of the unused handle immediately.
-    let use_small =
-        !small.0.is_null() && (large.0.is_null() || (size - 16).abs() <= (size - 32).abs());
-    let icon = if use_small { small } else { large };
-    let unused = if use_small { large } else { small };
-    if !unused.0.is_null() {
-        let _ = unsafe { DestroyIcon(unused) };
-    }
-    Some(icon)
 }
 
 fn module_file_name() -> Option<OsString> {
@@ -1884,25 +1792,20 @@ mod tests {
     use std::{ffi::OsString, path::Path};
 
     use super::{
-        Verb, build_args, build_targeted_args, menu_verbs, normalize_menu_bitmap_alpha,
+        MENU_ICON_IMAGES, Verb, build_args, build_targeted_args, menu_verbs,
         shorten_compression_name, shorten_menu_name,
     };
 
     #[test]
-    fn menu_bitmap_pixels_are_transparent_and_premultiplied() {
-        let mut pixels = [
-            255, 128, 64, 128, // straight-alpha colored pixel
-            9, 8, 7, 0, // transparent pixel with dirty RGB
-            20, 40, 60, 255, // opaque pixel
-            10, 20, 30, 64, // another straight-alpha pixel
-        ];
-
-        normalize_menu_bitmap_alpha(&mut pixels);
-
-        assert_eq!(pixels[0..4], [128, 64, 32, 128]);
-        assert_eq!(pixels[4..8], [0, 0, 0, 0]);
-        assert_eq!(pixels[8..12], [20, 40, 60, 255]);
-        assert_eq!(pixels[12..16], [3, 5, 8, 64]);
+    fn generated_menu_icons_are_transparent_and_premultiplied() {
+        for &(size, pixels) in MENU_ICON_IMAGES {
+            assert_eq!(pixels.len(), (size * size * 4) as usize);
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
+            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 255));
+            assert!(pixels.chunks_exact(4).all(|pixel| {
+                pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]
+            }));
+        }
     }
 
     #[test]
