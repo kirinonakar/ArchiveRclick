@@ -161,8 +161,9 @@ fn pathname_codepage(index: i32) -> u32 {
 }
 
 pub fn run() -> Result<(), String> {
-    // If this is the packaged build, remove any stale HKCU registrations left
-    // by a previous portable build before Explorer can merge both handlers.
+    // If this is the packaged build, remove stale HKCU registrations left by
+    // a previous portable build. The cleanup is a no-op when nothing is left,
+    // so launching the app does not refresh Explorer on every run.
     platform::shell_ext::cleanup_portable_context_menu_entries()?;
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
@@ -1532,14 +1533,30 @@ fn wire_callbacks(
 
     {
         let weak = ui.as_weak();
-        ui.on_third_party_licenses_requested(move || {
+        ui.on_third_party_notices_requested(move || {
             let result = third_party_notices_path().and_then(|path| platform::open_file(&path));
             if let Some(ui) = weak.upgrade() {
                 match result {
-                    Ok(()) => ui.set_status_text("Third-party license notices opened".into()),
+                    Ok(()) => ui.set_status_text("Third-party notices opened".into()),
                     Err(error) => {
                         ui.set_status_text(error.clone().into());
-                        platform::show_error("Open third-party license notices", &error);
+                        platform::show_error("Open third-party notices", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_third_party_licenses_requested(move || {
+            let result = third_party_licenses_path().and_then(|path| platform::open_file(&path));
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => ui.set_status_text("Third-party licenses opened".into()),
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Open third-party licenses", &error);
                     }
                 }
             }
@@ -3146,16 +3163,15 @@ fn context_menu_dll_path() -> Result<PathBuf, String> {
     }
 }
 
-/// Locates the bundled third-party notice file in portable, packaged, and
-/// Cargo build output layouts.
-fn third_party_notices_path() -> Result<PathBuf, String> {
+/// Locates a bundled third-party document in portable, packaged, and Cargo
+/// build output layouts.
+fn third_party_file_path(file_name: &str, description: &str) -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))?;
     let directory = executable.parent().unwrap_or_else(|| Path::new("."));
     let candidates = [
-        directory.join("THIRD-PARTY-NOTICES.md"),
-        directory.join("runtime").join("THIRD-PARTY-NOTICES.md"),
-        directory.join("THIRD-PARTY-LICENSES.md"),
+        directory.join(file_name),
+        directory.join("runtime").join(file_name),
     ];
     candidates
         .iter()
@@ -3163,10 +3179,18 @@ fn third_party_notices_path() -> Result<PathBuf, String> {
         .cloned()
         .ok_or_else(|| {
             format!(
-                "The bundled third-party license notice was not found next to the app. Expected {}.",
+                "The bundled third-party {description} was not found next to the app. Expected {}.",
                 candidates[0].display()
             )
         })
+}
+
+fn third_party_notices_path() -> Result<PathBuf, String> {
+    third_party_file_path("THIRD-PARTY-NOTICES.md", "notice")
+}
+
+fn third_party_licenses_path() -> Result<PathBuf, String> {
+    third_party_file_path("THIRD-PARTY-LICENSES.md", "license list")
 }
 
 fn display_operation_error(ui: &AppWindow, title: &str, error: ArchiveError) {

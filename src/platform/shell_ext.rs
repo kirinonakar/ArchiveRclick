@@ -1291,8 +1291,14 @@ fn read_registry_string(hive: HKEY, key_path: &str, value: &str) -> Option<OsStr
 /// executable).
 pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
     if is_package_managed_process() {
+        if is_context_menu_enabled() {
+            return Ok(());
+        }
         set_context_menu_enabled(true)?;
         notify_shell_change();
+        return Ok(());
+    }
+    if is_context_menu_registered() {
         return Ok(());
     }
     if !dll_path.is_file() {
@@ -1449,12 +1455,39 @@ pub fn cleanup_portable_context_menu_entries() -> Result<(), String> {
     if !is_package_managed_process() {
         return Ok(());
     }
+    if !has_portable_context_menu_associations() {
+        return Ok(());
+    }
     // Do not delete the shared CLSID keys here: the package manifest owns
     // those COM classes in the package registry view. Only remove the old
     // unpackaged association keys that make Explorer invoke the handler twice.
     remove_portable_context_menu_associations()?;
     notify_shell_change();
     Ok(())
+}
+
+fn has_portable_context_menu_associations() -> bool {
+    [
+        LEGACY_MODERN_MENU_KEY,
+        LEGACY_MODERN_DIRECTORY_MENU_KEY,
+        MODERN_EXTRACT_MENU_KEY,
+        MODERN_EXTRACT_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_MENU_KEY,
+        MODERN_ZIP_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_MENU_KEY,
+        MODERN_SEVENZIP_DIRECTORY_MENU_KEY,
+        MODERN_ZIP_EACH_MENU_KEY,
+        MODERN_ZIP_EACH_DIRECTORY_MENU_KEY,
+        MODERN_SEVENZIP_EACH_MENU_KEY,
+        MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
+        LEGACY_CONTEXT_MENU_KEY,
+        LEGACY_DIRECTORY_CONTEXT_MENU_KEY,
+        LEGACY_BACKGROUND_DRAG_DROP_HANDLER_KEY,
+        DRAG_DROP_HANDLER_KEY,
+    ]
+    .into_iter()
+    .any(|key| registry_key_exists(HKEY_CURRENT_USER, key))
+        || read_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, EXE_PATH_VALUE).is_some()
 }
 
 fn remove_portable_context_menu_entries() -> Result<(), String> {

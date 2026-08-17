@@ -413,6 +413,7 @@ export component SettingsOverlay inherits Rectangle {
     callback register-context-menu();
     callback unregister-context-menu();
     callback open-github();
+    callback open-third-party-notices();
     callback open-third-party-licenses();
 
     background: #00000080;
@@ -425,7 +426,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 460px;
-        height: 420px;
+        height: 380px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -465,7 +466,7 @@ export component SettingsOverlay inherits Rectangle {
 
             if root.active-tab == 0 : VerticalLayout {
                 spacing: 4px;
-                vertical-stretch: 1;
+                vertical-stretch: 0;
 
                 HorizontalLayout {
                     spacing: 8px;
@@ -592,11 +593,13 @@ export component SettingsOverlay inherits Rectangle {
                     }
 
                     Button {
+                        height: 28px;
                         text: root.language-selection == 1 ? "등록" : root.language-selection == 2 ? "登録" : "Register";
                         clicked => { root.register-context-menu(); }
                     }
 
                     Button {
+                        height: 28px;
                         text: root.language-selection == 1 ? "제거" : root.language-selection == 2 ? "削除" : "Remove";
                         clicked => { root.unregister-context-menu(); }
                     }
@@ -604,8 +607,8 @@ export component SettingsOverlay inherits Rectangle {
             }
 
             if root.active-tab == 1 : VerticalLayout {
-                spacing: 8px;
-                vertical-stretch: 1;
+                spacing: 4px;
+                vertical-stretch: 0;
 
                 HorizontalLayout {
                     spacing: 12px;
@@ -651,6 +654,7 @@ export component SettingsOverlay inherits Rectangle {
                         vertical-alignment: center;
                     }
                     Button {
+                        height: 28px;
                         text: root.language-selection == 1 ? "GitHub 열기" : root.language-selection == 2 ? "GitHubを開く" : "Open GitHub";
                         clicked => { root.open-github(); }
                     }
@@ -676,7 +680,7 @@ export component SettingsOverlay inherits Rectangle {
                     Button {
                         height: 28px;
                         text: root.language-selection == 1 ? "고지 열기" : root.language-selection == 2 ? "告知を開く" : "Open notices";
-                        clicked => { root.open-third-party-licenses(); }
+                        clicked => { root.open-third-party-notices(); }
                     }
                 }
 
@@ -691,7 +695,19 @@ export component SettingsOverlay inherits Rectangle {
                     opacity: 0.72;
                     wrap: word-wrap;
                 }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        height: 28px;
+                        text: root.language-selection == 1 ? "라이선스 열기" : root.language-selection == 2 ? "ライセンスを開く" : "Open licenses";
+                        clicked => { root.open-third-party-licenses(); }
+                    }
+                }
             }
+
+            Rectangle { vertical-stretch: 1; }
 
             HorizontalLayout {
                 spacing: 8px;

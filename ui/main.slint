@@ -771,6 +771,7 @@ export component AppWindow inherits Window {
     callback settings-applied(int, int, int, int, bool);
     callback settings-cancelled();
     callback github-requested();
+    callback third-party-notices-requested();
     callback third-party-licenses-requested();
     callback column-widths-changed(float, float, float);
     callback context-menu-register-requested();
@@ -1234,6 +1235,7 @@ export component AppWindow inherits Window {
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
         open-github => { root.github-requested(); }
+        open-third-party-notices => { root.third-party-notices-requested(); }
         open-third-party-licenses => { root.third-party-licenses-requested(); }
         accepted(font-selection, thread-index, theme-index, language-index, header_encryption) => {
             root.settings-visible = false;

@@ -51,6 +51,35 @@
         Square44x44Logo="Assets\Square44x44Logo.png" />
 
       <Extensions>
+        <!--
+          Register the archive formats with Windows' Open with list. When a
+          user launches ArchiveRclick from one of these entries, Windows
+          passes the archive path as the application's first argument.
+        -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="archive-rclick-archives">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.zip</uap:FileType>
+              <uap:FileType>.zipx</uap:FileType>
+              <uap:FileType>.7z</uap:FileType>
+              <uap:FileType>.rar</uap:FileType>
+              <uap:FileType>.tar</uap:FileType>
+              <uap:FileType>.gz</uap:FileType>
+              <uap:FileType>.bz2</uap:FileType>
+              <uap:FileType>.xz</uap:FileType>
+              <uap:FileType>.zst</uap:FileType>
+              <uap:FileType>.cab</uap:FileType>
+              <uap:FileType>.lha</uap:FileType>
+              <uap:FileType>.lzh</uap:FileType>
+              <uap:FileType>.tgz</uap:FileType>
+              <uap:FileType>.tbz2</uap:FileType>
+              <uap:FileType>.txz</uap:FileType>
+              <uap:FileType>.iso</uap:FileType>
+              <uap:FileType>.img</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+
         <!-- The same native DLL implements all IExplorerCommand CLSIDs. -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
