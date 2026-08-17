@@ -58,6 +58,12 @@
         -->
         <uap:Extension Category="windows.fileTypeAssociation">
           <uap:FileTypeAssociation Name="archive-rclick-archives">
+            <!--
+              Use an explicit transparent file-association logo. Without it,
+              Open with falls back to the application tile artwork and Windows
+              can place that fallback on an accent-colored backplate.
+            -->
+            <uap:Logo>Assets\FileAssociationLogo.png</uap:Logo>
             <uap:SupportedFileTypes>
               <uap:FileType>.zip</uap:FileType>
               <uap:FileType>.zipx</uap:FileType>

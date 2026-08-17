@@ -231,6 +231,9 @@ $assetSizes = [ordered]@{
     "Square44x44Logo.png" = 44
     "Square44x44Logo.scale-200.png" = 88
     "Square44x44Logo.scale-400.png" = 176
+    "FileAssociationLogo.png" = 44
+    "FileAssociationLogo.scale-200.png" = 88
+    "FileAssociationLogo.scale-400.png" = 176
 }
 foreach ($asset in $assetSizes.GetEnumerator()) {
     New-ScaledPng `
@@ -368,7 +371,10 @@ try {
         "resources.pri",
         "Assets\StoreLogo.png",
         "Assets\Square150x150Logo.png",
-        "Assets\Square44x44Logo.png"
+        "Assets\Square44x44Logo.png",
+        "Assets\FileAssociationLogo.png",
+        "Assets\FileAssociationLogo.scale-200.png",
+        "Assets\FileAssociationLogo.scale-400.png"
     )
     foreach ($size in $appListTargetSizes) {
         foreach ($suffix in @("", "_altform-unplated", "_altform-lightunplated")) {

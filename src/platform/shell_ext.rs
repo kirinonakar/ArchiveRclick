@@ -16,7 +16,7 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr,
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -237,25 +237,10 @@ struct ArchiveContextMenu {
     // drag-and-drop handler registration.
     target_folder: Mutex<Option<PathBuf>>,
     active_verbs: Mutex<Vec<Verb>>,
-    // Classic-menu bitmap shown in front of the verbs; released in Drop.
-    menu_bitmap: Mutex<Option<HBITMAP>>,
 }
 
 impl Drop for ArchiveContextMenu {
     fn drop(&mut self) {
-        // The classic menu keeps using the bitmap until it is destroyed, and
-        // Explorer destroys the menu before releasing this handler, so Drop
-        // is the right moment to release the bitmap.
-        if let Some(bitmap) = self
-            .menu_bitmap
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-        {
-            // SAFETY: the bitmap was created by us and the menu referencing it
-            // is gone by the time the handler is released.
-            let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
-        }
         decrement_live_objects();
     }
 }
@@ -266,7 +251,6 @@ impl ArchiveContextMenu {
             paths: Mutex::new(Vec::new()),
             target_folder: Mutex::new(None),
             active_verbs: Mutex::new(Vec::new()),
-            menu_bitmap: Mutex::new(None),
         }
     }
 
@@ -368,27 +352,19 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         // 32bpp BI_RGB DIB containing premultiplied BGRA pixels; rendering an
         // HICON inside the MSIX COM surrogate can make transparent pixels
         // opaque black.
-        if find_icon_module_path().is_some() {
-            if let Some(bitmap) = load_menu_icon_bitmap() {
-                for offset in 0..count {
-                    let item = index_menu.saturating_add(offset);
-                    let mut menu_item = MENUITEMINFOW {
-                        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-                        fMask: MIIM_BITMAP,
-                        hbmpItem: bitmap,
-                        ..Default::default()
-                    };
-                    // SAFETY: hmenu is valid, `item` is a position we just
-                    // inserted at, and the bitmap outlives the menu.
-                    let _ = unsafe { SetMenuItemInfoW(hmenu, item, true, &mut menu_item) };
-                }
-                if let Ok(mut guard) = self.menu_bitmap.lock() {
-                    if let Some(previous) = guard.replace(bitmap) {
-                        // SAFETY: a previous bitmap belongs to a menu that has
-                        // already been dismissed and can be released now.
-                        let _ = unsafe { DeleteObject(HGDIOBJ(previous.0)) };
-                    }
-                }
+        if let Some(bitmap) = load_menu_icon_bitmap() {
+            for offset in 0..count {
+                let item = index_menu.saturating_add(offset);
+                let mut menu_item = MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_BITMAP,
+                    hbmpItem: bitmap,
+                    ..Default::default()
+                };
+                // SAFETY: hmenu is valid, `item` is a position we just
+                // inserted at, and the process-lifetime cache keeps the bitmap
+                // alive even if the MSIX COM host releases this handler early.
+                let _ = unsafe { SetMenuItemInfoW(hmenu, item, true, &mut menu_item) };
             }
         }
         windows::core::HRESULT(count as i32)
@@ -1103,13 +1079,27 @@ const MENU_ICON_IMAGES: &[(i32, &[u8])] = &[
     (64, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-64.bgra"))),
 ];
 
+// Explorer can release the IContextMenu object before it has finished drawing
+// the menu. Store raw handles so this static remains Send/Sync, and retain at
+// most one small bitmap per supported DPI for the lifetime of the surrogate
+// process. The operating system reclaims these GDI objects when it exits.
+static MENU_BITMAP_CACHE: OnceLock<Mutex<Vec<(i32, usize)>>> = OnceLock::new();
+
 /// Creates the transparent 32bpp menu bitmap from premultiplied BGRA pixels
-/// generated from app.png at build time. The caller owns the returned bitmap.
+/// generated from app.png at build time. The returned handle is owned by the
+/// process-lifetime cache and must not be deleted by the caller.
 fn load_menu_icon_bitmap() -> Option<HBITMAP> {
     let requested_size = menu_icon_size();
     let &(icon_size, source_pixels) = MENU_ICON_IMAGES
         .iter()
         .min_by_key(|(size, _)| (requested_size - size).unsigned_abs())?;
+    let mut cache = MENU_BITMAP_CACHE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .ok()?;
+    if let Some((_, raw_bitmap)) = cache.iter().find(|(size, _)| *size == icon_size) {
+        return Some(HBITMAP(*raw_bitmap as *mut c_void));
+    }
     let pixel_count = usize::try_from(icon_size)
         .ok()?
         .checked_mul(usize::try_from(icon_size).ok()?)?
@@ -1144,6 +1134,7 @@ fn load_menu_icon_bitmap() -> Option<HBITMAP> {
     unsafe {
         ptr::copy_nonoverlapping(source_pixels.as_ptr(), pixels.cast::<u8>(), pixel_count);
     }
+    cache.push((icon_size, bitmap.0 as usize));
     Some(bitmap)
 }
 
@@ -1792,7 +1783,7 @@ mod tests {
     use std::{ffi::OsString, path::Path};
 
     use super::{
-        MENU_ICON_IMAGES, Verb, build_args, build_targeted_args, menu_verbs,
+        MENU_ICON_IMAGES, Verb, build_args, build_targeted_args, load_menu_icon_bitmap, menu_verbs,
         shorten_compression_name, shorten_menu_name,
     };
 
@@ -1806,6 +1797,14 @@ mod tests {
                 pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]
             }));
         }
+    }
+
+    #[test]
+    fn menu_bitmap_handle_is_kept_in_the_process_cache() {
+        let first = load_menu_icon_bitmap().expect("create menu bitmap");
+        let second = load_menu_icon_bitmap().expect("reuse menu bitmap");
+
+        assert_eq!(first.0, second.0);
     }
 
     #[test]
