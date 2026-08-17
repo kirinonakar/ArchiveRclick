@@ -1,12 +1,8 @@
 # Microsoft Store listing — ArchiveRclick
 
-This file contains ready-to-paste localized copy for the Microsoft Store
-Partner Center listing.
-
 ## Shared metadata
 
 - Product name: `ArchiveRclick`
-- App version: `1.0.0` (MSIX package version: `1.0.0.0`)
 - Project: https://github.com/kirinonakar/ArchiveRclick
 - Minimum system: 64-bit Windows 10 version 1809 or later, or Windows 11
 - App license: MIT; bundled third-party components retain their own licenses
@@ -15,7 +11,7 @@ Partner Center listing.
 
 ### Short description
 
-빠르고 가벼운 Windows용 ZIP·7z·RAR 압축 파일 관리자
+빠르고 가벼운 Windows용 압축 파일 관리자
 
 ### Full description
 
@@ -51,13 +47,13 @@ ArchiveRclick의 첫 Microsoft Store 릴리스입니다. ZIP·7z·RAR 등 다양
 
 ### Search terms
 
-압축파일, 압축풀기, ZIP, 7z, RAR, 파일관리자, 윈도우 탐색기
+압축파일, 압축풀기, ZIP, 7z
 
 ## English (`en-US`)
 
 ### Short description
 
-A fast, lightweight ZIP, 7z, and RAR archive manager for Windows
+A fast, lightweight archive manager for Windows
 
 ### Full description
 
@@ -94,13 +90,13 @@ creation, Explorer context-menu integration, and drag-and-drop workflows.
 
 ### Search terms
 
-archive manager, ZIP, 7z, RAR, extractor, file manager, Explorer
+archive manager, ZIP, 7z, extractor
 
 ## Japanese (`ja-JP`)
 
 ### Short description
 
-Windows向けの高速で軽量なZIP・7z・RARアーカイブ管理ツール
+Windows向けの高速で軽量なアーカイブ管理ツール
 
 ### Full description
 
@@ -136,4 +132,4 @@ Explorer右クリックメニュー、ドラッグ＆ドロップ操作に対応
 
 ### Search terms
 
-アーカイブ, ZIP, 7z, RAR, 解凍, ファイル管理, エクスプローラー
+アーカイブ, ZIP, 7z, 解凍
