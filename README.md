@@ -40,6 +40,8 @@ and libarchive for broader archive-format support.
 
 Download the portable ZIP from the [Releases page](https://github.com/kirinonakar/ArchiveRclick/releases).
 
+- [Microsoft Store](https://apps.microsoft.com/detail/9PDZJM0TSVPK?hl=ko-kr&gl=KR&ocid=pdpshare) version supports the modern Windows right-click menu.
+
 ## Requirements
 
 - 64-bit Windows 10 or 11.
