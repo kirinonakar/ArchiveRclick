@@ -40,6 +40,20 @@ export component ProgressWindow inherits Window {
             : root.theme-selection == 2 ? ColorScheme.dark : ColorScheme.unknown;
     }
 
+    // Escape must not cancel or close an Explorer archive operation. The
+    // explicit Cancel button and the title-bar close handler remain available.
+    forward-focus: shortcuts;
+    shortcuts := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-click: false;
+
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => { }
+        }
+    }
+
     VerticalLayout {
         padding: 12px;
         spacing: 8px;

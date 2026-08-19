@@ -350,6 +350,7 @@ fn open_main_window(
         ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
     );
     ui.set_settings_header_encryption(platform::load_header_encryption_preference());
+    ui.set_esc_close_main_window(platform::load_esc_close_main_window_preference());
     ui.set_create_header_encryption(platform::load_header_encryption_preference());
     ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
     ui.set_language_options(ModelRc::from(
@@ -412,18 +413,10 @@ fn open_main_window(
     // rectangle.
     let weak_for_close = ui.as_weak();
     ui.window().on_close_requested(move || {
-        cleanup_drag_staging_directories();
-        if let Some(ui) = weak_for_close.upgrade()
-            && should_save_window_geometry(ui.window())
-        {
-            let size = ui.window().size();
-            let position = ui.window().position();
-            let _ = platform::save_window_geometry(&platform::WindowGeometry {
-                x: position.x,
-                y: position.y,
-                width: size.width,
-                height: size.height,
-            });
+        if let Some(ui) = weak_for_close.upgrade() {
+            prepare_main_window_close(&ui);
+        } else {
+            cleanup_drag_staging_directories();
         }
         slint::CloseRequestResponse::HideWindow
     });
@@ -481,6 +474,23 @@ fn should_save_window_geometry(window: &slint::Window) -> bool {
         reject = width_matches && height_matches;
     });
     !reject
+}
+
+
+/// Performs the same cleanup and geometry persistence for both the native
+/// title-bar close request and the Escape shortcut.
+fn prepare_main_window_close(ui: &AppWindow) {
+    cleanup_drag_staging_directories();
+    if should_save_window_geometry(ui.window()) {
+        let size = ui.window().size();
+        let position = ui.window().position();
+        let _ = platform::save_window_geometry(&platform::WindowGeometry {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,6 +1252,16 @@ fn wire_callbacks(
 ) {
     {
         let weak = ui.as_weak();
+        ui.on_main_window_close_requested(move || {
+            if let Some(ui) = weak.upgrade() {
+                prepare_main_window_close(&ui);
+                let _ = ui.hide();
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
         let state = Rc::clone(&state);
         let engine = Arc::clone(&engine);
         ui.on_open_requested(move || match platform::pick_archive() {
@@ -1504,6 +1524,9 @@ fn wire_callbacks(
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
                 );
                 ui.set_settings_header_encryption(platform::load_header_encryption_preference());
+                ui.set_esc_close_main_window(
+                    platform::load_esc_close_main_window_preference(),
+                );
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
                 let language_preference = platform::load_language_preference();
                 ui.set_language_selection(language_selection_index(&language_preference));
@@ -1607,12 +1630,67 @@ fn wire_callbacks(
 
     {
         let weak = ui.as_weak();
+        ui.on_file_associations_register_requested(move || {
+            let result = std::env::current_exe()
+                .map_err(|error| format!("Could not locate ArchiveRclick: {error}"))
+                .and_then(|executable| platform::register_file_associations(&executable));
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => ui.set_status_text(
+                        "ArchiveRclick이 지원 확장자의 파일 연결 앱으로 등록되었습니다.".into(),
+                    ),
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Register file associations", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_file_associations_unregister_requested(move || {
+            let result = platform::unregister_file_associations();
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => {
+                        ui.set_status_text("ArchiveRclick 파일 연결 등록이 제거되었습니다.".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Remove file associations", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_default_apps_requested(move || {
+            let result = platform::open_url("ms-settings:defaultapps");
+            if let Some(ui) = weak.upgrade() {
+                match result {
+                    Ok(()) => ui.set_status_text("Windows 기본 앱 설정을 열었습니다.".into()),
+                    Err(error) => {
+                        ui.set_status_text(error.clone().into());
+                        platform::show_error("Open Default apps", &error);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
         ui.on_settings_applied(
             move |font_selection,
                   thread_selection,
                   theme_selection,
                   language_preference_selection,
-                  header_encryption| {
+                  header_encryption,
+                  esc_close_main_window| {
                 let preference = FONT_OPTIONS
                     .get(font_selection.max(0) as usize)
                     .map(|(_, key)| *key)
@@ -1626,6 +1704,10 @@ fn wire_callbacks(
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) =
                     platform::save_header_encryption_preference(header_encryption)
+                {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) =
+                    platform::save_esc_close_main_window_preference(esc_close_main_window)
                 {
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) =
@@ -1648,6 +1730,7 @@ fn wire_callbacks(
                 if let Some(ui) = weak.upgrade() {
                     ui.set_font_family(family.into());
                     ui.set_settings_header_encryption(header_encryption);
+                    ui.set_esc_close_main_window(esc_close_main_window);
                     ui.set_create_header_encryption(header_encryption);
                     ui.set_theme_selection(theme_selection);
                     let language_preference = language_registry_key(language_preference_selection);

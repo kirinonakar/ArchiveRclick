@@ -55,6 +55,7 @@ mod imp {
     const FONT_VALUE: &str = "FontFamily";
     const THREAD_VALUE: &str = "CpuThreads";
     const ENCRYPT_HEADERS_VALUE: &str = "EncryptHeaders";
+    const ESC_CLOSE_MAIN_WINDOW_VALUE: &str = "EscCloseMainWindow";
     const THEME_VALUE: &str = "Theme";
     const LANGUAGE_VALUE: &str = "Language";
     const WINDOW_X_VALUE: &str = "WindowX";
@@ -281,6 +282,38 @@ mod imp {
             ));
         }
         Ok(())
+    }
+
+    /// Loads whether Escape may close the main window when no overlay or
+    /// archive operation is active; disabled by default.
+    pub fn load_esc_close_main_window_preference() -> bool {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return false;
+        };
+        matches!(
+            read_string_value(key.0, ESC_CLOSE_MAIN_WINDOW_VALUE).as_deref(),
+            Some("1" | "true" | "on")
+        )
+    }
+
+    /// Persists the Escape-to-close-main-window preference.
+    pub fn save_esc_close_main_window_preference(enabled: bool) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        write_string_value(
+            key.0,
+            ESC_CLOSE_MAIN_WINDOW_VALUE,
+            if enabled { "1" } else { "0" },
+        )
     }
 
     /// Loads the stored theme preference; returns "auto" when unset.
@@ -656,6 +689,14 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_esc_close_main_window_preference() -> bool {
+        false
+    }
+
+    pub fn save_esc_close_main_window_preference(_enabled: bool) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn load_theme_preference() -> String {
         "auto".to_owned()
     }
@@ -702,10 +743,11 @@ mod imp {
 }
 
 pub use imp::{
-    load_column_boundaries, load_font_preference, load_header_encryption_preference,
-    load_language_preference, load_theme_preference, load_thread_preference, load_window_geometry,
+    load_column_boundaries, load_esc_close_main_window_preference, load_font_preference,
+    load_header_encryption_preference, load_language_preference, load_theme_preference,
+    load_thread_preference, load_window_geometry,
     default_language_preference, resolve_language_preference,
-    resolve_font_family, save_column_boundaries, save_font_preference,
-    save_header_encryption_preference, save_language_preference, save_theme_preference,
-    save_thread_preference, save_window_geometry,
+    resolve_font_family, save_column_boundaries, save_esc_close_main_window_preference,
+    save_font_preference, save_header_encryption_preference, save_language_preference,
+    save_theme_preference, save_thread_preference, save_window_geometry,
 };

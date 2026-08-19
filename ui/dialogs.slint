@@ -394,6 +394,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <int> thread-selection;
     in property <bool> header-encryption: false;
     in property <int> theme-selection;
+    in property <bool> esc-close-main-window: false;
     in property <[string]> language-options;
     in property <int> language-selection;
     in property <int> language-preference-selection;
@@ -407,11 +408,15 @@ export component SettingsOverlay inherits Rectangle {
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
     private property <int> selected-language: root.language-preference-selection;
+    private property <bool> esc-close-main-window-value: root.esc-close-main-window;
 
-    callback accepted(int, int, int, int, bool);
+    callback accepted(int, int, int, int, bool, bool);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
+    callback register-file-associations();
+    callback unregister-file-associations();
+    callback open-default-apps();
     callback open-github();
     callback open-third-party-notices();
     callback open-third-party-licenses();
@@ -419,8 +424,10 @@ export component SettingsOverlay inherits Rectangle {
     background: #00000080;
     accessible-role: region;
     accessible-label: root.active-tab == 1
-        ? (root.language-selection == 1 ? "정보" : root.language-selection == 2 ? "情報" : "About")
-        : (root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings");
+        ? (root.language-selection == 1 ? "앱 등록" : root.language-selection == 2 ? "アプリ登録" : "App registration")
+        : root.active-tab == 2
+            ? (root.language-selection == 1 ? "정보" : root.language-selection == 2 ? "情報" : "About")
+            : (root.language-selection == 1 ? "설정" : root.language-selection == 2 ? "設定" : "Settings");
 
     Rectangle {
         x: (parent.width - self.width) / 2;
@@ -456,11 +463,18 @@ export component SettingsOverlay inherits Rectangle {
                     clicked => { root.active-tab = 0; }
                 }
 
+                app-registration-tab := Button {
+                    horizontal-stretch: 1;
+                    text: root.language-selection == 1 ? "앱 등록" : root.language-selection == 2 ? "アプリ登録" : "App registration";
+                    primary: root.active-tab == 1;
+                    clicked => { root.active-tab = 1; }
+                }
+
                 about-tab := Button {
                     horizontal-stretch: 1;
                     text: root.language-selection == 1 ? "정보" : root.language-selection == 2 ? "情報" : "About";
-                    primary: root.active-tab == 1;
-                    clicked => { root.active-tab = 1; }
+                    primary: root.active-tab == 2;
+                    clicked => { root.active-tab = 2; }
                 }
             }
 
@@ -569,10 +583,32 @@ export component SettingsOverlay inherits Rectangle {
                     }
                 }
 
-                Rectangle {
-                    height: 1px;
-                    background: AppTheme.border;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "ESC 동작" : root.language-selection == 2 ? "ESCキー動作" : "Escape key behavior";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    esc-close := CheckBox {
+                        horizontal-stretch: 1;
+                        checked: root.esc-close-main-window-value;
+                        changed checked => { root.esc-close-main-window-value = self.checked; }
+                        text: root.language-selection == 1
+                            ? "ESC로 메인 창 닫기"
+                            : root.language-selection == 2
+                                ? "ESCキーでメインウィンドウを閉じる"
+                                : "Close the main window with Escape";
+                    }
                 }
+
+            }
+
+            if root.active-tab == 1 : VerticalLayout {
+                spacing: 4px;
+                vertical-stretch: 0;
 
                 Text {
                     text: root.language-selection == 1 ? "Explorer 우클릭 메뉴" : root.language-selection == 2 ? "Explorer 右クリックメニュー" : "Explorer right-click menu";
@@ -604,9 +640,54 @@ export component SettingsOverlay inherits Rectangle {
                         clicked => { root.unregister-context-menu(); }
                     }
                 }
+
+                Rectangle {
+                    height: 1px;
+                    background: AppTheme.border;
+                }
+
+                Text {
+                    text: root.language-selection == 1 ? "지원 파일 확장자" : root.language-selection == 2 ? "対応ファイル拡張子" : "Supported file extensions";
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: root.language-selection == 1
+                        ? "ArchiveRclick을 Windows 기본 앱 목록에 등록합니다. 등록 후 기본 앱 설정에서 .zip, .7z 등 지원 확장자의 기본 앱으로 지정할 수 있습니다."
+                        : root.language-selection == 2
+                            ? "ArchiveRclickをWindowsの既定のアプリ一覧に登録します。登録後、既定のアプリ設定で.zipや.7zなどの対応拡張子を指定できます。"
+                            : "Registers ArchiveRclick in Windows Default apps. After registering, choose it as the default app for supported extensions such as .zip and .7z.";
+                    color: Palette.foreground;
+                    font-size: 11px;
+                    opacity: 0.72;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Button {
+                        height: 28px;
+                        text: root.language-selection == 1 ? "앱 등록" : root.language-selection == 2 ? "アプリを登録" : "Register app";
+                        clicked => { root.register-file-associations(); }
+                    }
+
+                    Button {
+                        height: 28px;
+                        text: root.language-selection == 1 ? "기본 앱 설정 열기" : root.language-selection == 2 ? "既定のアプリを開く" : "Open Default apps";
+                        clicked => { root.open-default-apps(); }
+                    }
+
+                    Button {
+                        height: 28px;
+                        text: root.language-selection == 1 ? "등록 제거" : root.language-selection == 2 ? "登録を削除" : "Remove registration";
+                        clicked => { root.unregister-file-associations(); }
+                    }
+                }
             }
 
-            if root.active-tab == 1 : VerticalLayout {
+            if root.active-tab == 2 : VerticalLayout {
                 spacing: 4px;
                 vertical-stretch: 0;
 
@@ -719,7 +800,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(root.font-index, root.thread-index, root.theme-index, root.selected-language, root.header-encryption-value); }
+                    clicked => { root.accepted(root.font-index, root.thread-index, root.theme-index, root.selected-language, root.header-encryption-value, root.esc-close-main-window-value); }
                 }
             }
         }

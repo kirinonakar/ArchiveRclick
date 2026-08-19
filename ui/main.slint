@@ -728,6 +728,7 @@ export component AppWindow inherits Window {
     in-out property <int> font-selection;
     in-out property <int> settings-thread-selection: 0;
     in-out property <bool> settings-header-encryption: false;
+    in-out property <bool> esc-close-main-window: false;
     in-out property <int> theme-selection: 0;
     in-out property <[string]> language-options;
     in-out property <int> language-selection: 0;
@@ -768,7 +769,8 @@ export component AppWindow inherits Window {
     callback dropped(data-transfer);
 
     callback settings-requested();
-    callback settings-applied(int, int, int, int, bool);
+    callback settings-applied(int, int, int, int, bool, bool);
+    callback main-window-close-requested();
     callback settings-cancelled();
     callback github-requested();
     callback third-party-notices-requested();
@@ -776,6 +778,9 @@ export component AppWindow inherits Window {
     callback column-widths-changed(float, float, float);
     callback context-menu-register-requested();
     callback context-menu-unregister-requested();
+    callback file-associations-register-requested();
+    callback file-associations-unregister-requested();
+    callback default-apps-requested();
 
     in-out property <bool> extract-visible: false;
     in-out property <bool> extract-selected-only: false;
@@ -818,16 +823,18 @@ export component AppWindow inherits Window {
         KeyBinding {
             keys: @keys(Escape);
             activated => {
-                if (root.conflict-visible) {
-                    root.conflict-response(4);
-                } else if (root.busy) {
-                    root.cancel-requested();
-                } else if (root.settings-visible) {
+                if (root.settings-visible) {
                     root.settings-visible = false;
                 } else if (root.create-visible) {
                     root.create-visible = false;
                 } else if (root.extract-visible) {
                     root.extract-visible = false;
+                } else if (root.conflict-visible) {
+                    root.conflict-response(4);
+                } else if (root.busy) {
+                    // Do not cancel or close an archive operation with Escape.
+                } else if (root.esc-close-main-window) {
+                    root.main-window-close-requested();
                 }
             }
         }
@@ -1227,6 +1234,7 @@ export component AppWindow inherits Window {
         thread-selection: root.settings-thread-selection;
         header-encryption: root.settings-header-encryption;
         theme-selection: root.theme-selection;
+        esc-close-main-window: root.esc-close-main-window;
         language-options: root.language-options;
         language-selection: root.language-selection;
         language-preference-selection: root.language-preference-selection;
@@ -1234,12 +1242,15 @@ export component AppWindow inherits Window {
         context-menu-managed-by-package: root.context-menu-managed-by-package;
         register-context-menu => { root.context-menu-register-requested(); }
         unregister-context-menu => { root.context-menu-unregister-requested(); }
+        register-file-associations => { root.file-associations-register-requested(); }
+        unregister-file-associations => { root.file-associations-unregister-requested(); }
+        open-default-apps => { root.default-apps-requested(); }
         open-github => { root.github-requested(); }
         open-third-party-notices => { root.third-party-notices-requested(); }
         open-third-party-licenses => { root.third-party-licenses-requested(); }
-        accepted(font-selection, thread-index, theme-index, language-index, header_encryption) => {
+        accepted(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window) => {
             root.settings-visible = false;
-            root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption);
+            root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window);
         }
         cancelled => { root.settings-visible = false; }
     }

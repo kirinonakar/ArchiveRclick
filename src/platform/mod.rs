@@ -39,12 +39,14 @@ pub use associations::{register_file_associations, unregister_file_associations}
 pub use drop_target::install_file_drop_handler;
 pub use explorer_drag::start_file_drag;
 pub use settings::{
-    ColumnBoundaries, WindowGeometry, load_column_boundaries, load_font_preference,
+    ColumnBoundaries, WindowGeometry, load_column_boundaries,
+    load_esc_close_main_window_preference, load_font_preference,
     load_header_encryption_preference, load_language_preference, load_theme_preference,
     load_thread_preference, load_window_geometry, default_language_preference,
     resolve_font_family, resolve_language_preference, save_column_boundaries,
-    save_font_preference, save_header_encryption_preference, save_language_preference,
-    save_theme_preference, save_thread_preference, save_window_geometry,
+    save_esc_close_main_window_preference, save_font_preference,
+    save_header_encryption_preference, save_language_preference, save_theme_preference,
+    save_thread_preference, save_window_geometry,
 };
 pub use shell::{open_file, open_url, reveal_in_explorer};
 pub use titlebar::apply_window_theme;
