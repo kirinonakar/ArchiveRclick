@@ -27,6 +27,13 @@ use super::AppState;
 type Engine = Arc<dyn ArchiveEngine>;
 type InitialWindowShowError = Arc<Mutex<Option<String>>>;
 
+fn take_initial_window_show_error(error: &InitialWindowShowError) -> Option<String> {
+    match error.lock() {
+        Ok(mut error) => error.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
 /// Builds the shared archive engine: 7z, LZH, RAR, and ISO archives are handled by
 /// the bundled 7z.dll when available, while libarchive remains the fallback
 /// for other formats. When 7z.dll cannot be loaded, the composite still serves
@@ -300,14 +307,10 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
     let mut result =
         slint::run_event_loop().map_err(|error| format!("UI event loop failed: {error}"));
     let _ = ui.hide();
-    if result.is_ok() {
-        let show_error = match initial_show_error.lock() {
-            Ok(mut error) => error.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        if let Some(error) = show_error {
-            result = Err(error);
-        }
+    if result.is_ok()
+        && let Some(error) = take_initial_window_show_error(&initial_show_error)
+    {
+        result = Err(error);
     }
     cleanup_drag_staging_directories();
     result
@@ -551,8 +554,7 @@ fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String
         destination_overrides,
         elevated_retry,
     );
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Extracts archives into a per-archive folder inside the folder that received
@@ -605,8 +607,7 @@ fn run_gui_extract_to(args: &[OsString]) -> Result<(), String> {
         destination_overrides,
         false,
     );
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Creates one archive from the dragged items inside the folder that received
@@ -668,8 +669,7 @@ fn run_gui_create_to(args: &[OsString], format: CreateFormat) -> Result<(), Stri
         options,
         false,
     );
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Creates one archive for each dragged folder inside the folder that received
@@ -727,8 +727,7 @@ fn run_gui_create_each_to(args: &[OsString], format: CreateFormat) -> Result<(),
     };
     let (ui, state) = open_progress_window()?;
     start_create_batch_window(&ui, &state, Arc::clone(&engine), items, options, false);
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Parses the output markers used by an elevated extraction retry. Each
@@ -811,8 +810,7 @@ fn run_gui_create(
         options,
         elevated_retry,
     );
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Creates one archive beside every selected folder. The normal invocation
@@ -863,8 +861,7 @@ fn run_gui_create_each(
         options,
         elevated_retry,
     );
-    ui.run()
-        .map_err(|error| format!("UI event loop failed: {error}"))
+    run_progress_window(&ui, &state)
 }
 
 /// Parses the destination marker used only by an elevated retry.  Normal CLI
@@ -2434,6 +2431,7 @@ fn start_create(
 struct ProgressWindowState {
     cancellation: Arc<Mutex<Option<CancellationToken>>>,
     password_prompt: Arc<ProgressPasswordPrompt>,
+    initial_show_error: InitialWindowShowError,
 }
 
 /// Coordinates a password dialog shown by the progress-only Explorer window
@@ -2498,8 +2496,10 @@ impl ProgressPasswordPrompt {
     }
 }
 
-const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 640.0;
-const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 300.0;
+// Keep these in sync with ProgressWindow's preferred size in
+// ui/progress_window.slint. They are applied before the first visible frame.
+const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 600.0;
+const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 280.0;
 
 /// Builds and shows the small progress window; its Cancel button cancels the
 /// running operation.
@@ -2507,9 +2507,11 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let theme_selection = theme_selection_index(&platform::load_theme_preference());
     ui.set_theme_selection(theme_selection);
+    let initial_show_error = Arc::new(Mutex::new(None));
     let state = Rc::new(ProgressWindowState {
         cancellation: Arc::new(Mutex::new(None)),
         password_prompt: Arc::new(ProgressPasswordPrompt::new()),
+        initial_show_error: Arc::clone(&initial_show_error),
     });
     let state_for_cancel = Rc::clone(&state);
     let password_for_cancel = Arc::clone(&state.password_prompt);
@@ -2566,9 +2568,8 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     ui.set_progress_title("Working…".into());
     ui.set_progress_file("".into());
     set_initial_progress_window(&ui);
-    // The native window is created when the event loop starts, so its size is
-    // still zero here. Supply the preferred logical size so the initial
-    // position can be calculated before the first frame is shown.
+    // Select the cursor's monitor before the native window exists. The exact
+    // position is recalculated from the real hidden window below.
     platform::center_window_with_logical_size(
         ui.window(),
         slint::LogicalSize::new(
@@ -2576,16 +2577,49 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
             PROGRESS_WINDOW_LOGICAL_HEIGHT,
         ),
     );
-    ui.show()
-        .map_err(|error| format!("Could not show the progress window: {error}"))?;
-    let weak_for_theme = ui.as_weak();
+
+    // Let the event loop create the native window hidden. Apply its final
+    // size, centered position, and title-bar theme before mapping it so no
+    // default-size/default-theme border can flash first.
+    let weak_for_show = ui.as_weak();
     slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak_for_theme.upgrade() {
-            platform::apply_window_theme(ui.window(), theme_selection);
+        let Some(ui) = weak_for_show.upgrade() else {
+            return;
+        };
+        ui.window().set_size(slint::LogicalSize::new(
+            PROGRESS_WINDOW_LOGICAL_WIDTH,
+            PROGRESS_WINDOW_LOGICAL_HEIGHT,
+        ));
+        platform::center_window(ui.window());
+        platform::apply_window_theme(ui.window(), theme_selection);
+        if let Err(error) = ui.show() {
+            let message = format!("Could not show the progress window: {error}");
+            match initial_show_error.lock() {
+                Ok(mut slot) => *slot = Some(message),
+                Err(poisoned) => *poisoned.into_inner() = Some(message),
+            }
+            let _ = ui.hide();
         }
     })
-    .map_err(|error| format!("Could not schedule the progress-window theme: {error}"))?;
+    .map_err(|error| format!("Could not schedule the initial progress-window show: {error}"))?;
     Ok((ui, state))
+}
+
+/// Runs a progress-only window whose initial show was deferred until its
+/// native geometry and title-bar theme were ready.
+fn run_progress_window(
+    ui: &ProgressWindow,
+    state: &ProgressWindowState,
+) -> Result<(), String> {
+    let mut result =
+        slint::run_event_loop().map_err(|error| format!("UI event loop failed: {error}"));
+    let _ = ui.hide();
+    if result.is_ok()
+        && let Some(error) = take_initial_window_show_error(&state.initial_show_error)
+    {
+        result = Err(error);
+    }
+    result
 }
 
 /// Hides the progress window and ends the event loop so the process exits.
