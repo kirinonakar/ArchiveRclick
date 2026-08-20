@@ -25,6 +25,7 @@ use crate::{
 use super::AppState;
 
 type Engine = Arc<dyn ArchiveEngine>;
+type InitialWindowShowError = Arc<Mutex<Option<String>>>;
 
 /// Builds the shared archive engine: 7z, LZH, RAR, and ISO archives are handled by
 /// the bundled 7z.dll when available, while libarchive remains the fallback
@@ -272,7 +273,7 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
     }
 
     let operation_progress_window = Rc::new(RefCell::new(None::<ProgressWindow>));
-    let (ui, state, engine, _writable_formats) =
+    let (ui, state, engine, _writable_formats, initial_show_error) =
         open_main_window(Rc::clone(&operation_progress_window))?;
 
     if let Some(path) = startup_argument.map(PathBuf::from) {
@@ -293,9 +294,21 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
         }
     }
 
-    let result = ui
-        .run()
-        .map_err(|error| format!("UI event loop failed: {error}"));
+    // The initial show is scheduled from `open_main_window` so the native
+    // window can receive its restored geometry while it is still hidden.
+    // Calling ComponentHandle::run() here would show it too early.
+    let mut result =
+        slint::run_event_loop().map_err(|error| format!("UI event loop failed: {error}"));
+    let _ = ui.hide();
+    if result.is_ok() {
+        let show_error = match initial_show_error.lock() {
+            Ok(mut error) => error.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(error) = show_error {
+            result = Err(error);
+        }
+    }
     cleanup_drag_staging_directories();
     result
 }
@@ -304,7 +317,16 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
 /// interactive startup path and the Explorer context-menu operations.
 fn open_main_window(
     operation_progress_window: Rc<RefCell<Option<ProgressWindow>>>,
-) -> Result<(AppWindow, Rc<AppState>, Engine, Vec<CreateFormat>), String> {
+) -> Result<
+    (
+        AppWindow,
+        Rc<AppState>,
+        Engine,
+        Vec<CreateFormat>,
+        InitialWindowShowError,
+    ),
+    String,
+> {
     let engine: Engine = load_engine()?;
     let ui = AppWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -421,32 +443,34 @@ fn open_main_window(
         slint::CloseRequestResponse::HideWindow
     });
 
-    ui.show()
-        .map_err(|error| format!("Could not show the UI: {error}"))?;
-    if let Some(geometry) = saved_geometry {
-        // `show()` may only queue native-window creation until the event loop
-        // starts. Apply the physical size from an event-loop callback so the
-        // winit backend cannot temporarily reinterpret it as logical pixels.
-        let weak = ui.as_weak();
-        slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.window()
-                    .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
-            }
-        })
-        .map_err(|error| format!("Could not schedule saved window size: {error}"))?;
-    }
-    // `show()` can queue native-window creation until the event loop starts.
-    // Reapply there so the Win32 title bar receives the selected theme too.
-    let weak_for_theme = ui.as_weak();
+    // AppWindow creation queues a hidden native window. Wait until the event
+    // loop has created it, then apply the saved physical size and native theme
+    // before mapping it. Showing first and resizing from this callback leaves
+    // the default-size frame visible briefly on some launches.
+    let initial_show_error = Arc::new(Mutex::new(None));
+    let initial_show_error_for_callback = Arc::clone(&initial_show_error);
+    let weak = ui.as_weak();
     let theme_selection = ui.get_theme_selection();
     slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak_for_theme.upgrade() {
-            platform::apply_window_theme(ui.window(), theme_selection);
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if let Some(geometry) = saved_geometry {
+            ui.window()
+                .set_size(slint::PhysicalSize::new(geometry.width, geometry.height));
+        }
+        platform::apply_window_theme(ui.window(), theme_selection);
+        if let Err(error) = ui.show() {
+            let message = format!("Could not show the UI: {error}");
+            match initial_show_error_for_callback.lock() {
+                Ok(mut slot) => *slot = Some(message),
+                Err(poisoned) => *poisoned.into_inner() = Some(message),
+            }
+            let _ = slint::quit_event_loop();
         }
     })
-    .map_err(|error| format!("Could not schedule the window theme: {error}"))?;
-    Ok((ui, state, engine, writable_formats))
+    .map_err(|error| format!("Could not schedule the initial window show: {error}"))?;
+    Ok((ui, state, engine, writable_formats, initial_show_error))
 }
 
 /// Returns false for maximized/fullscreen bounds even when the backend has
