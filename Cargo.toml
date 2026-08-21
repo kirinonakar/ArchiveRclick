@@ -1,6 +1,6 @@
 [package]
 name = "archive-rclick"
-version = "1.1.5"
+version = "1.1.6"
 edition = "2024"
 rust-version = "1.92"
 description = "A fast, lightweight Windows archive manager built with Rust, Slint, and libarchive"
