@@ -953,6 +953,8 @@ mod platform_impl {
     struct Reader<'a> {
         api: &'a Api,
         raw: NonNull<RawArchive>,
+        standalone_payload_name: Option<PathBuf>,
+        prefer_source_payload_name: bool,
         closed: bool,
     }
 
@@ -1019,6 +1021,8 @@ mod platform_impl {
 
     impl<'a> Reader<'a> {
         fn open(api: &'a Api, path: &Path, password: Option<&str>) -> ArchiveResult<Self> {
+            let standalone_filter = is_standalone_filter(path)?;
+            let raw_only = standalone_filter && is_wrapped_tar_path(path);
             // SAFETY: constructor has no preconditions and returns an owned handle.
             let raw = NonNull::new(unsafe { (api.read_new)() }).ok_or_else(|| {
                 ArchiveError::LibraryUnavailable("archive_read_new returned null".to_owned())
@@ -1026,6 +1030,10 @@ mod platform_impl {
             let reader = Self {
                 api,
                 raw,
+                standalone_payload_name: standalone_filter
+                    .then(|| standalone_payload_name(path))
+                    .flatten(),
+                prefer_source_payload_name: raw_only,
                 closed: false,
             };
 
@@ -1055,7 +1063,7 @@ mod platform_impl {
                     unsafe { (api.read_support_format_lha)(raw.as_ptr()) },
                     "enabling the LHA archive format",
                 )?;
-            } else {
+            } else if !raw_only {
                 for support in &api.read_formats {
                     reader.require_ok(
                         // SAFETY: reader owns a live read handle in NEW state.
@@ -1064,7 +1072,7 @@ mod platform_impl {
                     )?;
                 }
             }
-            if is_standalone_filter(path)? {
+            if standalone_filter {
                 let support_raw = api.read_support_format_raw.ok_or_else(|| {
                     ArchiveError::UnsupportedOption(
                         "this libarchive build cannot read standalone compressed streams"
@@ -1141,7 +1149,7 @@ mod platform_impl {
                 .and_then(|raw| encoding::decode_name_with_codepage(&raw, pathname_codepage))
                 .filter(|name| !name.is_empty())
                 .map(PathBuf::from);
-            let path = match path {
+            let mut path = match path {
                 Some(path) => path,
                 None => {
                     // Formats that store Unicode directly (7z, RAR, Joliet
@@ -1185,6 +1193,18 @@ mod platform_impl {
                     }
                 }
             };
+
+            // A raw compressed stream may expose either libarchive's synthetic
+            // `data` pathname or a stale original name from its gzip header.
+            // Use the current source name for wrapped TAR files and as the
+            // fallback for unnamed streams so listing, selection, and
+            // extraction agree on the useful payload name.
+            if self.format_name().eq_ignore_ascii_case("raw")
+                && (path == Path::new("data") || self.prefer_source_payload_name)
+                && let Some(payload_name) = &self.standalone_payload_name
+            {
+                path.clone_from(payload_name);
+            }
 
             // SAFETY: all accessors borrow immutable fields from `entry`.
             let (size, filetype, modified, hardlink, encrypted) = unsafe {
@@ -2027,10 +2047,29 @@ mod platform_impl {
                     kind: entry.kind,
                     encrypted: entry.encrypted,
                 });
+                // Raw compressed streams contain exactly one logical file.
+                // Asking for another header makes libarchive drain and decode
+                // the entire payload just to discover EOF; for multi-gigabyte
+                // .tar.gz files that defeats the fast wrapper view.
+                if reader.format_name().eq_ignore_ascii_case("raw") {
+                    break;
+                }
             }
 
             let format_name = reader.format_name();
             let filter_name = reader.filter_name();
+            if format_name.eq_ignore_ascii_case("raw") && entries.len() == 1 {
+                let source_metadata = fs::metadata(path).ok();
+                let entry = &mut entries[0];
+                entry.size.get_or_insert(total_input);
+                entry.compressed_size.get_or_insert(total_input);
+                if entry.modified_unix_seconds.is_none() {
+                    entry.modified_unix_seconds = source_metadata
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(system_time_seconds);
+                }
+                total_uncompressed_size = entry.size.unwrap_or(total_input);
+            }
             let archive_encrypted = reader.has_encrypted_entries();
             if archive_encrypted {
                 for entry in &mut entries {
@@ -3053,6 +3092,44 @@ mod platform_impl {
             || bytes.starts_with(&[0x04, 0x22, 0x4d, 0x18])
             || bytes.starts_with(b"LZIP")
             || bytes.starts_with(&[0x1f, 0x9d]))
+    }
+
+    fn is_wrapped_tar_path(path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        [".tar.gz", ".tgz"]
+            .iter()
+            .any(|extension| name.ends_with(extension))
+    }
+
+    fn standalone_payload_name(path: &Path) -> Option<PathBuf> {
+        let file_name = path.file_name()?.to_string_lossy();
+        let lower = file_name.to_ascii_lowercase();
+        for (extension, payload_extension) in [
+            (".tgz", ".tar"),
+            (".tbz2", ".tar"),
+            (".txz", ".tar"),
+        ] {
+            if lower.ends_with(extension) {
+                let stem = &file_name[..file_name.len() - extension.len()];
+                return (!stem.is_empty()).then(|| PathBuf::from(format!("{stem}{payload_extension}")));
+            }
+        }
+
+        const COMPRESSION_EXTENSIONS: [&str; 7] =
+            ["gz", "bz2", "xz", "zst", "lz4", "lz", "z"];
+
+        let extension = path.extension()?.to_str()?;
+        if !COMPRESSION_EXTENSIONS
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            return None;
+        }
+        let stem = path.file_stem()?;
+        (!stem.is_empty()).then(|| PathBuf::from(stem))
     }
 
     fn wide_nul(path: &Path) -> ArchiveResult<Vec<u16>> {

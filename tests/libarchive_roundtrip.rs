@@ -177,6 +177,104 @@ fn bundled_runtime_is_supported_libarchive_3_8_9() {
 }
 
 #[test]
+fn standalone_gzip_uses_source_stem_for_payload_name() {
+    let work = TestDirectory::new("standalone-gzip-name");
+    let archive = work.0.join("volume.nii.gz");
+    // gzip-compressed `hello world`, with no original-name field in its header.
+    fs::write(
+        &archive,
+        [
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xcb, 0x48, 0xcd, 0xc9,
+            0xc9, 0x57, 0x28, 0xcf, 0x2f, 0xca, 0x49, 0x01, 0x00, 0x85, 0x11, 0x4a, 0x0d, 0x0b,
+            0x00, 0x00, 0x00,
+        ],
+    )
+    .unwrap();
+
+    let engine = load_runtime();
+    let cancel = CancellationToken::new();
+    let listing = engine
+        .list(&archive, None, 0, &quiet_progress, &cancel)
+        .unwrap();
+    assert_eq!(listing.format_name, "raw");
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].path, PathBuf::from("volume.nii"));
+    assert_eq!(listing.entries[0].display_path, "volume.nii");
+
+    let output = work.0.join("out");
+    engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions::default(),
+            &quiet_progress,
+            &Overwrite,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(fs::read(output.join("volume.nii")).unwrap(), b"hello world");
+    assert!(!output.join("data").exists());
+}
+
+#[test]
+fn tar_gzip_lists_the_wrapped_tar_without_scanning_members() {
+    let work = TestDirectory::new("tar-gzip-data-name");
+    let input = work.0.join("data");
+    fs::write(&input, b"tar member").unwrap();
+
+    let engine = load_runtime();
+    let cancel = CancellationToken::new();
+    let archive = work.0.join("bundle.tar.gz");
+    engine
+        .create(
+            &archive,
+            std::slice::from_ref(&input),
+            &CreateOptions {
+                format: CreateFormat::TarGzip,
+                ..CreateOptions::default()
+            },
+            &quiet_progress,
+            &cancel,
+        )
+        .unwrap();
+
+    let listing = engine
+        .list(&archive, None, 0, &quiet_progress, &cancel)
+        .unwrap();
+    assert_eq!(listing.format_name, "raw");
+    assert_eq!(listing.filter_name.as_deref(), Some("gzip"));
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].display_path, "bundle.tar");
+    assert_eq!(listing.entries[0].size, Some(fs::metadata(&archive).unwrap().len()));
+    assert_eq!(
+        listing.entries[0].compressed_size,
+        Some(fs::metadata(&archive).unwrap().len())
+    );
+    assert!(listing.entries[0].modified_unix_seconds.is_some());
+
+    let output = work.0.join("out");
+    engine
+        .extract(
+            &archive,
+            &output,
+            &ExtractOptions::default(),
+            &quiet_progress,
+            &Overwrite,
+            &cancel,
+        )
+        .unwrap();
+    let tar = output.join("bundle.tar");
+    assert!(tar.is_file());
+    let tar_listing = engine
+        .list(&tar, None, 0, &quiet_progress, &cancel)
+        .unwrap();
+    assert!(tar_listing
+        .entries
+        .iter()
+        .any(|entry| entry.display_path == "data"));
+}
+
+#[test]
 fn prioritized_creation_formats_round_trip() {
     let work = TestDirectory::new("formats");
     let input = work.0.join("payload");
@@ -222,18 +320,24 @@ fn prioritized_creation_formats_round_trip() {
         let listing = engine
             .list(&archive, None, 0, &quiet_progress, &cancel)
             .unwrap_or_else(|error| panic!("listing {} failed: {error}", format.label()));
-        assert!(
-            listing
+        if format == CreateFormat::TarGzip {
+            assert_eq!(listing.format_name, "raw");
+            assert_eq!(listing.entries.len(), 1);
+            assert!(listing.entries[0].display_path.ends_with(".tar"));
+        } else {
+            assert!(
+                listing
+                    .entries
+                    .iter()
+                    .any(|entry| entry.display_path.replace('\\', "/") == "hello.txt"),
+                "{} listing omitted hello.txt",
+                format.label()
+            );
+            assert!(listing
                 .entries
                 .iter()
-                .any(|entry| entry.display_path.replace('\\', "/") == "hello.txt"),
-            "{} listing omitted hello.txt",
-            format.label()
-        );
-        assert!(listing
-            .entries
-            .iter()
-            .all(|entry| !entry.display_path.to_ascii_lowercase().ends_with("thumbs.db")));
+                .all(|entry| !entry.display_path.to_ascii_lowercase().ends_with("thumbs.db")));
+        }
         engine
             .test(&archive, None, &quiet_progress, &cancel)
             .unwrap_or_else(|error| panic!("testing {} failed: {error}", format.label()));
@@ -249,12 +353,29 @@ fn prioritized_creation_formats_round_trip() {
                 &cancel,
             )
             .unwrap_or_else(|error| panic!("extracting {} failed: {error}", format.label()));
+        let content_output = if format == CreateFormat::TarGzip {
+            let tar = output.join(&listing.entries[0].path);
+            let inner_output = work.0.join("out-TAR.GZ-inner");
+            engine
+                .extract(
+                    &tar,
+                    &inner_output,
+                    &ExtractOptions::default(),
+                    &quiet_progress,
+                    &Overwrite,
+                    &cancel,
+                )
+                .expect("extract wrapped TAR payload");
+            inner_output
+        } else {
+            output
+        };
         assert_eq!(
-            fs::read(output.join(r"hello.txt")).unwrap(),
+            fs::read(content_output.join(r"hello.txt")).unwrap(),
             b"hello from ArchiveRclick\n"
         );
         assert_eq!(
-            fs::read(output.join(r"nested\bytes.bin")).unwrap(),
+            fs::read(content_output.join(r"nested\bytes.bin")).unwrap(),
             (0_u8..=255).collect::<Vec<_>>()
         );
     }
