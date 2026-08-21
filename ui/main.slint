@@ -1251,8 +1251,15 @@ export component AppWindow inherits Window {
         accepted(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window) => {
             root.settings-visible = false;
             root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window);
+            // The focused OK button is destroyed together with the overlay.
+            // Restore focus explicitly so the main-window Escape binding keeps
+            // receiving key events after settings are applied.
+            shortcuts.focus();
         }
-        cancelled => { root.settings-visible = false; }
+        cancelled => {
+            root.settings-visible = false;
+            shortcuts.focus();
+        }
     }
 
     if root.password-visible : Rectangle {
