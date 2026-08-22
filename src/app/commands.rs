@@ -88,9 +88,12 @@ fn split_archive_volume_base_name(name: &str) -> Option<&str> {
 }
 
 // Font choices offered in Settings. The "auto" entry resolves at startup to
-// Noto Sans JP when it is installed, otherwise to Yu Gothic.
+// Noto Sans CJK JP when it is installed, otherwise to Yu Gothic.
 const FONT_OPTIONS: &[(&str, &str)] = &[
-    ("Auto (Noto Sans JP → Yu Gothic)", "auto"),
+    ("Auto (Noto Sans CJK JP → Yu Gothic)", "auto"),
+    ("Noto Sans CJK JP", "Noto Sans CJK JP"),
+    ("Noto Sans CJK KR", "Noto Sans CJK KR"),
+    ("Noto Sans KR", "Noto Sans KR"),
     ("Noto Sans JP", "Noto Sans JP"),
     ("Yu Gothic", "Yu Gothic"),
     ("Yu Gothic UI", "Yu Gothic UI"),

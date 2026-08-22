@@ -73,7 +73,7 @@ mod imp {
 
     const AUTO: &str = "auto";
     const DEFAULT_LANGUAGE: &str = "default";
-    const PREFERRED_FONT: &str = "Noto Sans JP";
+    const PREFERRED_FONT: &str = "Noto Sans CJK JP";
     const FALLBACK_FONT: &str = "Yu Gothic";
 
     struct OwnedKey(HKEY);
@@ -480,7 +480,7 @@ mod imp {
 
     /// Resolves a stored preference to a concrete font family.
     ///
-    /// "auto" picks Noto Sans JP when it is installed on this system and
+    /// "auto" picks Noto Sans CJK JP when it is installed on this system and
     /// falls back to Yu Gothic (shipped with every Windows 8.1+) otherwise.
     pub fn resolve_font_family(preference: &str) -> String {
         if preference.is_empty() || preference == AUTO {
@@ -495,7 +495,8 @@ mod imp {
     }
 
     /// Reports whether a font family is registered for the machine or the
-    /// current user (e.g. "Noto Sans JP" matches "Noto Sans JP (TrueType)").
+    /// current user (e.g. "Noto Sans CJK JP" matches
+    /// "Noto Sans CJK JP (TrueType)").
     fn font_family_installed(family: &str) -> bool {
         if family.is_empty() {
             return false;
@@ -547,7 +548,7 @@ mod imp {
     }
 
     /// True when a font registry value name starts with the family, e.g.
-    /// "Noto Sans JP (TrueType)" starts with "noto sans jp".
+    /// "Noto Sans CJK JP (TrueType)" starts with "noto sans cjk jp".
     fn value_name_matches(name: &str, wanted_lowercase: &str) -> bool {
         name.to_lowercase().starts_with(wanted_lowercase)
     }
@@ -637,17 +638,20 @@ mod imp {
         #[test]
         fn font_value_names_match_by_prefix() {
             assert!(value_name_matches(
-                "Noto Sans JP (TrueType)",
-                "noto sans jp"
+                "Noto Sans CJK JP (TrueType)",
+                "noto sans cjk jp"
             ));
             assert!(value_name_matches(
                 "Yu Gothic Regular & Yu Gothic UI Semilight (TrueType)",
                 "yu gothic"
             ));
-            assert!(!value_name_matches("Meiryo (TrueType)", "noto sans jp"));
             assert!(!value_name_matches(
-                "Noto Sans KR (TrueType)",
-                "noto sans jp"
+                "Meiryo (TrueType)",
+                "noto sans cjk jp"
+            ));
+            assert!(!value_name_matches(
+                "Noto Sans CJK KR (TrueType)",
+                "noto sans cjk jp"
             ));
         }
     }
