@@ -19,7 +19,7 @@ use crate::{
         SevenZipEngine, ThreadCount, VolumeSizePreset, libarchive::LibArchiveEngine,
     },
     platform,
-    tasks::{CancellationToken, ProgressSnapshot},
+    tasks::{CancellationToken, ProgressPhase, ProgressSnapshot},
 };
 
 use super::AppState;
@@ -2531,6 +2531,7 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
         password_for_cancel.respond(None);
         if let Some(ui) = weak_for_cancel.upgrade() {
             ui.set_progress_title("Cancelling…".into());
+            platform::taskbar::pause(ui.window());
         }
     });
     // The title-bar X must behave exactly like the Cancel button: cancel the
@@ -2554,6 +2555,7 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
         password_for_close.respond(None);
         if let Some(ui) = weak_for_close.upgrade() {
             ui.set_progress_title("Cancelling…".into());
+            platform::taskbar::pause(ui.window());
         }
         slint::CloseRequestResponse::KeepWindowShown
     });
@@ -2627,6 +2629,8 @@ fn run_progress_window(
 
 /// Hides the progress window and ends the event loop so the process exits.
 fn close_progress_window(ui: &ProgressWindow) {
+    // Drop the taskbar progress overlay before the window handle disappears.
+    platform::taskbar::clear(ui.window());
     let _ = ui.hide();
     let _ = slint::quit_event_loop();
 }
@@ -2642,6 +2646,13 @@ fn apply_progress_window(ui: &ProgressWindow, snapshot: &ProgressSnapshot) {
     ui.set_progress_detail(text.detail.into());
     ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
+    if snapshot.phase == ProgressPhase::Finished {
+        platform::taskbar::clear(ui.window());
+    } else if text.value < 0.0 {
+        platform::taskbar::show_indeterminate(ui.window());
+    } else {
+        platform::taskbar::show_fraction(ui.window(), text.value);
+    }
 }
 
 /// Keeps the operation title while progress values stream in.
@@ -3393,6 +3404,7 @@ fn set_initial_progress_window(ui: &ProgressWindow) {
     ui.set_progress_detail(text.detail.into());
     ui.set_progress_file_value(text.file_value);
     ui.set_progress_value(text.value);
+    platform::taskbar::show_indeterminate(ui.window());
 }
 
 fn progress_ui_text(snapshot: &ProgressSnapshot) -> ProgressUiText {

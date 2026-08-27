@@ -7,6 +7,7 @@ pub mod settings;
 pub mod shell;
 #[cfg(windows)]
 pub mod shell_ext;
+pub mod taskbar;
 pub mod titlebar;
 #[cfg(not(windows))]
 pub mod shell_ext {
