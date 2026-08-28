@@ -68,6 +68,7 @@ use windows::core::Result as WinResult;
 use crate::{
     app::commands::{cli_archive_destination, unique_path},
     archive::CreateFormat,
+    platform::{load_language_preference, resolve_language_preference},
     platform::windows::quote_windows_arg,
 };
 
@@ -313,10 +314,11 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
             return S_OK;
         }
         let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let locale = current_menu_locale();
         let verbs = if self.target_folder().is_some() {
-            right_drag_menu_verbs(&paths_buf)
+            right_drag_menu_verbs_for_locale(&paths_buf, locale)
         } else {
-            menu_verbs(&paths_buf)
+            menu_verbs_for_locale(&paths_buf, locale)
         };
 
         let mut next_id = id_cmd_first;
@@ -436,7 +438,13 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
             .and_then(|verbs| verbs.get(idcmd).copied())
             .ok_or(E_FAIL)?;
         let paths: Vec<PathBuf> = self.selected_paths().iter().map(PathBuf::from).collect();
-        let label = menu_verbs(&paths)
+        let locale = current_menu_locale();
+        let labels = if self.target_folder().is_some() {
+            right_drag_menu_verbs_for_locale(&paths, locale)
+        } else {
+            menu_verbs_for_locale(&paths, locale)
+        };
+        let label = labels
             .into_iter()
             .find_map(|(candidate, label)| (candidate == verb).then_some(label))
             .ok_or(E_FAIL)?;
@@ -463,6 +471,21 @@ enum Verb {
     SevenZipEach,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuLocale {
+    English,
+    Korean,
+    Japanese,
+}
+
+fn current_menu_locale() -> MenuLocale {
+    match resolve_language_preference(&load_language_preference()) {
+        "ko" => MenuLocale::Korean,
+        "ja" => MenuLocale::Japanese,
+        _ => MenuLocale::English,
+    }
+}
+
 impl Verb {
     fn subcommand(self) -> &'static str {
         match self {
@@ -475,14 +498,32 @@ impl Verb {
         }
     }
 
-    fn tooltip(self) -> &'static str {
-        match self {
-            Self::Extract => "Extract the selected archive(s)",
-            Self::ExtractHere => "Extract directly into the destination folder",
-            Self::Zip => "Create a ZIP archive from the selected items",
-            Self::SevenZip => "Create a 7z archive from the selected items",
-            Self::ZipEach => "Create one ZIP archive for each selected folder",
-            Self::SevenZipEach => "Create one 7z archive for each selected folder",
+    fn tooltip(self, locale: MenuLocale) -> &'static str {
+        match (locale, self) {
+            (MenuLocale::Korean, Self::Extract) => "선택한 압축파일 풀기",
+            (MenuLocale::Korean, Self::ExtractHere) => "대상 폴더에 바로 압축 풀기",
+            (MenuLocale::Korean, Self::Zip) => "선택 항목으로 ZIP 압축파일 만들기",
+            (MenuLocale::Korean, Self::SevenZip) => "선택 항목으로 7z 압축파일 만들기",
+            (MenuLocale::Korean, Self::ZipEach) => "선택한 각 폴더를 ZIP으로 압축하기",
+            (MenuLocale::Korean, Self::SevenZipEach) => "선택한 각 폴더를 7z으로 압축하기",
+            (MenuLocale::Japanese, Self::Extract) => "選択したアーカイブを展開",
+            (MenuLocale::Japanese, Self::ExtractHere) => "対象フォルダーに直接展開",
+            (MenuLocale::Japanese, Self::Zip) => "選択項目からZIPアーカイブを作成",
+            (MenuLocale::Japanese, Self::SevenZip) => "選択項目から7zアーカイブを作成",
+            (MenuLocale::Japanese, Self::ZipEach) => "選択した各フォルダーをZIPに圧縮",
+            (MenuLocale::Japanese, Self::SevenZipEach) => "選択した各フォルダーを7zに圧縮",
+            (MenuLocale::English, Self::Extract) => "Extract the selected archive(s)",
+            (MenuLocale::English, Self::ExtractHere) => {
+                "Extract directly into the destination folder"
+            }
+            (MenuLocale::English, Self::Zip) => "Create a ZIP archive from the selected items",
+            (MenuLocale::English, Self::SevenZip) => "Create a 7z archive from the selected items",
+            (MenuLocale::English, Self::ZipEach) => {
+                "Create one ZIP archive for each selected folder"
+            }
+            (MenuLocale::English, Self::SevenZipEach) => {
+                "Create one 7z archive for each selected folder"
+            }
         }
     }
 }
@@ -492,6 +533,10 @@ impl Verb {
 /// "보고서.zip으로 압축하기", "보고서.7z로 압축하기", "보고서\ 에 풀기". Long
 /// file names are shortened to 30 characters for display.
 fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    menu_verbs_for_locale(paths, current_menu_locale())
+}
+
+fn menu_verbs_for_locale(paths: &[PathBuf], locale: MenuLocale) -> Vec<(Verb, String)> {
     if paths.is_empty() {
         return Vec::new();
     }
@@ -505,66 +550,88 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or(base);
-            vec![(
-                Verb::Extract,
-                format!("{}\\ 에 풀기", shorten_menu_name(&final_name)),
-            )]
+            let name = shorten_menu_name(&final_name);
+            let label = match locale {
+                MenuLocale::Korean => format!("{name}\\ 에 풀기"),
+                MenuLocale::English => format!("Extract to {name}\\"),
+                MenuLocale::Japanese => format!("{name}\\ に展開"),
+            };
+            vec![(Verb::Extract, label)]
         } else {
             // 여러 압축파일을 선택하면 각각 자기 이름의 폴더에 푼다.
-            let mut verbs = vec![(Verb::Extract, "각각의 폴더에 풀기".to_owned())];
+            let label = match locale {
+                MenuLocale::Korean => "각각의 폴더에 풀기",
+                MenuLocale::English => "Extract to separate folders",
+                MenuLocale::Japanese => "それぞれのフォルダーに展開",
+            };
+            let mut verbs = vec![(Verb::Extract, label.to_owned())];
             // 압축파일만 여러 개 선택한 경우에도 새 압축파일로 묶을 수
             // 있도록 압축 메뉴를 함께 표시한다.
-            verbs.extend(compression_verbs(paths));
+            verbs.extend(compression_verbs(paths, locale));
             verbs
         }
     } else {
-        compression_verbs(paths)
+        compression_verbs(paths, locale)
     }
 }
 
 /// Adds the direct-to-destination extraction command only for Explorer's
 /// right-drag menu. Normal file context menus keep their existing commands.
-fn right_drag_menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
-    let mut verbs = menu_verbs(paths);
+fn right_drag_menu_verbs_for_locale(
+    paths: &[PathBuf],
+    locale: MenuLocale,
+) -> Vec<(Verb, String)> {
+    let mut verbs = menu_verbs_for_locale(paths, locale);
     if !paths.is_empty() && paths.iter().all(|path| is_archive_path(path)) {
         let insert_at = usize::from(!verbs.is_empty());
-        verbs.insert(insert_at, (Verb::ExtractHere, "여기에 풀기".to_owned()));
+        let label = match locale {
+            MenuLocale::Korean => "여기에 풀기",
+            MenuLocale::English => "Extract here",
+            MenuLocale::Japanese => "ここに展開",
+        };
+        verbs.insert(insert_at, (Verb::ExtractHere, label.to_owned()));
     }
     verbs
 }
 
-fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+fn compression_verbs(paths: &[PathBuf], locale: MenuLocale) -> Vec<(Verb, String)> {
     // Show the same destination name that the command will use. In
     // particular, selecting several folders creates one archive beside their
     // common parent, so a generic "selected folders" label hides the actual
     // output file from the user.
     let zip_name = compression_destination_name(paths, CreateFormat::Zip);
     let seven_name = compression_destination_name(paths, CreateFormat::SevenZip);
+    let zip_label = compression_label(&shorten_compression_name(&zip_name), true, locale);
+    let seven_label = compression_label(&shorten_compression_name(&seven_name), false, locale);
     if is_multi_folder_selection(paths) {
+        let zip_each = match locale {
+            MenuLocale::Korean => "각 폴더를 각각 ZIP으로 압축하기",
+            MenuLocale::English => "Compress each folder to ZIP",
+            MenuLocale::Japanese => "各フォルダーを個別にZIPに圧縮",
+        };
+        let seven_each = match locale {
+            MenuLocale::Korean => "각 폴더를 각각 7z으로 압축하기",
+            MenuLocale::English => "Compress each folder to 7z",
+            MenuLocale::Japanese => "各フォルダーを個別に7zに圧縮",
+        };
         return vec![
-            (
-                Verb::Zip,
-                format!("{}으로 압축하기", shorten_compression_name(&zip_name)),
-            ),
-            (
-                Verb::SevenZip,
-                format!("{}로 압축하기", shorten_compression_name(&seven_name)),
-            ),
-            (Verb::ZipEach, "각 폴더를 각각 ZIP으로 압축하기".to_owned()),
-            (Verb::SevenZipEach, "각 폴더를 각각 7z으로 압축하기".to_owned()),
+            (Verb::Zip, zip_label),
+            (Verb::SevenZip, seven_label),
+            (Verb::ZipEach, zip_each.to_owned()),
+            (Verb::SevenZipEach, seven_each.to_owned()),
         ];
     }
 
-    vec![
-        (
-            Verb::Zip,
-            format!("{}으로 압축하기", shorten_compression_name(&zip_name)),
-        ),
-        (
-            Verb::SevenZip,
-            format!("{}로 압축하기", shorten_compression_name(&seven_name)),
-        ),
-    ]
+    vec![(Verb::Zip, zip_label), (Verb::SevenZip, seven_label)]
+}
+
+fn compression_label(name: &str, zip: bool, locale: MenuLocale) -> String {
+    match locale {
+        MenuLocale::Korean if zip => format!("{name}으로 압축하기"),
+        MenuLocale::Korean => format!("{name}로 압축하기"),
+        MenuLocale::English => format!("Compress to {name}"),
+        MenuLocale::Japanese => format!("{name} に圧縮"),
+    }
 }
 
 /// Returns the actual file name that the create command will choose for the
@@ -696,7 +763,7 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
             .unwrap_or_default();
         let label = self
             .label(&paths)
-            .unwrap_or_else(|| self.verb.tooltip().to_owned());
+            .unwrap_or_else(|| self.verb.tooltip(current_menu_locale()).to_owned());
         wide_alloc(&format!("ArchiveRclick: {label}")).ok_or_else(|| E_OUTOFMEMORY.into())
     }
 
@@ -1529,6 +1596,11 @@ fn notify_shell_change() {
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
 }
 
+/// Refreshes Explorer's cached command titles after the UI language changes.
+pub fn refresh_context_menu() {
+    notify_shell_change();
+}
+
 /// Whether the context-menu handler is currently registered for this user.
 pub fn is_context_menu_registered() -> bool {
     if is_package_managed_process() {
@@ -1802,8 +1874,9 @@ mod tests {
     use std::{ffi::OsString, path::Path};
 
     use super::{
-        MENU_ICON_IMAGES, Verb, build_args, build_targeted_args, load_menu_icon_bitmap, menu_verbs,
-        right_drag_menu_verbs, shorten_compression_name, shorten_menu_name,
+        MENU_ICON_IMAGES, MenuLocale, Verb, build_args, build_targeted_args,
+        load_menu_icon_bitmap, menu_verbs, menu_verbs_for_locale, right_drag_menu_verbs_for_locale,
+        shorten_compression_name, shorten_menu_name,
     };
 
     #[test]
@@ -1994,7 +2067,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Verb::Extract]
         );
-        let right_drag = right_drag_menu_verbs(std::slice::from_ref(&archive));
+        let right_drag = right_drag_menu_verbs_for_locale(
+            std::slice::from_ref(&archive),
+            MenuLocale::Korean,
+        );
         assert_eq!(
             right_drag.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract, Verb::ExtractHere]
@@ -2014,7 +2090,10 @@ mod tests {
         std::fs::create_dir_all(&first).expect("create first folder");
         std::fs::create_dir_all(&second).expect("create second folder");
 
-        let verbs = menu_verbs(&[first.clone(), second.clone()]);
+        let verbs = menu_verbs_for_locale(
+            &[first.clone(), second.clone()],
+            MenuLocale::Korean,
+        );
         assert_eq!(
             verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Zip, Verb::SevenZip, Verb::ZipEach, Verb::SevenZipEach]
@@ -2033,6 +2112,44 @@ mod tests {
         assert_eq!(Verb::SevenZip.subcommand(), "7z");
         assert_eq!(Verb::ZipEach.subcommand(), "zip-each");
         assert_eq!(Verb::SevenZipEach.subcommand(), "7z-each");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_menu_labels_are_localized_in_all_supported_languages() {
+        let root = std::env::temp_dir().join(format!(
+            "archive-rclick-shell-ext-locales-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temporary shell-extension test folder");
+        let archive = root.join("sample.zip");
+        std::fs::File::create(&archive).expect("create archive placeholder");
+
+        let korean = right_drag_menu_verbs_for_locale(
+            std::slice::from_ref(&archive),
+            MenuLocale::Korean,
+        );
+        let english = right_drag_menu_verbs_for_locale(
+            std::slice::from_ref(&archive),
+            MenuLocale::English,
+        );
+        let japanese = right_drag_menu_verbs_for_locale(
+            std::slice::from_ref(&archive),
+            MenuLocale::Japanese,
+        );
+
+        assert_eq!(korean[0].1, "sample\\ 에 풀기");
+        assert_eq!(korean[1].1, "여기에 풀기");
+        assert_eq!(english[0].1, "Extract to sample\\");
+        assert_eq!(english[1].1, "Extract here");
+        assert_eq!(japanese[0].1, "sample\\ に展開");
+        assert_eq!(japanese[1].1, "ここに展開");
+        assert_eq!(
+            Verb::ExtractHere.tooltip(MenuLocale::Japanese),
+            "対象フォルダーに直接展開"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

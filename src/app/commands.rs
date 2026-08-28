@@ -536,6 +536,13 @@ fn prepare_main_window_close(ui: &AppWindow) {
 // ---------------------------------------------------------------------------
 
 fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String> {
+    let (ask_conflicts, args) = if elevated_retry
+        && args.first().is_some_and(|arg| arg == "--ask-conflicts")
+    {
+        (true, &args[1..])
+    } else {
+        (false, args)
+    };
     let requested_archives = parse_elevated_extract(args, elevated_retry)?;
     if requested_archives.is_empty() {
         return Err("Usage: ArchiveRclick extract <archive>...".to_owned());
@@ -562,6 +569,7 @@ fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String
         archives,
         destination_overrides,
         elevated_retry,
+        ask_conflicts,
     );
     run_progress_window(&ui, &state)
 }
@@ -624,6 +632,7 @@ fn run_gui_extract_to(args: &[OsString], extract_here: bool) -> Result<(), Strin
         archives,
         destination_overrides,
         false,
+        extract_here,
     );
     run_progress_window(&ui, &state)
 }
@@ -1777,6 +1786,7 @@ fn wire_callbacks(
                     }
                     return;
                 }
+                platform::shell_ext::refresh_context_menu();
                 let family = platform::resolve_font_family(preference);
                 if let Some(ui) = weak.upgrade() {
                     ui.set_font_family(family.into());
@@ -2118,13 +2128,7 @@ fn wire_callbacks(
         let pending_conflict = Arc::clone(&state.pending_conflict);
         let weak = ui.as_weak();
         ui.on_conflict_response(move |response| {
-            let choice = match response {
-                0 => ConflictChoice::Overwrite,
-                1 => ConflictChoice::Skip,
-                2 => ConflictChoice::OverwriteAll,
-                3 => ConflictChoice::SkipAll,
-                _ => ConflictChoice::Cancel,
-            };
+            let choice = conflict_choice_from_response(response);
             if let Some(sender) = pending_conflict
                 .lock()
                 .expect("conflict mutex poisoned")
@@ -2461,6 +2465,7 @@ fn start_create(
 struct ProgressWindowState {
     cancellation: Arc<Mutex<Option<CancellationToken>>>,
     password_prompt: Arc<ProgressPasswordPrompt>,
+    conflict_prompt: Arc<ProgressConflictPrompt>,
     initial_show_error: InitialWindowShowError,
 }
 
@@ -2526,6 +2531,118 @@ impl ProgressPasswordPrompt {
     }
 }
 
+/// Coordinates an existing-file prompt in the progress-only Explorer window
+/// with the extraction worker waiting for the user's decision.
+struct ProgressConflictPrompt {
+    response: Mutex<Option<ConflictChoice>>,
+    wake: Condvar,
+}
+
+impl ProgressConflictPrompt {
+    fn new() -> Self {
+        Self {
+            response: Mutex::new(None),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn respond(&self, choice: ConflictChoice) {
+        let mut response = self
+            .response
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *response = Some(choice);
+        self.wake.notify_all();
+    }
+
+    fn wait(
+        &self,
+        weak: &slint::Weak<ProgressWindow>,
+        destination: &Path,
+        cancel: &CancellationToken,
+    ) -> ConflictChoice {
+        {
+            let mut response = self
+                .response
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *response = None;
+        }
+        let display = destination.display().to_string();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_conflict_path(display.into());
+            ui.set_conflict_visible(true);
+        });
+
+        let mut response = self
+            .response
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while !cancel.is_cancelled() {
+            if let Some(choice) = response.take() {
+                return choice;
+            }
+            response = self
+                .wake
+                .wait_timeout(response, Duration::from_millis(50))
+                .unwrap_or_else(|poison| poison.into_inner())
+                .0;
+        }
+        ConflictChoice::Cancel
+    }
+}
+
+struct ProgressConflictResolver {
+    weak: slint::Weak<ProgressWindow>,
+    prompt: Arc<ProgressConflictPrompt>,
+    cancel: CancellationToken,
+    selected_policy: Mutex<Option<ConflictChoice>>,
+}
+
+impl ConflictResolver for ProgressConflictResolver {
+    fn resolve(&self, destination: &Path) -> ConflictChoice {
+        if let Some(choice) = *self
+            .selected_policy
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        {
+            return choice;
+        }
+        let choice = self.prompt.wait(&self.weak, destination, &self.cancel);
+        if choice == ConflictChoice::Cancel {
+            self.cancel.cancel();
+            return choice;
+        }
+        if matches!(choice, ConflictChoice::OverwriteAll | ConflictChoice::SkipAll) {
+            *self
+                .selected_policy
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(choice);
+        }
+        choice
+    }
+}
+
+fn conflict_choice_from_response(response: i32) -> ConflictChoice {
+    match response {
+        0 => ConflictChoice::Overwrite,
+        1 => ConflictChoice::Skip,
+        2 => ConflictChoice::OverwriteAll,
+        3 => ConflictChoice::SkipAll,
+        _ => ConflictChoice::Cancel,
+    }
+}
+
+/// The right-drag "extract here" flow asks only on the first conflict. Its
+/// three visible answers become the policy for all remaining conflicts.
+fn first_conflict_choice_from_response(response: i32) -> ConflictChoice {
+    match response {
+        0 => ConflictChoice::OverwriteAll,
+        1 => ConflictChoice::SkipAll,
+        _ => ConflictChoice::Cancel,
+    }
+}
+
 // Keep these in sync with ProgressWindow's preferred size in
 // ui/progress_window.slint. They are applied before the first visible frame.
 const PROGRESS_WINDOW_LOGICAL_WIDTH: f32 = 600.0;
@@ -2541,10 +2658,12 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     let state = Rc::new(ProgressWindowState {
         cancellation: Arc::new(Mutex::new(None)),
         password_prompt: Arc::new(ProgressPasswordPrompt::new()),
+        conflict_prompt: Arc::new(ProgressConflictPrompt::new()),
         initial_show_error: Arc::clone(&initial_show_error),
     });
     let state_for_cancel = Rc::clone(&state);
     let password_for_cancel = Arc::clone(&state.password_prompt);
+    let conflict_for_cancel = Arc::clone(&state.conflict_prompt);
     let weak_for_cancel = ui.as_weak();
     ui.on_cancel_requested(move || {
         if let Some(token) = state_for_cancel
@@ -2556,8 +2675,10 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
             token.cancel();
         }
         password_for_cancel.respond(None);
+        conflict_for_cancel.respond(ConflictChoice::Cancel);
         if let Some(ui) = weak_for_cancel.upgrade() {
             ui.set_progress_title("Cancelling…".into());
+            ui.set_conflict_visible(false);
             platform::taskbar::pause(ui.window());
         }
     });
@@ -2569,6 +2690,7 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
     // before the worker gets a chance to remove its temporary files.
     let state_for_close = Rc::clone(&state);
     let password_for_close = Arc::clone(&state.password_prompt);
+    let conflict_for_close = Arc::clone(&state.conflict_prompt);
     let weak_for_close = ui.as_weak();
     ui.window().on_close_requested(move || {
         if let Some(token) = state_for_close
@@ -2580,8 +2702,10 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
             token.cancel();
         }
         password_for_close.respond(None);
+        conflict_for_close.respond(ConflictChoice::Cancel);
         if let Some(ui) = weak_for_close.upgrade() {
             ui.set_progress_title("Cancelling…".into());
+            ui.set_conflict_visible(false);
             platform::taskbar::pause(ui.window());
         }
         slint::CloseRequestResponse::KeepWindowShown
@@ -2594,6 +2718,14 @@ fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), S
         }
         let password = (accepted && !password.is_empty()).then(|| password.to_string());
         password_for_response.respond(password);
+    });
+    let conflict_for_response = Arc::clone(&state.conflict_prompt);
+    let weak_for_conflict_response = ui.as_weak();
+    ui.on_conflict_response(move |response| {
+        if let Some(ui) = weak_for_conflict_response.upgrade() {
+            ui.set_conflict_visible(false);
+        }
+        conflict_for_response.respond(first_conflict_choice_from_response(response));
     });
     let font_family = platform::resolve_font_family(&platform::load_font_preference());
     ui.set_font_family(font_family.into());
@@ -2752,6 +2884,7 @@ fn request_context_create_batch_elevation(
 fn request_context_extract_elevation(
     retry_already_attempted: bool,
     failures: &[(PathBuf, PathBuf, ArchiveError)],
+    ask_conflicts: bool,
 ) -> bool {
     if retry_already_attempted {
         return false;
@@ -2767,6 +2900,9 @@ fn request_context_extract_elevation(
     let mut args = Vec::with_capacity(failures.len() * 3 + 2);
     args.push(OsString::from("--elevated-retry"));
     args.push(OsString::from("extract"));
+    if ask_conflicts {
+        args.push(OsString::from("--ask-conflicts"));
+    }
     for (archive, destination, _) in failures {
         args.push(OsString::from("--output"));
         args.push(destination.as_os_str().to_owned());
@@ -2788,6 +2924,7 @@ fn start_extract_batch_window(
     archives: Vec<PathBuf>,
     destination_overrides: Vec<Option<PathBuf>>,
     elevated_retry: bool,
+    ask_conflicts: bool,
 ) {
     let total = archives.len();
     let first = archives[0].display().to_string();
@@ -2807,6 +2944,12 @@ fn start_extract_batch_window(
     let weak_progress = weak.clone();
     let weak_password = weak.clone();
     let password_prompt = Arc::clone(&state.password_prompt);
+    let conflict_resolver = ProgressConflictResolver {
+        weak: weak.clone(),
+        prompt: Arc::clone(&state.conflict_prompt),
+        cancel: cancel.clone(),
+        selected_policy: Mutex::new(None),
+    };
     std::thread::spawn(move || {
         let mut processed = 0usize;
         let mut failures: Vec<(PathBuf, PathBuf, ArchiveError)> = Vec::new();
@@ -2837,7 +2980,11 @@ fn start_extract_batch_window(
                 let options = ExtractOptions {
                     selection: ExtractSelection::All,
                     password: password.clone(),
-                    conflict_policy: InitialConflictPolicy::OverwriteAll,
+                    conflict_policy: if ask_conflicts {
+                        InitialConflictPolicy::Ask
+                    } else {
+                        InitialConflictPolicy::OverwriteAll
+                    },
                     ..ExtractOptions::default()
                 };
                 match engine.extract(
@@ -2845,7 +2992,11 @@ fn start_extract_batch_window(
                     &destination,
                     &options,
                     &progress,
-                    &OverwriteAllResolver,
+                    if ask_conflicts {
+                        &conflict_resolver
+                    } else {
+                        &OverwriteAllResolver
+                    },
                     &cancel,
                 ) {
                     Ok(_) => {
@@ -2874,7 +3025,7 @@ fn start_extract_batch_window(
         }
         let _ = weak.upgrade_in_event_loop(move |ui| {
             if !cancel.is_cancelled()
-                && request_context_extract_elevation(elevated_retry, &failures)
+                && request_context_extract_elevation(elevated_retry, &failures, ask_conflicts)
             {
                 close_progress_window(&ui);
                 return;
@@ -3546,12 +3697,12 @@ fn hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         archive_directory_name, cli_archive_destination, common_parent_folder,
-        create_formats_for_ui, is_archive_drop_path, parse_dropped_path, parse_elevated_batch_output,
+        create_formats_for_ui, first_conflict_choice_from_response, is_archive_drop_path, parse_dropped_path, parse_elevated_batch_output,
         parse_elevated_extract, parse_elevated_output, progress_ui_text, run_with_startup_argument,
         right_drag_extract_destination, unique_path, language_preference_selection_index, language_registry_key,
         language_selection_index,
     };
-    use crate::archive::CreateFormat;
+    use crate::archive::{ConflictChoice, CreateFormat};
     use crate::tasks::{ProgressPhase, ProgressSnapshot};
     use std::{
         ffi::OsString,
@@ -3581,6 +3732,22 @@ mod tests {
         assert_eq!(
             right_drag_extract_destination(destination, archive, false),
             destination.join("sample")
+        );
+    }
+
+    #[test]
+    fn first_extract_here_conflict_sets_the_policy_for_remaining_files() {
+        assert_eq!(
+            first_conflict_choice_from_response(0),
+            ConflictChoice::OverwriteAll
+        );
+        assert_eq!(
+            first_conflict_choice_from_response(1),
+            ConflictChoice::SkipAll
+        );
+        assert_eq!(
+            first_conflict_choice_from_response(4),
+            ConflictChoice::Cancel
         );
     }
 

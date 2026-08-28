@@ -60,6 +60,7 @@ export component ProgressStats inherits Rectangle {
 
 export component ConflictOverlay inherits Rectangle {
     in property <string> conflict-path;
+    in property <bool> show-batch-actions: true;
 
     callback responded(int);
 
@@ -70,7 +71,7 @@ export component ConflictOverlay inherits Rectangle {
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 650px;
+        width: parent.width < 674px ? parent.width - 24px : 650px;
         height: 228px;
         background: Palette.background;
         border-width: 1px;
@@ -116,11 +117,13 @@ export component ConflictOverlay inherits Rectangle {
                 }
 
                 Button {
+                    visible: root.show-batch-actions;
                     text: "Overwrite all";
                     clicked => { root.responded(2); }
                 }
 
                 Button {
+                    visible: root.show-batch-actions;
                     text: "Skip all";
                     clicked => { root.responded(3); }
                 }

@@ -33,6 +33,8 @@ pub mod shell_ext {
     pub fn is_context_menu_managed_by_package() -> bool {
         false
     }
+
+    pub fn refresh_context_menu() {}
 }
 pub mod windows;
 
