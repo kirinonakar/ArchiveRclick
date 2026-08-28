@@ -194,7 +194,13 @@ pub fn run() -> Result<(), String> {
         // arguments are the dragged archive paths.
         Some("extract-to") => {
             let rest: Vec<OsString> = args.collect();
-            run_gui_extract_to(&rest)
+            run_gui_extract_to(&rest, false)
+        }
+        // Unlike `extract-to`, this command writes directly into the folder
+        // that received the right-drag instead of creating archive subfolders.
+        Some("extract-here-to") => {
+            let rest: Vec<OsString> = args.collect();
+            run_gui_extract_to(&rest, true)
         }
         // Internal commands used by the Explorer right-drag handler. The
         // first argument is the folder that received the drop; the remaining
@@ -560,17 +566,26 @@ fn run_gui_extract(args: &[OsString], elevated_retry: bool) -> Result<(), String
     run_progress_window(&ui, &state)
 }
 
-/// Extracts archives into a per-archive folder inside the folder that received
-/// a right-drag.
-/// This is intentionally a separate internal command so the public `extract`
-/// command keeps its existing archive-name-folder behavior.
-fn run_gui_extract_to(args: &[OsString]) -> Result<(), String> {
+/// Extracts archives into the folder that received a right-drag. The normal
+/// mode creates one subfolder per archive; `extract_here` uses the receiving
+/// folder itself. These internal modes leave the public `extract` behavior
+/// unchanged.
+fn run_gui_extract_to(args: &[OsString], extract_here: bool) -> Result<(), String> {
+    let verb = if extract_here {
+        "extract-here-to"
+    } else {
+        "extract-to"
+    };
     let Some(destination_argument) = args.first() else {
-        return Err("Usage: ArchiveRclick extract-to <directory> <archive>...".to_owned());
+        return Err(format!(
+            "Usage: ArchiveRclick {verb} <directory> <archive>..."
+        ));
     };
     let archive_arguments = &args[1..];
     if archive_arguments.is_empty() {
-        return Err("Usage: ArchiveRclick extract-to <directory> <archive>...".to_owned());
+        return Err(format!(
+            "Usage: ArchiveRclick {verb} <directory> <archive>..."
+        ));
     }
 
     let requested_destination = PathBuf::from(destination_argument);
@@ -591,7 +606,7 @@ fn run_gui_extract_to(args: &[OsString]) -> Result<(), String> {
         let requested = PathBuf::from(argument);
         match resolve_existing_path(&requested) {
             Some(path) if path.is_file() => {
-                let output = unique_path(&destination.join(archive_directory_name(&path)));
+                let output = right_drag_extract_destination(&destination, &path, extract_here);
                 archives.push(path);
                 destination_overrides.push(Some(output));
             }
@@ -611,6 +626,18 @@ fn run_gui_extract_to(args: &[OsString]) -> Result<(), String> {
         false,
     );
     run_progress_window(&ui, &state)
+}
+
+fn right_drag_extract_destination(
+    destination: &Path,
+    archive: &Path,
+    extract_here: bool,
+) -> PathBuf {
+    if extract_here {
+        destination.to_path_buf()
+    } else {
+        unique_path(&destination.join(archive_directory_name(archive)))
+    }
 }
 
 /// Creates one archive from the dragged items inside the folder that received
@@ -3521,7 +3548,7 @@ mod tests {
         archive_directory_name, cli_archive_destination, common_parent_folder,
         create_formats_for_ui, is_archive_drop_path, parse_dropped_path, parse_elevated_batch_output,
         parse_elevated_extract, parse_elevated_output, progress_ui_text, run_with_startup_argument,
-        unique_path, language_preference_selection_index, language_registry_key,
+        right_drag_extract_destination, unique_path, language_preference_selection_index, language_registry_key,
         language_selection_index,
     };
     use crate::archive::CreateFormat;
@@ -3540,6 +3567,21 @@ mod tests {
         assert_eq!(archive_directory_name(Path::new("docs.zip")), "docs");
         assert_eq!(archive_directory_name(Path::new("adf.7z.001")), "adf");
         assert_eq!(archive_directory_name(Path::new("adf.7Z.001")), "adf");
+    }
+
+    #[test]
+    fn right_drag_extract_here_uses_the_receiving_folder_without_a_subfolder() {
+        let destination = Path::new(r"C:\Drop Folder");
+        let archive = Path::new(r"C:\Source Folder\sample.zip");
+
+        assert_eq!(
+            right_drag_extract_destination(destination, archive, true),
+            destination
+        );
+        assert_eq!(
+            right_drag_extract_destination(destination, archive, false),
+            destination.join("sample")
+        );
     }
 
     #[test]

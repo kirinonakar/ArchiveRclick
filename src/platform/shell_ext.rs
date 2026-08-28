@@ -313,7 +313,11 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
             return S_OK;
         }
         let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        let verbs = menu_verbs(&paths_buf);
+        let verbs = if self.target_folder().is_some() {
+            right_drag_menu_verbs(&paths_buf)
+        } else {
+            menu_verbs(&paths_buf)
+        };
 
         let mut next_id = id_cmd_first;
         let mut inserted = Vec::new();
@@ -452,6 +456,7 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Extract,
+    ExtractHere,
     Zip,
     SevenZip,
     ZipEach,
@@ -462,6 +467,7 @@ impl Verb {
     fn subcommand(self) -> &'static str {
         match self {
             Verb::Extract => "extract",
+            Verb::ExtractHere => "extract-here",
             Verb::Zip => "zip",
             Verb::SevenZip => "7z",
             Verb::ZipEach => "zip-each",
@@ -472,6 +478,7 @@ impl Verb {
     fn tooltip(self) -> &'static str {
         match self {
             Self::Extract => "Extract the selected archive(s)",
+            Self::ExtractHere => "Extract directly into the destination folder",
             Self::Zip => "Create a ZIP archive from the selected items",
             Self::SevenZip => "Create a 7z archive from the selected items",
             Self::ZipEach => "Create one ZIP archive for each selected folder",
@@ -513,6 +520,17 @@ fn menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
     } else {
         compression_verbs(paths)
     }
+}
+
+/// Adds the direct-to-destination extraction command only for Explorer's
+/// right-drag menu. Normal file context menus keep their existing commands.
+fn right_drag_menu_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
+    let mut verbs = menu_verbs(paths);
+    if !paths.is_empty() && paths.iter().all(|path| is_archive_path(path)) {
+        let insert_at = usize::from(!verbs.is_empty());
+        verbs.insert(insert_at, (Verb::ExtractHere, "여기에 풀기".to_owned()));
+    }
+    verbs
 }
 
 fn compression_verbs(paths: &[PathBuf]) -> Vec<(Verb, String)> {
@@ -959,6 +977,7 @@ fn build_args(subcommand: &str, paths: &[OsString]) -> String {
 fn build_targeted_args(verb: Verb, destination: &Path, paths: &[OsString]) -> String {
     let subcommand = match verb {
         Verb::Extract => "extract-to",
+        Verb::ExtractHere => "extract-here-to",
         Verb::Zip => "zip-to",
         Verb::SevenZip => "7z-to",
         Verb::ZipEach => "zip-each-to",
@@ -1784,7 +1803,7 @@ mod tests {
 
     use super::{
         MENU_ICON_IMAGES, Verb, build_args, build_targeted_args, load_menu_icon_bitmap, menu_verbs,
-        shorten_compression_name, shorten_menu_name,
+        right_drag_menu_verbs, shorten_compression_name, shorten_menu_name,
     };
 
     #[test]
@@ -1825,6 +1844,19 @@ mod tests {
         assert_eq!(
             args,
             r#""extract-to" "C:\Drop Folder" "C:\Source Folder\sample.zip""#
+        );
+    }
+
+    #[test]
+    fn right_drag_extract_here_arguments_use_the_drop_destination_directly() {
+        let args = build_targeted_args(
+            Verb::ExtractHere,
+            Path::new(r"C:\Drop Folder"),
+            &[OsString::from(r"C:\Source Folder\sample.zip")],
+        );
+        assert_eq!(
+            args,
+            r#""extract-here-to" "C:\Drop Folder" "C:\Source Folder\sample.zip""#
         );
     }
 
@@ -1940,6 +1972,34 @@ mod tests {
             multiple.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract, Verb::Zip, Verb::SevenZip]
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extract_here_is_added_only_to_the_right_drag_archive_menu() {
+        let root = std::env::temp_dir().join(format!(
+            "archive-rclick-shell-ext-right-drag-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temporary shell-extension test folder");
+        let archive = root.join("sample.zip");
+        std::fs::File::create(&archive).expect("create archive placeholder");
+
+        assert_eq!(
+            menu_verbs(std::slice::from_ref(&archive))
+                .iter()
+                .map(|(verb, _)| *verb)
+                .collect::<Vec<_>>(),
+            vec![Verb::Extract]
+        );
+        let right_drag = right_drag_menu_verbs(std::slice::from_ref(&archive));
+        assert_eq!(
+            right_drag.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            vec![Verb::Extract, Verb::ExtractHere]
+        );
+        assert_eq!(right_drag[1].1, "여기에 풀기");
 
         let _ = std::fs::remove_dir_all(root);
     }
