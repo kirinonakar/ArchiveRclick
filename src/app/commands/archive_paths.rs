@@ -4,7 +4,7 @@ use super::*;
 
 const ARCHIVE_DROP_EXTENSIONS: &[&str] = &[
     "zip", "zipx", "7z", "rar", "tar", "gz", "bz2", "xz", "zst", "cab", "lha", "lzh", "tgz",
-    "tbz2", "txz", "iso", "img",
+    "tbz2", "txz", "iso", "img", "nsis",
 ];
 
 pub(super) fn is_archive_drop_path(path: &Path) -> bool {

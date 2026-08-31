@@ -10,6 +10,7 @@ pub(super) enum ReadFormat {
     Rar4,
     Rar5,
     Iso,
+    Nsis,
     SevenZipVolume,
     ZipVolume,
 }
@@ -22,6 +23,7 @@ impl ReadFormat {
             Self::Lzh => "LZH",
             Self::Rar4 | Self::Rar5 => "RAR",
             Self::Iso => "ISO 9660",
+            Self::Nsis => "NSIS",
             Self::SevenZipVolume => "7z split volume",
             Self::ZipVolume => "ZIP split volume",
         }
@@ -147,7 +149,37 @@ pub(super) fn archive_format(path: &Path) -> Option<ReadFormat> {
     {
         return Some(ReadFormat::Lzh);
     }
+    if (signature[..amount].starts_with(b"MZ")
+        || signature
+            .get(4..amount)
+            .is_some_and(|bytes| bytes == [0xef, 0xbe, 0xad, 0xde]))
+        && has_nsis_signature(&mut file)
+    {
+        return Some(ReadFormat::Nsis);
+    }
     None
+}
+
+// NSIS headers are 512-byte aligned, with the signature four bytes into the
+// header. Scan only the executable stub (at most 1 MiB), never the full payload.
+// Matching contents rather than .exe/.zip lets renamed installers open without
+// running them or treating every executable as an archive.
+fn has_nsis_signature(file: &mut File) -> bool {
+    const SIGNATURE: &[u8] = b"\xef\xbe\xad\xdeNullsoftInst";
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    let mut prefix = Vec::new();
+    if file
+        .take(1024 * 1024 + 28)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    prefix
+        .chunks(512)
+        .any(|header| header.len() >= 28 && &header[4..20] == SIGNATURE)
 }
 
 const ZIP_EOCD_SIGNATURE: u32 = 0x0605_4B50;

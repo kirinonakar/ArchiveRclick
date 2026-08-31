@@ -73,6 +73,9 @@ impl ScanBudget {
 
 impl<'a> Reader<'a> {
     pub(super) fn open(api: &'a Api, path: &Path, password: Option<&str>) -> ArchiveResult<Self> {
+        if file_length(path)? == 0 {
+            return Err(ArchiveError::InvalidArchive(path.to_path_buf()));
+        }
         let standalone_filter = is_standalone_filter(path)?;
         let raw_only = standalone_filter && is_wrapped_tar_path(path);
         // SAFETY: constructor has no preconditions and returns an owned handle.
@@ -152,11 +155,20 @@ impl<'a> Reader<'a> {
         }
 
         let wide = wide_nul(path)?;
-        reader.require_ok(
-            // SAFETY: path is NUL-terminated and the handle is in NEW state.
-            unsafe { (api.read_open_filename_w)(raw.as_ptr(), wide.as_ptr(), OPEN_BLOCK_SIZE) },
-            "opening archive",
-        )?;
+        reader
+            .require_ok(
+                // SAFETY: path is NUL-terminated and the handle is in NEW state.
+                unsafe { (api.read_open_filename_w)(raw.as_ptr(), wide.as_ptr(), OPEN_BLOCK_SIZE) },
+                "opening archive",
+            )
+            .map_err(|error| match &error {
+                ArchiveError::LibArchive { message, .. }
+                    if message.eq_ignore_ascii_case("Unrecognized archive format") =>
+                {
+                    ArchiveError::InvalidArchive(path.to_path_buf())
+                }
+                _ => error,
+            })?;
         Ok(reader)
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "archive-rclick"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 rust-version = "1.92"
 description = "A fast, lightweight Windows archive manager built with Rust, Slint, and libarchive"
@@ -49,6 +49,10 @@ raw-window-handle = "0.6.2"
 sha2 = "=0.10.9"
 slint-build = "=1.17.1"
 embed-resource = "=3.0.9"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+i-slint-backend-testing = { version = "=1.17.1", features = ["renderer-software"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 
 [profile.release]

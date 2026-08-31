@@ -27,6 +27,9 @@ pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindo
     let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let theme_selection = theme_selection_index(&platform::load_theme_preference());
     ui.set_theme_selection(theme_selection);
+    ui.set_language_selection(language_selection_index(
+        &platform::load_language_preference(),
+    ));
     let initial_show_error = Arc::new(Mutex::new(None));
     let state = Rc::new(ProgressWindowState {
         cancellation: Arc::new(Mutex::new(None)),
@@ -39,6 +42,12 @@ pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindo
     let conflict_for_cancel = Arc::clone(&state.conflict_prompt);
     let weak_for_cancel = ui.as_weak();
     ui.on_cancel_requested(move || {
+        if let Some(ui) = weak_for_cancel.upgrade()
+            && ui.get_error_visible()
+        {
+            close_progress_window(&ui);
+            return;
+        }
         if let Some(token) = state_for_cancel
             .cancellation
             .lock()
@@ -66,6 +75,12 @@ pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindo
     let conflict_for_close = Arc::clone(&state.conflict_prompt);
     let weak_for_close = ui.as_weak();
     ui.window().on_close_requested(move || {
+        if let Some(ui) = weak_for_close.upgrade()
+            && ui.get_error_visible()
+        {
+            close_progress_window(&ui);
+            return slint::CloseRequestResponse::HideWindow;
+        }
         if let Some(token) = state_for_close
             .cancellation
             .lock()
@@ -101,6 +116,12 @@ pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindo
         conflict_for_response.respond(first_conflict_choice_from_response(response));
     });
     let font_family = platform::resolve_font_family(&platform::load_font_preference());
+    let weak_for_error = ui.as_weak();
+    ui.on_error_dismissed(move || {
+        if let Some(ui) = weak_for_error.upgrade() {
+            close_progress_window(&ui);
+        }
+    });
     ui.set_font_family(font_family.into());
     ui.set_progress_title("Working…".into());
     ui.set_progress_file("".into());
@@ -407,19 +428,34 @@ pub(super) fn start_extract_batch_window(
             if !cancel.is_cancelled() && !failures.is_empty() {
                 if processed == 0 {
                     let (path, _, error) = failures.remove(0);
-                    let message = format!("{}: {error}", path.display());
-                    platform::show_error("Extract archives", &message);
+                    let message = format!(
+                        "{}: {}",
+                        path.display(),
+                        operations::archive_error_message(&error, ui.get_language_selection())
+                    );
+                    show_progress_error(&ui, "Extract archives", &message);
                 } else {
                     let details = failures
                         .iter()
-                        .map(|(path, _, error)| format!("{}: {error}", path.display()))
+                        .map(|(path, _, error)| {
+                            format!(
+                                "{}: {}",
+                                path.display(),
+                                operations::archive_error_message(
+                                    error,
+                                    ui.get_language_selection()
+                                )
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    platform::show_error(
+                    show_progress_error(
+                        &ui,
                         "Extract archives",
                         &format!("Some archives failed:\n{details}"),
                     );
                 }
+                return;
             }
             close_progress_window(&ui);
         });
@@ -470,7 +506,8 @@ pub(super) fn start_create_window(
                             Some(&destination),
                         );
                     if !relaunched {
-                        platform::show_error("Create archive", &error.to_string());
+                        show_progress_error(&ui, "Create archive", &error.to_string());
+                        return;
                     }
                 }
                 Err(_) => {}
@@ -549,12 +586,74 @@ pub(super) fn start_create_batch_window(
                     .map(|(source, _, error)| format!("{}: {error}", source.display()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                platform::show_error(
+                show_progress_error(
+                    &ui,
                     "Create archives",
                     &format!("Some folders failed:\n{details}"),
                 );
+                return;
             }
             close_progress_window(&ui);
         });
     });
+}
+
+fn show_progress_error(ui: &ProgressWindow, title: &str, message: &str) {
+    platform::taskbar::clear(ui.window());
+    ui.set_password_visible(false);
+    ui.set_conflict_visible(false);
+    ui.set_error_title(operations::error_title(title, ui.get_language_selection()).into());
+    ui.set_error_message(message.into());
+    ui.set_error_visible(true);
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn progress_error_can_be_dismissed_at_minimum_window_size() {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .unwrap();
+        let ui = ProgressWindow::new().unwrap();
+        ui.set_language_selection(1);
+        ui.window().set_size(slint::PhysicalSize::new(540, 280));
+        let dismissed = Rc::new(Cell::new(false));
+        let acknowledged = Rc::clone(&dismissed);
+        ui.on_error_dismissed(move || acknowledged.set(true));
+        ui.on_cancel_requested(|| panic!("error dismissal must not cancel another operation"));
+        show_progress_error(
+            &ui,
+            "Extract archives",
+            "지원하는 압축파일이 아니거나 파일이 손상되었습니다.\nC:\\Downloads\\not-an-archive.zip",
+        );
+        ui.show().unwrap();
+        let snapshot = ui.window().take_snapshot().unwrap();
+        if let Some(path) = std::env::var_os("ARCHIVERCLICK_PROGRESS_ERROR_SNAPSHOT") {
+            image::save_buffer(
+                path,
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                text: slint::platform::Key::Escape.into(),
+            });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                text: slint::platform::Key::Escape.into(),
+            });
+        assert!(dismissed.get());
+        ui.hide().unwrap();
+    }
 }

@@ -11,6 +11,7 @@ pub(super) fn start_archive_drag(
     row: usize,
 ) {
     if ui.get_busy()
+        || ui.get_error_visible()
         || ui.get_password_visible()
         || ui.get_conflict_visible()
         || ui.get_create_visible()
@@ -178,6 +179,7 @@ pub(super) fn handle_file_drop(
     paths: Vec<PathBuf>,
 ) {
     if ui.get_busy()
+        || ui.get_error_visible()
         || ui.get_password_visible()
         || ui.get_conflict_visible()
         || ui.get_create_visible()

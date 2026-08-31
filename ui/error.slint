@@ -1,0 +1,81 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { AppTheme } from "theme.slint";
+
+// Keep errors in Slint's event loop. A blocking native MessageBox from an
+// event-loop callback can leave the main window unresponsive on Windows.
+export component ErrorOverlay inherits Rectangle {
+    in property <string> title;
+    in property <string> message;
+    in property <int> language-index;
+    callback dismissed();
+
+    background: #00000080;
+    accessible-role: region;
+    accessible-label: root.title;
+    TouchArea { }
+
+    forward-focus: error-focus;
+    error-focus := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        init => { self.focus(); }
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => { root.dismissed(); }
+        }
+        KeyBinding {
+            keys: @keys(Return);
+            activated => { root.dismissed(); }
+        }
+        KeyBinding {
+            keys: @keys(Tab);
+            activated => { error-ok.focus(); }
+        }
+        KeyBinding {
+            keys: @keys(Shift + Tab);
+            activated => { error-ok.focus(); }
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(520px, parent.width - 32px);
+            height: min(300px, parent.height - 32px);
+            background: Palette.background;
+            border-width: 1px;
+            border-color: AppTheme.border;
+            border-radius: 12px;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text {
+                    text: root.title;
+                    font-size: 20px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
+                }
+                ScrollView {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    Text {
+                        width: parent.width;
+                        text: root.message;
+                        color: Palette.foreground;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    error-ok := Button {
+                        text: root.language-index == 1 ? "확인" : root.language-index == 2 ? "確認" : "OK";
+                        primary: true;
+                        clicked => { root.dismissed(); }
+                    }
+                }
+            }
+        }
+    }
+}

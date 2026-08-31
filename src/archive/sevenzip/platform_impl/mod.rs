@@ -251,6 +251,33 @@ mod tests {
     }
 
     #[test]
+    fn detects_nsis_contents_with_a_misleading_extension() {
+        let directory = std::env::temp_dir().join(format!(
+            "archive-rclick-nsis-signature-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("installer.zip");
+        let mut header = [0u8; 28];
+        header[4..20].copy_from_slice(b"\xef\xbe\xad\xdeNullsoftInst");
+        for offset in [0, 512, 108_544, 1024 * 1024] {
+            let mut bytes = vec![0u8; offset + header.len()];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[offset..].copy_from_slice(&header);
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(archive_format(&path), Some(ReadFormat::Nsis));
+            bytes[offset + 4] = 0;
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(archive_format(&path), None);
+        }
+        for bytes in [&b""[..], &b"M"[..], &b"MZ"[..], &header[..19]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(archive_format(&path), None);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn explicit_loader_rejects_relative_path_without_fallback() {
         assert!(SevenZipEngine::load_from_path(Path::new("7z.dll")).is_err());
     }

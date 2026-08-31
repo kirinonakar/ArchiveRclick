@@ -11,6 +11,9 @@ pub(super) fn start_listing(
     pathname_codepage: u32,
     directory: PathBuf,
 ) {
+    if ui.get_busy() || ui.get_error_visible() {
+        return;
+    }
     let progress_title = progress_title_with_filename("Opening archive", &path);
     let cancel = CancellationToken::new();
     *state
@@ -21,6 +24,7 @@ pub(super) fn start_listing(
     ui.set_status_text(progress_title.into());
     let open_password = Arc::clone(&state.open_password);
     let pending_password_path = Arc::clone(&state.pending_password_path);
+    let cancellation = Arc::clone(&state.cancellation);
     let sort_column = state.sort_column.get();
     let sort_ascending = state.sort_ascending.get();
     let directory_for_worker = directory.clone();
@@ -45,6 +49,7 @@ pub(super) fn start_listing(
                 )
             });
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            *cancellation.lock().expect("cancellation mutex poisoned") = None;
             finish_operation(&ui);
             match result {
                 Ok((listing, display)) => {
@@ -101,7 +106,12 @@ pub(super) fn start_listing(
                     ui.set_password_visible(true);
                     ui.set_status_text("Password required".into());
                 }
-                Err(error) => display_operation_error(&ui, "Open archive", error),
+                Err(error) => {
+                    *pending_password_path
+                        .lock()
+                        .expect("password-path mutex poisoned") = None;
+                    display_operation_error(&ui, "Open archive", error);
+                }
             }
         });
     });
@@ -554,14 +564,196 @@ pub(super) fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppStat
 }
 
 fn display_operation_error(ui: &AppWindow, title: &str, error: ArchiveError) {
-    let message = error.to_string();
-    ui.set_status_text(message.clone().into());
-    platform::show_error(title, &message);
+    if matches!(error, ArchiveError::Cancelled) {
+        ui.set_status_text("Operation cancelled".into());
+        return;
+    }
+    let message = archive_error_message(&error, ui.get_language_selection());
+    show_ui_error(&ui.as_weak(), title, message);
+}
+
+pub(super) fn archive_error_message(error: &ArchiveError, language: i32) -> String {
+    match (error, language) {
+        (ArchiveError::InvalidArchive(path), 1) => format!(
+            "지원하는 압축파일이 아니거나 파일이 손상되었습니다.\n{}",
+            path.display()
+        ),
+        (ArchiveError::InvalidArchive(path), 2) => format!(
+            "対応しているアーカイブではないか、ファイルが破損しています。\n{}",
+            path.display()
+        ),
+        _ => error.to_string(),
+    }
+}
+
+pub(super) fn error_title(title: &str, language: i32) -> &str {
+    match (title, language) {
+        ("Open archive", 1) => "압축파일 열기 실패",
+        ("Extract archive" | "Extract archives", 1) => "압축 풀기 실패",
+        ("Create archive" | "Create archives", 1) => "압축파일 만들기 실패",
+        ("Test archive", 1) => "압축파일 검사 실패",
+        ("Open archive", 2) => "アーカイブを開けません",
+        ("Extract archive" | "Extract archives", 2) => "展開に失敗しました",
+        ("Create archive" | "Create archives", 2) => "アーカイブの作成に失敗しました",
+        ("Test archive", 2) => "アーカイブの検証に失敗しました",
+        _ => title,
+    }
 }
 
 pub(super) fn show_ui_error(weak: &slint::Weak<AppWindow>, title: &str, message: String) {
     if let Some(ui) = weak.upgrade() {
         ui.set_status_text(message.clone().into());
+        ui.set_error_title(error_title(title, ui.get_language_selection()).into());
+        ui.set_error_message(message.into());
+        ui.set_error_visible(true);
     }
-    platform::show_error(title, &message);
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    #[test]
+    fn invalid_archive_error_keeps_ui_responsive() {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                threading: true,
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("archive-rclick-error-ui-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let invalid = directory.join("not-an-archive.zip");
+        fs::write(&invalid, b"not an archive").unwrap();
+        let valid = directory.join("valid.zip");
+        let engine = load_engine().unwrap();
+        engine
+            .create(
+                &valid,
+                std::slice::from_ref(&invalid),
+                &CreateOptions::default(),
+                &|_: ProgressSnapshot| {},
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        let ui = AppWindow::new().unwrap();
+        ui.set_language_selection(1);
+        ui.set_esc_close_main_window(true);
+        ui.on_main_window_close_requested(|| panic!("dismissing an error must not close the app"));
+        ui.window().set_size(slint::PhysicalSize::new(960, 640));
+        let state = Rc::new(AppState::new());
+        ui.set_archive_rows(ModelRc::from(Rc::clone(&state.rows)));
+        ui.show().unwrap();
+        start_listing(
+            &ui,
+            Rc::clone(&state),
+            Arc::clone(&engine),
+            invalid.clone(),
+            None,
+            0,
+            PathBuf::new(),
+        );
+
+        let phase = Rc::new(Cell::new(0));
+        let phase_in_timer = Rc::clone(&phase);
+        let weak = ui.as_weak();
+        let timer = slint::Timer::default();
+        let started = Instant::now();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(20),
+            move || {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "listing/error UI stalled"
+                );
+                let ui = weak.upgrade().unwrap();
+                if ui.get_busy() {
+                    return;
+                }
+                assert!(state.cancellation.lock().unwrap().is_none());
+                match phase_in_timer.get() {
+                    0 | 2 => {
+                        assert!(ui.get_error_visible());
+                        assert!(
+                            ui.get_error_message()
+                                .contains("지원하는 압축파일이 아니거나")
+                        );
+                        assert_eq!(ui.get_has_archive(), phase_in_timer.get() == 2);
+                        // Rendering also instantiates the overlay and its focus scope.
+                        let snapshot = ui.window().take_snapshot().unwrap();
+                        if let Some(path) = std::env::var_os("ARCHIVERCLICK_ERROR_SNAPSHOT") {
+                            image::save_buffer(
+                                path,
+                                snapshot.as_bytes(),
+                                snapshot.width(),
+                                snapshot.height(),
+                                image::ColorType::Rgba8,
+                            )
+                            .unwrap();
+                        }
+                        let key = if phase_in_timer.get() == 0 {
+                            slint::platform::Key::Return
+                        } else {
+                            slint::platform::Key::Escape
+                        };
+                        ui.window()
+                            .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                                text: key.into(),
+                            });
+                        ui.window()
+                            .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                                text: key.into(),
+                            });
+                        assert!(
+                            !ui.get_error_visible(),
+                            "Enter/Escape should dismiss the error"
+                        );
+                        if phase_in_timer.get() == 2 {
+                            assert_eq!(ui.get_archive_title(), "valid.zip");
+                            phase_in_timer.set(3);
+                            slint::quit_event_loop().unwrap();
+                            return;
+                        }
+                        phase_in_timer.set(1);
+                        start_listing(
+                            &ui,
+                            Rc::clone(&state),
+                            Arc::clone(&engine),
+                            valid.clone(),
+                            None,
+                            0,
+                            PathBuf::new(),
+                        );
+                    }
+                    1 => {
+                        assert!(ui.get_has_archive());
+                        assert_eq!(ui.get_archive_title(), "valid.zip");
+                        phase_in_timer.set(2);
+                        start_listing(
+                            &ui,
+                            Rc::clone(&state),
+                            Arc::clone(&engine),
+                            invalid.clone(),
+                            None,
+                            0,
+                            PathBuf::new(),
+                        );
+                    }
+                    _ => {}
+                }
+            },
+        );
+        slint::run_event_loop().unwrap();
+        assert_eq!(phase.get(), 3);
+        timer.stop();
+        ui.hide().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

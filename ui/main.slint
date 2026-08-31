@@ -8,6 +8,7 @@ import {
 import { AppTheme } from "theme.slint";
 import { CreateOverlay, ExtractOverlay, SettingsOverlay } from "dialogs.slint";
 import { ConflictOverlay } from "progress.slint";
+import { ErrorOverlay } from "error.slint";
 
 export struct ArchiveRow {
     selected: bool,
@@ -705,6 +706,9 @@ export component AppWindow inherits Window {
     in-out property <string> app-version;
     in-out property <bool> has-archive;
     in-out property <bool> busy;
+    in-out property <bool> error-visible;
+    in-out property <string> error-title;
+    in-out property <string> error-message;
     in-out property <bool> can-go-up;
 
     in-out property <bool> conflict-visible;
@@ -810,20 +814,22 @@ export component AppWindow inherits Window {
 
         KeyBinding {
             keys: @keys(Control + O);
-            enabled: !root.busy;
+            enabled: !root.busy && !root.error-visible;
             activated => { root.open-requested(); }
         }
 
         KeyBinding {
             keys: @keys(Alt + LeftArrow);
-            enabled: root.can-go-up && !root.busy;
+            enabled: root.can-go-up && !root.busy && !root.error-visible;
             activated => { root.up-requested(); }
         }
 
         KeyBinding {
             keys: @keys(Escape);
             activated => {
-                if (root.settings-visible) {
+                if (root.error-visible) {
+                    root.error-visible = false;
+                } else if (root.settings-visible) {
                     root.settings-visible = false;
                 } else if (root.create-visible) {
                     root.create-visible = false;
@@ -844,11 +850,11 @@ export component AppWindow inherits Window {
             height: parent.height;
 
             can-drop(event) => {
-                return root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible ? DragAction.none : DragAction.copy;
+                return root.busy || root.error-visible || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible ? DragAction.none : DragAction.copy;
             }
 
             dropped(event) => {
-                if (root.busy || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible) {
+                if (root.busy || root.error-visible || root.password-visible || root.conflict-visible || root.create-visible || root.extract-visible || root.settings-visible) {
                     return DragAction.none;
                 }
                 root.dropped(event.data);
@@ -1321,6 +1327,16 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if root.error-visible : ErrorOverlay {
+        title: root.error-title;
+        message: root.error-message;
+        language-index: root.language-selection;
+        dismissed => {
+            root.error-visible = false;
+            shortcuts.focus();
         }
     }
 }

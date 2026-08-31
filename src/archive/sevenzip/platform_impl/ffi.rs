@@ -6,6 +6,7 @@ use super::*;
 // HRESULT values
 // ------------------------------------------------------------------
 pub(super) const S_OK: i32 = 0;
+pub(super) const S_FALSE: i32 = 1;
 pub(super) const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
 pub(super) const E_ABORT: i32 = 0x8000_4004u32 as i32;
 pub(super) const E_FAIL: i32 = 0x8000_4005u32 as i32;
@@ -635,6 +636,7 @@ pub(super) struct Api {
     rar4_clsid: Option<Guid>,
     rar5_clsid: Option<Guid>,
     iso_clsid: Option<Guid>,
+    nsis_clsid: Option<Guid>,
     zip_reader_available: bool,
     zip_writer_available: bool,
 }
@@ -754,7 +756,7 @@ impl Api {
         // RAR reading is optional for reduced development DLLs. Full
         // 7-Zip builds expose distinct RAR4 ("Rar") and RAR5 ("Rar5")
         // handlers, so selecting only by the .rar extension is not enough.
-        let probe_rar_reader = |handler_name: &str| {
+        let probe_optional_reader = |handler_name: &str| {
             let rar_clsid = discover_handler_clsid(&library, handler_name)?;
             let mut rar_probe: *mut c_void = ptr::null_mut();
             let rar_hr = unsafe { create_object(&rar_clsid, &IID_IIN_ARCHIVE, &mut rar_probe) };
@@ -767,8 +769,9 @@ impl Api {
             unsafe { ((*rar_vtbl).release)(rar_probe) };
             Some(rar_clsid)
         };
-        let rar4_clsid = probe_rar_reader("rar");
-        let rar5_clsid = probe_rar_reader("rar5");
+        let rar4_clsid = probe_optional_reader("rar");
+        let rar5_clsid = probe_optional_reader("rar5");
+        let nsis_clsid = probe_optional_reader("Nsis");
         let mut zip_probe: *mut c_void = ptr::null_mut();
         // ZIP creation is optional because development builds may stage a
         // 7z-only DLL.  The normal bundled runtime is the full DLL.
@@ -788,6 +791,7 @@ impl Api {
             rar4_clsid,
             rar5_clsid,
             iso_clsid,
+            nsis_clsid,
             zip_reader_available,
             zip_writer_available,
         })
@@ -816,6 +820,11 @@ impl Api {
             ReadFormat::Iso => self.iso_clsid.as_ref().ok_or_else(|| {
                 ArchiveError::UnsupportedOption(
                     "the loaded 7z.dll does not provide an ISO reader".to_owned(),
+                )
+            })?,
+            ReadFormat::Nsis => self.nsis_clsid.as_ref().ok_or_else(|| {
+                ArchiveError::UnsupportedOption(
+                    "the loaded 7z.dll does not provide an NSIS reader".to_owned(),
                 )
             })?,
             ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
@@ -867,6 +876,7 @@ impl Api {
             ReadFormat::Rar4 => self.rar4_clsid.is_some(),
             ReadFormat::Rar5 => self.rar5_clsid.is_some(),
             ReadFormat::Iso => self.iso_clsid.is_some(),
+            ReadFormat::Nsis => self.nsis_clsid.is_some(),
             ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
         }
     }

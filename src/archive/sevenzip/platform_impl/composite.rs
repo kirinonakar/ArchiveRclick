@@ -2,7 +2,7 @@
 
 use super::*;
 
-// Composite engine: 7z/ZIP/LZH read and creation -> 7z.dll when available;
+// Composite engine: 7z/ZIP/LZH/RAR/ISO/NSIS reads -> 7z.dll when available;
 // libarchive handles all other formats and remains the fallback when the
 // optional 7z DLL is unavailable.
 // ------------------------------------------------------------------

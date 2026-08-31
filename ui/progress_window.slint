@@ -1,6 +1,7 @@
 import { Button, LineEdit, Palette, ProgressIndicator } from "std-widgets.slint";
 import { AppTheme } from "theme.slint";
 import { ConflictOverlay, ProgressStats } from "progress.slint";
+import { ErrorOverlay } from "error.slint";
 
 // Small progress-only window shown while Explorer right-click operations run.
 // Unlike the main window it has no archive browser UI; the app closes it by
@@ -8,6 +9,10 @@ import { ConflictOverlay, ProgressStats } from "progress.slint";
 export component ProgressWindow inherits Window {
     in-out property <string> font-family;
     in-out property <int> theme-selection: 0;
+    in-out property <int> language-selection: 0;
+    in-out property <bool> error-visible;
+    in-out property <string> error-title;
+    in-out property <string> error-message;
     in-out property <string> progress-title;
     in-out property <string> progress-file;
     in-out property <string> progress-file-percent;
@@ -27,6 +32,7 @@ export component ProgressWindow inherits Window {
     callback cancel-requested();
     callback password-response(string, bool);
     callback conflict-response(int);
+    callback error-dismissed();
 
     title: "ArchiveRclick";
     icon: @image-url("../app.png");
@@ -228,5 +234,12 @@ export component ProgressWindow inherits Window {
         conflict-path: root.conflict-path;
         show-batch-actions: false;
         responded(response) => { root.conflict-response(response); }
+    }
+
+    if root.error-visible : ErrorOverlay {
+        title: root.error-title;
+        message: root.error-message;
+        language-index: root.language-selection;
+        dismissed => { root.error-dismissed(); }
     }
 }

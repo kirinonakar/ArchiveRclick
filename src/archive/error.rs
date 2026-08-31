@@ -41,6 +41,9 @@ pub enum ArchiveError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    #[error("File is not a supported archive, or the archive is damaged: {0}")]
+    InvalidArchive(PathBuf),
+
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,

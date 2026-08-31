@@ -1024,7 +1024,7 @@ struct OpenArchive {
     /// reference held by this owner; 7-Zip releases its own reference in
     /// Close, so the holder must outlive `in_archive`.
     _stream: InputStream,
-    _callback: OpenCallback,
+    _callback: Box<OpenCallback>,
 }
 
 enum InputStream {
@@ -1084,23 +1084,38 @@ fn open_for_read(
     } else {
         InputStream::Single(Box::new(open_input_stream(path)?))
     };
-    let callback = OpenCallback {
+    let callback = Box::new(OpenCallback {
         vtbl: &OPEN_VTBL,
         crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD_VTBL,
         refs: AtomicU32::new(1),
         password: Mutex::new(password.map(str::to_owned)),
         password_requested: AtomicBool::new(false),
         cancel: cancel.clone(),
+    });
+    // Assemble the owner before Open: even a failed Open may retain a stream
+    // or callback reference. Struct fields drop in declaration order, so the
+    // handler is closed/released before either dependency on every exit path.
+    // Box the callback as well as the stream so moving the owner is safe.
+    let archive = OpenArchive {
+        in_archive,
+        _stream: stream,
+        _callback: callback,
     };
-    let hr = in_archive.open(
-        stream.as_ptr(),
-        (&callback as *const OpenCallback)
+    let hr = archive.in_archive.open(
+        archive._stream.as_ptr(),
+        (archive._callback.as_ref() as *const OpenCallback)
             .cast_mut()
             .cast::<c_void>(),
     );
     if hr != S_OK {
-        if callback.password_requested.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
+        if archive._callback.password_requested.load(Ordering::Relaxed) {
             return Err(ArchiveError::PasswordRequired);
+        }
+        if hr == S_FALSE {
+            return Err(ArchiveError::InvalidArchive(path.to_path_buf()));
         }
         return Err(ArchiveError::SevenZip(format!(
             "opening {} archive failed with HRESULT {:#010x}",
@@ -1108,11 +1123,7 @@ fn open_for_read(
             hr as u32
         )));
     }
-    Ok(OpenArchive {
-        in_archive,
-        _stream: stream,
-        _callback: callback,
-    })
+    Ok(archive)
 }
 
 fn read_entries(
