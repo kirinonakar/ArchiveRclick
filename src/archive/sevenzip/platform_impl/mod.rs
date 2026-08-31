@@ -77,6 +77,9 @@ use streams::{
 mod callbacks;
 use callbacks::*;
 
+mod compression_progress;
+use compression_progress::CompressionProgressIndex;
+
 mod file_ops;
 use file_ops::{
     build_path, check_cancel, checked_add_with_limit, file_length, install_temporary,
@@ -95,9 +98,9 @@ pub use composite::CompositeEngine;
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveEngine, CompositeEngine, CreateFormat, CreateOptions, ReadFormat, SevenZipEngine,
-        archive_format, completed_compression_files, filetime_to_unix_seconds,
-        split_callback_progress, split_compression_progress, unix_seconds_to_filetime,
+        ArchiveEngine, CompositeEngine, CompressionProgressIndex, CreateFormat, CreateOptions,
+        ReadFormat, SevenZipEngine, archive_format, filetime_to_unix_seconds,
+        split_callback_progress, unix_seconds_to_filetime,
     };
     use crate::archive::ThreadCount;
     use std::io::Write;
@@ -140,23 +143,25 @@ mod tests {
     #[test]
     fn compression_work_is_split_across_file_progress_ranges() {
         let totals = [25, 25, 0, 25, 25];
-        assert_eq!(split_compression_progress(1, &totals), Some((0, 1)));
-        assert_eq!(split_compression_progress(25, &totals), Some((0, 25)));
-        assert_eq!(split_compression_progress(26, &totals), Some((1, 1)));
-        assert_eq!(split_compression_progress(75, &totals), Some((3, 25)));
-        assert_eq!(split_compression_progress(76, &totals), Some((4, 1)));
-        assert_eq!(split_compression_progress(100, &totals), Some((4, 25)));
+        let index = CompressionProgressIndex::new(totals.map(|size| (size, true)));
+        assert_eq!(index.current_file(1), Some((0, 1)));
+        assert_eq!(index.current_file(25), Some((0, 25)));
+        assert_eq!(index.current_file(26), Some((1, 1)));
+        assert_eq!(index.current_file(75), Some((3, 25)));
+        assert_eq!(index.current_file(76), Some((4, 1)));
+        assert_eq!(index.current_file(100), Some((4, 25)));
     }
 
     #[test]
     fn compression_file_count_ignores_directories_and_tracks_boundaries() {
         let totals = [25, 0, 0, 25];
         let is_file = [true, false, true, true];
-        assert_eq!(completed_compression_files(0, &totals, &is_file), 0);
-        assert_eq!(completed_compression_files(24, &totals, &is_file), 0);
-        assert_eq!(completed_compression_files(25, &totals, &is_file), 2);
-        assert_eq!(completed_compression_files(26, &totals, &is_file), 2);
-        assert_eq!(completed_compression_files(50, &totals, &is_file), 3);
+        let index = CompressionProgressIndex::new(totals.into_iter().zip(is_file));
+        assert_eq!(index.completed_files(0), 0);
+        assert_eq!(index.completed_files(24), 0);
+        assert_eq!(index.completed_files(25), 2);
+        assert_eq!(index.completed_files(26), 2);
+        assert_eq!(index.completed_files(50), 3);
     }
 
     #[test]

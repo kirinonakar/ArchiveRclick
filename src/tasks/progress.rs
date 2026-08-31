@@ -148,6 +148,9 @@ impl<'a> ThrottledProgress<'a> {
     pub fn report(&self, mut snapshot: ProgressSnapshot, force: bool) {
         let mut last = self.last_report.lock().expect("progress mutex poisoned");
         let now = Instant::now();
+        if !force && last.is_some_and(|previous| now.duration_since(previous) < self.interval) {
+            return;
+        }
         snapshot.elapsed = now.duration_since(self.started_at);
         let fraction = snapshot.fraction();
         if snapshot.phase == ProgressPhase::Finished || fraction >= 1.0 {
@@ -161,10 +164,8 @@ impl<'a> ThrottledProgress<'a> {
             snapshot.estimated_total = Some(total);
             snapshot.estimated_remaining = total.checked_sub(snapshot.elapsed);
         }
-        if force || last.is_none_or(|previous| now.duration_since(previous) >= self.interval) {
-            *last = Some(now);
-            self.inner.report(snapshot);
-        }
+        *last = Some(now);
+        self.inner.report(snapshot);
     }
 }
 

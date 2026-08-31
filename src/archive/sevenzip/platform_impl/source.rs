@@ -85,10 +85,15 @@ fn walk_directory(
         let entries =
             fs::read_dir(&directory).map_err(|error| ArchiveError::io(&directory, error))?;
         for entry in entries {
+            check_cancel(cancel)?;
             let entry = entry.map_err(|error| ArchiveError::io(&directory, error))?;
             let path = entry.path();
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|error| ArchiveError::io(&path, error))?;
+            // Windows directory enumeration already supplies this metadata.
+            // DirEntry::metadata avoids an extra filesystem call per item and,
+            // like symlink_metadata, does not follow links/reparse points.
+            let metadata = entry
+                .metadata()
+                .map_err(|error| ArchiveError::io(&path, error))?;
             // Skip reparse points (symlinks/junctions): archiving them
             // through 7z.dll would dereference them on extraction.
             if is_reparse(&metadata) {

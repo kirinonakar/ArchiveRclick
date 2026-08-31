@@ -765,10 +765,11 @@ impl ArchiveEngine for SevenZipEngine {
                         current_item_index: None,
                         item_bytes_processed: vec![0; items.len()],
                         item_total_bytes: items.iter().map(|item| item.size).collect(),
-                        item_is_file: items
-                            .iter()
-                            .map(|item| item.kind == SourceKind::File)
-                            .collect(),
+                        progress_index: CompressionProgressIndex::new(
+                            items
+                                .iter()
+                                .map(|item| (item.size, item.kind == SourceKind::File)),
+                        ),
                         item_archive_names: items
                             .iter()
                             .map(|item| item.archive_name.clone())

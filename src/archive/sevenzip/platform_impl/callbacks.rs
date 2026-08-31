@@ -849,7 +849,7 @@ pub(super) struct UpdateContext {
     pub(super) current_item_index: Option<usize>,
     pub(super) item_bytes_processed: Vec<u64>,
     pub(super) item_total_bytes: Vec<u64>,
-    pub(super) item_is_file: Vec<bool>,
+    pub(super) progress_index: CompressionProgressIndex,
     pub(super) item_archive_names: Vec<String>,
     pub(super) snapshot: ProgressSnapshot,
     pub(super) summary: OperationSummary,
@@ -1003,15 +1003,16 @@ unsafe extern "system" fn update_set_completed(this: *mut c_void, complete: *con
             .bytes_processed
             .max(source_completed)
             .min(context.total_bytes);
-        context.snapshot.entries_processed = completed_compression_files(
-            source_completed,
-            &context.item_total_bytes,
-            &context.item_is_file,
-        );
+        // Index lookups keep callback work logarithmic, even when the archive
+        // contains hundreds of thousands of files. Use the monotonic counter
+        // for both file and byte progress if codec workers report out of order.
+        let source_completed = context.snapshot.bytes_processed;
+        context.snapshot.entries_processed =
+            context.progress_index.completed_files(source_completed);
 
         if source_completed > 0
             && let Some((item_index, item_bytes)) =
-                split_compression_progress(source_completed, &context.item_total_bytes)
+                context.progress_index.current_file(source_completed)
         {
             context.current_item_index = Some(item_index);
             context.snapshot.current_file = context
@@ -1031,55 +1032,6 @@ unsafe extern "system" fn update_set_completed(this: *mut c_void, complete: *con
     };
     callback.progress.report(snapshot);
     S_OK
-}
-
-pub(super) fn split_compression_progress(
-    source_completed: u64,
-    item_total_bytes: &[u64],
-) -> Option<(usize, u64)> {
-    let mut item_base = 0u64;
-    let mut last_file = None;
-    for (item_index, &item_total) in item_total_bytes.iter().enumerate() {
-        if item_total == 0 {
-            continue;
-        }
-        last_file = Some((item_index, item_total));
-        let item_end = item_base.saturating_add(item_total);
-        // Keep a completed file visible at the exact boundary; switch to
-        // the next file only once its allocated work has actually begun.
-        if source_completed <= item_end {
-            return Some((item_index, source_completed.saturating_sub(item_base)));
-        }
-        item_base = item_end;
-    }
-    last_file
-}
-
-pub(super) fn completed_compression_files(
-    source_completed: u64,
-    item_total_bytes: &[u64],
-    item_is_file: &[bool],
-) -> u64 {
-    let mut completed_files = 0u64;
-    let mut cumulative_bytes = 0u64;
-    for (item_index, &item_total) in item_total_bytes.iter().enumerate() {
-        if !item_is_file.get(item_index).copied().unwrap_or(false) {
-            continue;
-        }
-        if item_total == 0 {
-            if source_completed > 0 && source_completed >= cumulative_bytes {
-                completed_files = completed_files.saturating_add(1);
-            }
-            continue;
-        }
-        cumulative_bytes = cumulative_bytes.saturating_add(item_total);
-        if source_completed >= cumulative_bytes {
-            completed_files = completed_files.saturating_add(1);
-        } else {
-            break;
-        }
-    }
-    completed_files
 }
 
 unsafe extern "system" fn update_get_update_item_info(

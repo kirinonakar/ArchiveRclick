@@ -26,7 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let format = parse_format(
         &args
             .next()
-            .ok_or("usage: create_perf <zip|7z> <source> <output> [level] [threads]")?,
+            .ok_or("usage: create_perf <zip|7z> <source> <output> [level] [threads] [composite|7zip|libarchive] [absolute-dll-path]")?,
     )?;
     let source = PathBuf::from(args.next().ok_or("missing source")?);
     let output = PathBuf::from(args.next().ok_or("missing output")?);
@@ -40,9 +40,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| ThreadCount::from_registry_key(&value.to_string_lossy()))
         .unwrap_or(ThreadCount::Auto);
 
-    let libarchive = LibArchiveEngine::load()?;
-    let sevenzip = SevenZipEngine::load().ok();
-    let engine = CompositeEngine::new(libarchive, sevenzip);
+    let backend = args.next().unwrap_or_else(|| "composite".into());
+    let library = args.next().map(PathBuf::from);
+    let engine: Box<dyn ArchiveEngine> = match backend.to_str() {
+        Some("composite") if library.is_none() => Box::new(CompositeEngine::new(
+            LibArchiveEngine::load()?,
+            SevenZipEngine::load().ok(),
+        )),
+        Some("7zip") => Box::new(match library.as_deref() {
+            Some(path) => SevenZipEngine::load_from_path(path)?,
+            None => SevenZipEngine::load()?,
+        }),
+        Some("libarchive") => Box::new(match library.as_deref() {
+            Some(path) => LibArchiveEngine::load_from_path(path)?,
+            None => LibArchiveEngine::load()?,
+        }),
+        _ => {
+            return Err("backend must be composite (without DLL path), 7zip, or libarchive".into());
+        }
+    };
+    if args.next().is_some() {
+        return Err("unexpected extra arguments".into());
+    }
     let cancel = CancellationToken::new();
     let options = CreateOptions {
         format,
@@ -61,8 +80,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         0.0
     };
     println!(
-        "{{\"format\":\"{}\",\"level\":{},\"threads\":\"{}\",\"seconds\":{:.6},\"entries\":{},\"input_bytes\":{},\"output_bytes\":{},\"throughput_mib_s\":{:.3}}}",
+        "{{\"format\":\"{}\",\"backend\":\"{}\",\"level\":{},\"threads\":\"{}\",\"seconds\":{:.6},\"entries\":{},\"input_bytes\":{},\"output_bytes\":{},\"throughput_mib_s\":{:.3}}}",
         format.label(),
+        backend.to_string_lossy(),
         level,
         threads.registry_key(),
         elapsed,
