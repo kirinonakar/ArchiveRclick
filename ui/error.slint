@@ -18,7 +18,16 @@ export component ErrorOverlay inherits Rectangle {
     error-focus := FocusScope {
         width: parent.width;
         height: parent.height;
-        init => { self.focus(); }
+        // AccessKit can instantiate this overlay while building its tree.
+        // Focusing in init re-enters its borrowed adapter and crashes Windows.
+        // Wait until tree construction has returned, and only focus once.
+        Timer {
+            interval: 0ms;
+            triggered => {
+                self.running = false;
+                error-focus.focus();
+            }
+        }
         KeyBinding {
             keys: @keys(Escape);
             activated => { root.dismissed(); }
@@ -39,16 +48,16 @@ export component ErrorOverlay inherits Rectangle {
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: min(520px, parent.width - 32px);
-            height: min(300px, parent.height - 32px);
+            width: min(420px, parent.width - 32px);
+            height: min(200px, parent.height - 32px);
             background: Palette.background;
             border-width: 1px;
             border-color: AppTheme.border;
             border-radius: 12px;
 
             VerticalLayout {
-                padding: 18px;
-                spacing: 12px;
+                padding: 14px;
+                spacing: 8px;
                 Text {
                     text: root.title;
                     font-size: 20px;

@@ -662,6 +662,7 @@ mod tests {
 
         let phase = Rc::new(Cell::new(0));
         let phase_in_timer = Rc::clone(&phase);
+        let error_rendered = Cell::new(false);
         let weak = ui.as_weak();
         let timer = slint::Timer::default();
         let started = Instant::now();
@@ -688,6 +689,11 @@ mod tests {
                         assert_eq!(ui.get_has_archive(), phase_in_timer.get() == 2);
                         // Rendering also instantiates the overlay and its focus scope.
                         let snapshot = ui.window().take_snapshot().unwrap();
+                        // Let the deferred focus run between instantiating
+                        // the overlay and sending the dismissal key.
+                        if !error_rendered.replace(true) {
+                            return;
+                        }
                         if let Some(path) = std::env::var_os("ARCHIVERCLICK_ERROR_SNAPSHOT") {
                             image::save_buffer(
                                 path,
@@ -715,6 +721,7 @@ mod tests {
                             !ui.get_error_visible(),
                             "Enter/Escape should dismiss the error"
                         );
+                        error_rendered.set(false);
                         if phase_in_timer.get() == 2 {
                             assert_eq!(ui.get_archive_title(), "valid.zip");
                             phase_in_timer.set(3);

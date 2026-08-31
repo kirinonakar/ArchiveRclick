@@ -610,10 +610,83 @@ fn show_progress_error(ui: &ProgressWindow, title: &str, message: &str) {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::{cell::Cell, time::Instant};
 
     #[test]
-    fn progress_error_can_be_dismissed_at_minimum_window_size() {
+    #[ignore = "opens a native Windows progress window; run separately with --ignored"]
+    fn native_invalid_extract_keeps_error_open_until_dismissed() {
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .select()
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "archive-rclick-native-error-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let archive = match std::env::var_os("ARCHIVERCLICK_INVALID_ARCHIVE_FIXTURE") {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let path = directory.join("image.zip");
+                fs::write(&path, b"\xff\xd8\xff\xe0\x00\x10JFIF\0not an archive").unwrap();
+                path
+            }
+        };
+        let (ui, state) = open_progress_window().unwrap();
+        ui.set_language_selection(1);
+        start_extract_batch_window(
+            &ui,
+            &state,
+            load_engine().unwrap(),
+            vec![archive],
+            vec![Some(directory.join("output"))],
+            false,
+            false,
+        );
+        let error_ticks = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&error_ticks);
+        let weak = ui.as_weak();
+        let started = Instant::now();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(20),
+            move || {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "error window stalled"
+                );
+                let ui = weak.upgrade().unwrap();
+                if ui.get_error_visible() {
+                    assert!(
+                        ui.get_error_message()
+                            .contains("지원하는 압축파일이 아니거나")
+                    );
+                    observed.set(observed.get() + 1);
+                    // Allow native rendering and accessibility events to run
+                    // before acknowledging the error through the app callback.
+                    if observed.get() == 25 {
+                        ui.invoke_error_dismissed();
+                    }
+                }
+            },
+        );
+        run_progress_window(&ui, &state).unwrap();
+        timer.stop();
+        assert_eq!(
+            error_ticks.get(),
+            25,
+            "process exited before error acknowledgement"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn progress_error_defers_focus_and_can_be_dismissed_at_minimum_window_size() {
         slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
             i_slint_backend_testing::TestingBackendOptions {
                 renderer_name: Some("software".into()),
@@ -645,6 +718,18 @@ mod tests {
             )
             .unwrap();
         }
+        // Creating the overlay must not synchronously change focus: Windows
+        // accessibility may be holding its adapter while instantiating it.
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                text: slint::platform::Key::Escape.into(),
+            });
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                text: slint::platform::Key::Escape.into(),
+            });
+        assert!(!dismissed.get(), "overlay must defer its initial focus");
+        slint::platform::update_timers_and_animations();
         ui.window()
             .dispatch_event(slint::platform::WindowEvent::KeyPressed {
                 text: slint::platform::Key::Escape.into(),
