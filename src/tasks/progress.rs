@@ -44,6 +44,15 @@ pub struct ProgressSnapshot {
 }
 
 impl ProgressSnapshot {
+    /// Highest overall progress reported while the backend is still working.
+    ///
+    /// Reading or writing all payload bytes does not necessarily mean the
+    /// operation is done: archive backends can still be closing streams,
+    /// installing temporary files, applying metadata, or validating the
+    /// archive. Reserve 100% for an explicit `Finished` snapshot so the UI
+    /// never claims completion during that finalization work.
+    const ACTIVE_MAX_FRACTION: f32 = 0.99;
+
     pub fn new(phase: ProgressPhase) -> Self {
         Self {
             phase,
@@ -64,15 +73,16 @@ impl ProgressSnapshot {
         // A finished operation is complete even when it had no entries or
         // bytes.  Without this special case an empty archive would end at
         // 0%, which is misleading in the progress UI.
-        if self.phase == ProgressPhase::Finished {
-            1.0
+        let fraction = if self.phase == ProgressPhase::Finished {
+            return 1.0;
         } else if let Some(total) = self.total_bytes.filter(|total| *total > 0) {
             (self.bytes_processed as f64 / total as f64).clamp(0.0, 1.0) as f32
         } else if let Some(total) = self.total_entries.filter(|total| *total > 0) {
             (self.entries_processed as f64 / total as f64).clamp(0.0, 1.0) as f32
         } else {
             0.0
-        }
+        };
+        fraction.min(Self::ACTIVE_MAX_FRACTION)
     }
 
     /// Returns the current file's progress when its size is known. A missing
@@ -94,6 +104,18 @@ mod tests {
     fn finished_empty_operation_is_one_hundred_percent() {
         let snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
 
+        assert_eq!(snapshot.fraction(), 1.0);
+    }
+
+    #[test]
+    fn active_operation_reserves_one_hundred_percent_for_finished_phase() {
+        let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
+        snapshot.total_bytes = Some(1_000);
+        snapshot.bytes_processed = 1_000;
+
+        assert!((snapshot.fraction() - 0.99).abs() < f32::EPSILON);
+
+        snapshot.phase = ProgressPhase::Finished;
         assert_eq!(snapshot.fraction(), 1.0);
     }
 
