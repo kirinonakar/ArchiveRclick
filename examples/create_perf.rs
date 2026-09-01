@@ -34,7 +34,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .map(|value| value.to_string_lossy().parse::<u8>())
         .transpose()?
-        .unwrap_or(6);
+        .unwrap_or_else(|| CreateOptions::default().compression_level);
     let threads = args
         .next()
         .map(|value| ThreadCount::from_registry_key(&value.to_string_lossy()))

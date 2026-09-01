@@ -324,7 +324,11 @@ impl Default for CreateOptions {
     fn default() -> Self {
         Self {
             format: CreateFormat::Zip,
-            compression_level: 6,
+            // 7-Zip's Normal preset is level 5. Level 6 switches LZMA2 to a
+            // substantially slower mode on large inputs while often producing
+            // the same output size, so keep both GUI and shell operations on
+            // the upstream Normal default unless the user explicitly changes it.
+            compression_level: 5,
             split_size: None,
             password: None,
             encrypt_headers: false,
@@ -336,6 +340,11 @@ impl Default for CreateOptions {
 #[cfg(test)]
 mod tests {
     use super::{CreateOptions, ExtractOptions, VolumeSizePreset};
+
+    #[test]
+    fn create_options_default_to_normal_compression() {
+        assert_eq!(CreateOptions::default().compression_level, 5);
+    }
 
     #[test]
     fn extract_options_debug_redacts_password() {
