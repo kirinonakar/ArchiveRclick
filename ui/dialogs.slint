@@ -128,7 +128,6 @@ export component ExtractOverlay inherits Rectangle {
 export component CreateOverlay inherits Rectangle {
     in property <int> language-index;
     in property <string> source-summary;
-    in property <string> destination;
     in property <[string]> available-formats;
     in property <bool> has-sources;
     in property <int> thread-selection;
@@ -154,7 +153,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: volume-custom-row.visible ? 416px : 380px;
+        height: volume-custom-row.visible ? 376px : 340px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -201,19 +200,6 @@ export component CreateOverlay inherits Rectangle {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-            }
-
-            Text {
-                text: root.language-index == 1 ? "저장 위치" : root.language-index == 2 ? "保存先" : "Destination";
-                color: Palette.foreground;
-                font-weight: 600;
-            }
-
-            Text {
-                text: root.destination;
-                color: Palette.foreground;
-                opacity: 0.72;
-                overflow: elide;
             }
 
             HorizontalLayout {

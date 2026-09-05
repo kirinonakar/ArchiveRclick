@@ -716,7 +716,6 @@ export component AppWindow inherits Window {
 
     in-out property <bool> create-visible;
     in-out property <string> create-source-summary;
-    in-out property <string> create-destination;
     in-out property <[string]> create-formats;
     in-out property <bool> create-has-sources;
     in-out property <int> create-thread-selection: 0;
@@ -1213,7 +1212,6 @@ export component AppWindow inherits Window {
     if root.create-visible : CreateOverlay {
         language-index: root.language-selection;
         source-summary: root.create-source-summary;
-        destination: root.create-destination;
         available-formats: root.create-formats;
         has-sources: root.create-has-sources;
         thread-selection: root.create-thread-selection;

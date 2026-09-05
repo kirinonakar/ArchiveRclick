@@ -23,7 +23,7 @@ mod imp {
     const PROG_ID: &str = "ArchiveRclick.Archive";
     const EXTENSIONS: &[&str] = &[
         ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".cab", ".lha",
-        ".lzh", ".tgz", ".tbz2", ".txz", ".iso", ".img",
+        ".lzh", ".tgz", ".tbz2", ".txz", ".iso", ".img", ".001",
     ];
 
     struct OwnedKey(HKEY);

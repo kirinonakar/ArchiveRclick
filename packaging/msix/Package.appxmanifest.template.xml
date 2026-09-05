@@ -84,6 +84,7 @@
               <uap:FileType>.txz</uap:FileType>
               <uap:FileType>.iso</uap:FileType>
               <uap:FileType>.img</uap:FileType>
+              <uap:FileType>.001</uap:FileType>
             </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>
         </uap:Extension>

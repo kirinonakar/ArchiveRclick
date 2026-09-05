@@ -38,7 +38,6 @@ pub(super) fn open_main_window(
     ui.set_summary_text("No archive open".into());
     ui.set_libarchive_version(engine.version().into());
     ui.set_create_source_summary("Choose files or a folder to archive".into());
-    ui.set_create_destination("Choose after selecting Create…".into());
     let font_preference = platform::load_font_preference();
     let font_family = platform::resolve_font_family(&font_preference);
     ui.set_font_family(font_family.into());
