@@ -61,6 +61,64 @@ fn split_volume_base(path: &Path) -> Option<(PathBuf, u32)> {
     (index > 0).then(|| (path.with_file_name(&name[..dot]), index))
 }
 
+/// Preserve the spelling and zero padding used by .part1.rar/.part01.rar.
+pub(super) fn rar_first_volume_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".rar")?;
+    let part = stem.rfind(".part")? + 5;
+    let digits = &stem[part..];
+    if digits.is_empty()
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || !digits.bytes().any(|byte| byte != b'0')
+    {
+        return None;
+    }
+    let padded = path.with_file_name(format!(
+        "{}{:0width$}{}",
+        &name[..part],
+        1,
+        &name[stem.len()..],
+        width = digits.len()
+    ));
+    // part10 can belong to either part01 or part1. Prefer the existing
+    // same-width first volume, then fall back to the unpadded convention.
+    if digits.starts_with('0') || padded.is_file() {
+        Some(padded)
+    } else {
+        Some(path.with_file_name(format!("{}1{}", &name[..part], &name[stem.len()..])))
+    }
+}
+
+#[cfg(test)]
+mod rar_volume_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_rar_part_numbers_without_misclassifying_other_names() {
+        for (name, expected) in [
+            ("backup.part1.rar", "backup.part1.rar"),
+            ("backup.part2.rar", "backup.part1.rar"),
+            ("backup.part10.rar", "backup.part1.rar"),
+            ("한글.PART002.RAR", "한글.PART001.RAR"),
+        ] {
+            assert_eq!(
+                rar_first_volume_path(Path::new(name)),
+                Some(PathBuf::from(expected))
+            );
+        }
+        for name in [
+            "backup.rar",
+            "backup.part.rar",
+            "backup.part0.rar",
+            "backup.partX.rar",
+            "backup.part1.zip",
+        ] {
+            assert_eq!(rar_first_volume_path(Path::new(name)), None);
+        }
+    }
+}
+
 pub(super) fn volume_part_path(base: &Path, index: u32) -> PathBuf {
     let mut name = base
         .file_name()

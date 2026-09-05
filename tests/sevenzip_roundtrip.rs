@@ -707,6 +707,65 @@ fn split_zip_and_7z_round_trip_through_volume_files() {
     }
 }
 
+fn copy_split_rar(directory: &Path, padded: bool) -> Vec<PathBuf> {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rar-split");
+    (1..=3)
+        .map(|index| {
+            let name = if padded {
+                format!("한글.PART{index:02}.RAR")
+            } else {
+                format!("sample.part{index}.rar")
+            };
+            let destination = directory.join(name);
+            fs::copy(fixtures.join(format!("sample.part{index}.rar")), &destination).unwrap();
+            destination
+        })
+        .collect()
+}
+
+#[test]
+fn split_rar_lists_tests_and_extracts_from_first_or_later_part() {
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    let expected: Vec<u8> = (0..=255u8).cycle().take(16_384).collect();
+    for padded in [false, true] {
+        let work = Work::new();
+        let parts = copy_split_rar(&work.0, padded);
+        for (index, part) in parts.iter().enumerate() {
+            let listing = engine.list(part, None, 0, &quiet, &cancel).unwrap();
+            assert_eq!(listing.entries.len(), 1);
+            assert_eq!(listing.entries[0].display_path, "payload.bin");
+            assert_eq!(listing.entries[0].size, Some(expected.len() as u64));
+            engine.test(part, None, &quiet, &cancel).unwrap();
+            let output = work.0.join(format!("out-{index}"));
+            engine.extract(part, &output, &ExtractOptions::default(), &quiet, &Overwrite, &cancel).unwrap();
+            assert_eq!(fs::read(output.join("payload.bin")).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn split_rar_missing_middle_part_fails_integrity_test_and_extraction() {
+    let work = Work::new();
+    let parts = copy_split_rar(&work.0, false);
+    fs::remove_file(&parts[1]).unwrap();
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    assert!(engine.test(&parts[0], None, &quiet, &cancel).is_err());
+    let output = work.0.join("out");
+    assert!(engine.extract(&parts[0], &output, &ExtractOptions::default(), &quiet, &Overwrite, &cancel).is_err());
+    assert!(!output.join("payload.bin").exists());
+}
+
+#[test]
+fn split_rar_requires_first_part_when_opened_from_later_part() {
+    let work = Work::new();
+    let parts = copy_split_rar(&work.0, false);
+    fs::remove_file(&parts[0]).unwrap();
+    let cancel = CancellationToken::new();
+    assert!(load_composite().list(&parts[1], None, 0, &quiet, &cancel).is_err());
+}
+
 #[test]
 fn bundled_7z_create_handles_multiple_inputs_and_password() {
     let work = Work::new();

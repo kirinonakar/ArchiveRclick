@@ -1045,7 +1045,7 @@ impl InputStream {
     }
 }
 
-fn open_input_stream(path: &Path) -> ArchiveResult<InStream> {
+pub(super) fn open_input_stream(path: &Path) -> ArchiveResult<InStream> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
@@ -1068,6 +1068,12 @@ fn open_for_read(
     _pathname_codepage: u32,
     cancel: &CancellationToken,
 ) -> ArchiveResult<OpenArchive> {
+    let first_part = if matches!(format, ReadFormat::Rar4 | ReadFormat::Rar5) {
+        format::rar_first_volume_path(path)
+    } else {
+        None
+    };
+    let path = first_part.as_deref().unwrap_or(path);
     let in_archive = api.create_in_archive(format.base())?;
     let stream = if format.is_volume() {
         let paths = split_volume_paths(path).ok_or_else(|| {
@@ -1087,10 +1093,12 @@ fn open_for_read(
     let callback = Box::new(OpenCallback {
         vtbl: &OPEN_VTBL,
         crypto_vtbl: &CRYPTO_GET_TEXT_PASSWORD_VTBL,
+        volume_vtbl: &OPEN_VOLUME_VTBL,
         refs: AtomicU32::new(1),
         password: Mutex::new(password.map(str::to_owned)),
         password_requested: AtomicBool::new(false),
         cancel: cancel.clone(),
+        archive_path: path.to_path_buf(),
     });
     // Assemble the owner before Open: even a failed Open may retain a stream
     // or callback reference. Struct fields drop in declaration order, so the

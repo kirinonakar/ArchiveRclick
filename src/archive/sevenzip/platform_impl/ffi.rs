@@ -14,6 +14,7 @@ pub(super) const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 
 // 7-Zip PROPIDs (PropID.h).
 pub(super) const KPID_PATH: u32 = 3;
+pub(super) const KPID_NAME: u32 = 4;
 pub(super) const KPID_IS_DIR: u32 = 6;
 pub(super) const KPID_SIZE: u32 = 7;
 pub(super) const KPID_PACK_SIZE: u32 = 8;
@@ -99,6 +100,8 @@ pub(super) const IID_IIN_ARCHIVE: Guid =
     guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x60, 0, 0);
 pub(super) const IID_IARCHIVE_OPEN_CALLBACK: Guid =
     guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x10, 0, 0);
+pub(super) const IID_IARCHIVE_OPEN_VOLUME_CALLBACK: Guid =
+    guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x30, 0, 0);
 pub(super) const IID_ISET_PROPERTIES: Guid =
     guid(0x2317_0F69, 0x40C1, 0x278A, 0, 0, 0, 6, 0, 0x03, 0, 0);
 pub(super) const IID_IOUT_ARCHIVE: Guid =

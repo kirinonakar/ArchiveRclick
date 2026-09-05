@@ -14,10 +14,18 @@ pub(super) struct OpenVtbl {
     pub(super) release: ReleaseFn,
     pub(super) set_total: unsafe extern "system" fn(*mut c_void, *const u64, *const u64) -> i32,
     pub(super) set_completed: unsafe extern "system" fn(*mut c_void, *const u64, *const u64) -> i32,
+}
+
+// IArchiveOpenVolumeCallback is a separate IUnknown interface, not an
+// extension of IArchiveOpenCallback. Its methods start at vtable slot 3.
+#[repr(C)]
+pub(super) struct OpenVolumeVtbl {
+    query_interface: QueryInterfaceFn,
+    add_ref: AddRefFn,
+    release: ReleaseFn,
     pub(super) get_property: unsafe extern "system" fn(*mut c_void, u32, *mut PropVariant) -> i32,
     pub(super) get_stream:
         unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> i32,
-    pub(super) set_sub_archive_name: unsafe extern "system" fn(*mut c_void, *const u16) -> i32,
 }
 
 pub(super) static OPEN_VTBL: OpenVtbl = OpenVtbl {
@@ -26,9 +34,14 @@ pub(super) static OPEN_VTBL: OpenVtbl = OpenVtbl {
     release: open_callback_release,
     set_total: open_set_total,
     set_completed: open_set_completed,
+};
+
+pub(super) static OPEN_VOLUME_VTBL: OpenVolumeVtbl = OpenVolumeVtbl {
+    query_interface: open_volume_query_interface,
+    add_ref: open_volume_add_ref,
+    release: open_volume_release,
     get_property: open_get_property,
     get_stream: open_get_stream,
-    set_sub_archive_name: open_set_sub_archive_name,
 };
 
 #[repr(C)]
@@ -63,10 +76,12 @@ pub(super) static EXTRACT_CRYPTO_VTBL: CryptoGetTextPasswordVtbl = CryptoGetText
 pub(super) struct OpenCallback {
     pub(super) vtbl: *const OpenVtbl,
     pub(super) crypto_vtbl: *const CryptoGetTextPasswordVtbl,
+    pub(super) volume_vtbl: *const OpenVolumeVtbl,
     pub(super) refs: AtomicU32,
     pub(super) password: Mutex<Option<String>>,
     pub(super) password_requested: AtomicBool,
     pub(super) cancel: CancellationToken,
+    pub(super) archive_path: PathBuf,
 }
 
 unsafe extern "system" fn open_query_interface(
@@ -84,6 +99,11 @@ unsafe extern "system" fn open_query_interface(
         || requested == IID_IPROGRESS
     {
         unsafe { *out = this };
+        unsafe { open_callback_add_ref(this) };
+        S_OK
+    } else if requested == IID_IARCHIVE_OPEN_VOLUME_CALLBACK {
+        let volume = unsafe { ptr::addr_of_mut!((*(this as *mut OpenCallback)).volume_vtbl) };
+        unsafe { *out = volume.cast() };
         unsafe { open_callback_add_ref(this) };
         S_OK
     } else if requested == IID_ICRYPTO_GET_TEXT_PASSWORD {
@@ -123,31 +143,101 @@ unsafe extern "system" fn open_set_completed(
 }
 
 unsafe extern "system" fn open_get_property(
-    _this: *mut c_void,
-    _prop_id: u32,
+    this: *mut c_void,
+    prop_id: u32,
     value: *mut PropVariant,
 ) -> i32 {
     if value.is_null() {
         return E_INVALIDARG;
     }
     unsafe { *value = PropVariant::empty() };
+    let callback = unsafe { &*open_volume_base(this) };
+    unsafe {
+        *value = match prop_id {
+            KPID_NAME => PropVariant::bstr(
+                &callback
+                    .archive_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+            ),
+            KPID_IS_DIR => PropVariant::bool_value(false),
+            KPID_SIZE => match fs::metadata(&callback.archive_path) {
+                Ok(metadata) => PropVariant::u64_value(metadata.len()),
+                Err(_) => return E_FAIL,
+            },
+            _ => PropVariant::empty(),
+        };
+    }
     S_OK
 }
 
 unsafe extern "system" fn open_get_stream(
-    _this: *mut c_void,
-    _name: *const u16,
+    this: *mut c_void,
+    name: *const u16,
     out: *mut *mut c_void,
 ) -> i32 {
     if out.is_null() {
         return E_INVALIDARG;
     }
     unsafe { *out = ptr::null_mut() };
-    S_OK
+    if name.is_null() {
+        return E_INVALIDARG;
+    }
+    let callback = unsafe { &*open_volume_base(this) };
+    if callback.cancel.is_cancelled() {
+        return E_ABORT;
+    }
+    let mut length = 0;
+    while length < MAX_ARCHIVE_PATH_UNITS && unsafe { *name.add(length) } != 0 {
+        length += 1;
+    }
+    if length == MAX_ARCHIVE_PATH_UNITS {
+        return E_INVALIDARG;
+    }
+    let name = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name, length) });
+    // Volume requests must stay alongside the archive, including on Windows
+    // where drive prefixes, alternate streams and backslashes are special.
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':']) {
+        return E_INVALIDARG;
+    }
+    let path = callback.archive_path.with_file_name(name);
+    match engine::open_input_stream(&path) {
+        Ok(mut stream) => {
+            // Transfer the sole reference to 7-Zip; Release frees this Box.
+            stream.refs = AtomicU32::new(1);
+            unsafe { *out = Box::into_raw(Box::new(stream)).cast() };
+            S_OK
+        }
+        Err(ArchiveError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            S_FALSE
+        }
+        Err(_) => E_FAIL,
+    }
 }
 
-unsafe extern "system" fn open_set_sub_archive_name(_this: *mut c_void, _name: *const u16) -> i32 {
-    S_OK
+unsafe fn open_volume_base(this: *mut c_void) -> *mut OpenCallback {
+    unsafe {
+        this.cast::<u8>()
+            .sub(mem::offset_of!(OpenCallback, volume_vtbl))
+            .cast()
+    }
+}
+
+unsafe extern "system" fn open_volume_query_interface(
+    this: *mut c_void,
+    iid: *const Guid,
+    out: *mut *mut c_void,
+) -> i32 {
+    unsafe { open_query_interface(open_volume_base(this).cast(), iid, out) }
+}
+
+unsafe extern "system" fn open_volume_add_ref(this: *mut c_void) -> u32 {
+    unsafe { open_callback_add_ref(open_volume_base(this).cast()) }
+}
+
+unsafe extern "system" fn open_volume_release(this: *mut c_void) -> u32 {
+    unsafe { open_callback_release(open_volume_base(this).cast()) }
 }
 
 unsafe extern "system" fn crypto_query_interface(
