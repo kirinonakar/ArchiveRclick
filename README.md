@@ -26,8 +26,9 @@ and libarchive for broader archive-format support.
   level and CPU threads. Password protection is supported; 7z can also encrypt
   file names (headers).
 - Create split ZIP/7z archives from the create dialog with volume-size presets
-  ranging from 10 MB to 92.4 GB. Parts are written as `.zip.001` or `.7z.001`
-  sequences; open the first part to browse or extract the complete archive.
+  ranging from 10 MB to 92.4 GB, or enter a custom size such as 30 MB or 1 GB.
+  Parts are written as `.zip.001` or `.7z.001` sequences; open the first part
+  to browse or extract the complete archive.
 - Drag selected entries from the archive to Explorer. Drop a single archive onto
   the window to open it, or drop multiple files/a folder to prepare a new archive.
 - Optional Explorer right-click commands for extraction, one-archive creation,

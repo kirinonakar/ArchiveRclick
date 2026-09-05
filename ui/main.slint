@@ -765,7 +765,7 @@ export component AppWindow inherits Window {
     callback prepare-create-requested();
     callback choose-create-files-requested();
     callback choose-create-folder-requested();
-    callback create-requested(int, int, int, int, string, string, bool);
+    callback create-requested(int, int, int, int, string, string, string, bool);
     callback test-requested();
     callback cancel-requested();
     callback conflict-response(int);
@@ -1221,9 +1221,9 @@ export component AppWindow inherits Window {
         header-encryption-default: root.create-header-encryption;
         choose-files => { root.choose-create-files-requested(); }
         choose-folder => { root.choose-create-folder-requested(); }
-        accepted(format-index, level, thread-index, volume-index, password, password-confirmation, encrypt-headers) => {
+        accepted(format-index, level, thread-index, volume-index, volume-custom, password, password-confirmation, encrypt-headers) => {
             root.create-visible = false;
-            root.create-requested(format-index, level, thread-index, volume-index, password, password-confirmation, encrypt-headers);
+            root.create-requested(format-index, level, thread-index, volume-index, volume-custom, password, password-confirmation, encrypt-headers);
         }
         cancelled => { root.create-visible = false; }
     }

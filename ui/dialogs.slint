@@ -137,9 +137,11 @@ export component CreateOverlay inherits Rectangle {
 
     private property <int> thread-index: root.thread-selection;
     private property <int> volume-index: root.volume-selection;
+    private property <string> volume-custom-label:
+        root.language-index == 1 ? "사용자 지정…" : root.language-index == 2 ? "カスタム…" : "Custom…";
     private property <string> password-error: "";
 
-    callback accepted(int, int, int, int, string, string, bool);
+    callback accepted(int, int, int, int, string, string, string, bool);
     callback cancelled();
     callback choose-files();
     callback choose-folder();
@@ -152,7 +154,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: 380px;
+        height: volume-custom-row.visible ? 416px : 380px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -267,12 +269,29 @@ export component CreateOverlay inherits Rectangle {
                     horizontal-stretch: 1;
                     enabled: format.current-value == "ZIP" || format.current-value == "7z";
                     model: root.language-index == 1
-                        ? ["분할 안 함", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB"]
+                        ? ["분할 안 함", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB", root.volume-custom-label]
                         : root.language-index == 2
-                            ? ["分割しない", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB"]
-                            : ["Do not split", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB"];
+                            ? ["分割しない", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB", root.volume-custom-label]
+                            : ["Do not split", "10 MB", "50 MB", "100 MB", "300 MB", "650 MB", "1 GB", "4 GB", "23 GB", "92.4 GB", root.volume-custom-label];
                     current-index: root.volume-index;
                     changed current-index => { root.volume-index = self.current-index; }
+                }
+            }
+
+            volume-custom-row := HorizontalLayout {
+                visible: (format.current-value == "ZIP" || format.current-value == "7z")
+                    && volume-picker.current-value == root.volume-custom-label;
+                spacing: 8px;
+
+                Rectangle { width: 150px; }
+
+                volume-custom := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: root.language-index == 1
+                        ? "예: 30MB, 1.5GB, 500KB"
+                        : root.language-index == 2
+                            ? "例: 30MB, 1.5GB, 500KB"
+                            : "e.g. 30MB, 1.5GB, 500KB";
                 }
             }
 
@@ -377,6 +396,7 @@ export component CreateOverlay inherits Rectangle {
                             level.value,
                             root.thread-index,
                             root.volume-index,
+                            volume-custom.text,
                             password.text,
                             password-confirmation.text,
                             header-encryption.checked && format.current-value == "7z" && password.text != ""

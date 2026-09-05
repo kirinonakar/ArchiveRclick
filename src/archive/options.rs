@@ -214,6 +214,50 @@ impl VolumeSizePreset {
     }
 }
 
+/// UI index of the trailing "custom" split-size entry in the create dialog
+/// model; the dialog appends it after every preset entry.
+pub const VOLUME_CUSTOM_UI_INDEX: i32 = VolumeSizePreset::ALL.len() as i32;
+
+/// Smallest split volume the 7z backend accepts for multi-volume output.
+const MINIMUM_VOLUME_SIZE: f64 = 1024.0;
+
+/// Largest accepted split volume (1 PiB).
+const MAXIMUM_VOLUME_SIZE: f64 = 1125899906842624.0;
+
+/// Parses a free-form split size such as `"30MB"`, `"1GB"`, `"1.5GiB"`, or
+/// `"1048576"`.  Units use the same binary multiples as 7-Zip's volume-size
+/// input (1 GB = 1024^3 bytes), and a plain number is treated as bytes.
+/// Returns `None` when the text is not a size between 1 KiB and 1 PiB.
+pub fn parse_volume_size(input: &str) -> Option<u64> {
+    let text = input.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let number_end = text
+        .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .unwrap_or(text.len());
+    let value: f64 = text[..number_end].parse().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let multiplier = match text[number_end..].trim().to_ascii_lowercase().as_str() {
+        "" | "b" | "bytes" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+
+    let bytes = value * multiplier;
+    if bytes < MINIMUM_VOLUME_SIZE || bytes > MAXIMUM_VOLUME_SIZE {
+        return None;
+    }
+    Some(bytes.round() as u64)
+}
+
 impl ThreadCount {
     pub const ALL: [Self; 7] = [
         Self::Auto,
@@ -340,6 +384,7 @@ impl Default for CreateOptions {
 #[cfg(test)]
 mod tests {
     use super::{CreateOptions, ExtractOptions, VolumeSizePreset};
+    use super::{VOLUME_CUSTOM_UI_INDEX, parse_volume_size};
 
     #[test]
     fn create_options_default_to_normal_compression() {
@@ -392,5 +437,33 @@ mod tests {
             assert_eq!(preset.bytes(), expected_bytes);
             assert_eq!(preset.ui_index(), index as i32);
         }
+    }
+
+    #[test]
+    fn parses_custom_volume_sizes_with_binary_units() {
+        assert_eq!(parse_volume_size("30MB"), Some(30 * 1024 * 1024));
+        assert_eq!(parse_volume_size("1GB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_volume_size("1.5GiB"), Some(1_610_612_736));
+        assert_eq!(parse_volume_size("500KB"), Some(500 * 1024));
+        assert_eq!(parse_volume_size("30 mb"), Some(30 * 1024 * 1024));
+        assert_eq!(parse_volume_size("  2T "), Some(2 * 1024 * 1024 * 1024 * 1024));
+        assert_eq!(parse_volume_size("1048576"), Some(1048576));
+
+        assert_eq!(parse_volume_size(""), None);
+        assert_eq!(parse_volume_size("0"), None);
+        // A bare number is bytes, so this falls below the 1 KiB minimum.
+        assert_eq!(parse_volume_size("30"), None);
+        assert_eq!(parse_volume_size("-5MB"), None);
+        assert_eq!(parse_volume_size("30XB"), None);
+        assert_eq!(parse_volume_size("1PB"), None);
+    }
+
+    #[test]
+    fn custom_volume_ui_index_follows_the_preset_count() {
+        assert_eq!(VOLUME_CUSTOM_UI_INDEX, VolumeSizePreset::ALL.len() as i32);
+        assert_eq!(
+            VolumeSizePreset::from_ui_index(VOLUME_CUSTOM_UI_INDEX),
+            VolumeSizePreset::None
+        );
     }
 }

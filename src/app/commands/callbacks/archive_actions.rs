@@ -125,6 +125,7 @@ pub(super) fn wire(
                   level,
                   thread_index,
                   volume_index,
+                  volume_custom,
                   password,
                   password_confirmation,
                   encrypt_headers| {
@@ -160,9 +161,27 @@ pub(super) fn wire(
                             return;
                         }
                     };
-                let split_size = matches!(format, CreateFormat::Zip | CreateFormat::SevenZip)
-                    .then(|| VolumeSizePreset::from_ui_index(volume_index).bytes())
-                    .flatten();
+                let supports_split = matches!(format, CreateFormat::Zip | CreateFormat::SevenZip);
+                let split_size = if !supports_split {
+                    None
+                } else if volume_index == VOLUME_CUSTOM_UI_INDEX {
+                    match parse_volume_size(volume_custom.as_str()) {
+                        Some(size) => Some(size),
+                        None => {
+                            let message = if volume_custom.trim().is_empty() {
+                                "Enter a split size, for example 30MB or 1.5GB".to_owned()
+                            } else {
+                                format!(
+                                    "Invalid split size \"{volume_custom}\". Use values like 30MB, 500KB, or 1.5GB"
+                                )
+                            };
+                            show_ui_error(&weak, "Create archive", message);
+                            return;
+                        }
+                    }
+                } else {
+                    VolumeSizePreset::from_ui_index(volume_index).bytes()
+                };
                 let options = CreateOptions {
                     format,
                     compression_level: level.clamp(0, 9) as u8,
