@@ -4,19 +4,20 @@
 mod imp {
     use std::ffi::{OsStr, OsString};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use slint::winit_030::WinitWindowAccessor;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
         CoInitializeEx, CoTaskMemFree, CoUninitialize,
     };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::Shell::{
         FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
         FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
-        IFileOpenDialog, IFileSaveDialog, IShellItem, SIGDN_FILESYSPATH, ShellExecuteW,
+        IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName,
+        SIGDN_FILESYSPATH, ShellExecuteW,
     };
-    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_SHOWNORMAL,
     };
@@ -177,7 +178,11 @@ mod imp {
         item_path(&item).map(Some)
     }
 
-    pub fn save_archive(default_name: &str, extension: &str) -> Result<Option<PathBuf>, String> {
+    pub fn save_archive(
+        default_name: &str,
+        extension: &str,
+        default_folder: &Path,
+    ) -> Result<Option<PathBuf>, String> {
         let default_name = dialog_text(default_name, "Default file name")?;
         let extension = extension.trim_start_matches('.');
         if extension.is_empty() || extension.contains(['/', '\\']) {
@@ -208,6 +213,14 @@ mod imp {
             .map_err(|error| format!("Could not set the default archive name: {error}"))?;
         unsafe { dialog.SetDefaultExtension(&extension) }
             .map_err(|error| format!("Could not set the default archive extension: {error}"))?;
+
+        let folder = std::path::absolute(default_folder)
+            .map_err(|error| format!("Could not resolve the archive folder: {error}"))?;
+        let folder = HSTRING::from(folder.as_os_str());
+        let folder_item: IShellItem = unsafe { SHCreateItemFromParsingName(&folder, None) }
+            .map_err(|error| format!("Could not open the archive folder: {error}"))?;
+        unsafe { dialog.SetFolder(&folder_item) }
+            .map_err(|error| format!("Could not set the archive folder: {error}"))?;
 
         if !show_dialog(unsafe { dialog.Show(None) }, "show the save dialog")? {
             return Ok(None);
@@ -461,7 +474,11 @@ mod imp {
         Err(unsupported("The native folder picker"))
     }
 
-    pub fn save_archive(_default_name: &str, _extension: &str) -> Result<Option<PathBuf>, String> {
+    pub fn save_archive(
+        _default_name: &str,
+        _extension: &str,
+        _default_folder: &std::path::Path,
+    ) -> Result<Option<PathBuf>, String> {
         Err(unsupported("The native save dialog"))
     }
 

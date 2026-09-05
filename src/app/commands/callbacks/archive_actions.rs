@@ -152,8 +152,9 @@ pub(super) fn wire(
                     return;
                 };
                 let default_name = default_archive_name(&sources, format);
+                let default_folder = sources[0].parent().unwrap_or(&sources[0]);
                 let destination =
-                    match platform::save_archive(&default_name, format.default_extension()) {
+                    match platform::save_archive(&default_name, format.default_extension(), default_folder) {
                         Ok(Some(path)) => path,
                         Ok(None) => return,
                         Err(error) => {

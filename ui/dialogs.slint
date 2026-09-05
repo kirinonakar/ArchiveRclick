@@ -136,6 +136,10 @@ export component CreateOverlay inherits Rectangle {
 
     private property <int> thread-index: root.thread-selection;
     private property <int> volume-index: root.volume-selection;
+    private property <string> volume-custom-text;
+    private property <bool> show-volume-custom:
+        (format.current-value == "ZIP" || format.current-value == "7z")
+        && volume-picker.current-value == root.volume-custom-label;
     private property <string> volume-custom-label:
         root.language-index == 1 ? "사용자 지정…" : root.language-index == 2 ? "カスタム…" : "Custom…";
     private property <string> password-error: "";
@@ -153,7 +157,7 @@ export component CreateOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 420px;
-        height: volume-custom-row.visible ? 376px : 340px;
+        height: root.show-volume-custom ? 376px : 340px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -264,14 +268,13 @@ export component CreateOverlay inherits Rectangle {
                 }
             }
 
-            volume-custom-row := HorizontalLayout {
-                visible: (format.current-value == "ZIP" || format.current-value == "7z")
-                    && volume-picker.current-value == root.volume-custom-label;
+            if root.show-volume-custom: HorizontalLayout {
                 spacing: 8px;
 
                 Rectangle { width: 150px; }
 
-                volume-custom := LineEdit {
+                LineEdit {
+                    text <=> root.volume-custom-text;
                     horizontal-stretch: 1;
                     placeholder-text: root.language-index == 1
                         ? "예: 30MB, 1.5GB, 500KB"
@@ -382,7 +385,7 @@ export component CreateOverlay inherits Rectangle {
                             level.value,
                             root.thread-index,
                             root.volume-index,
-                            volume-custom.text,
+                            root.volume-custom-text,
                             password.text,
                             password-confirmation.text,
                             header-encryption.checked && format.current-value == "7z" && password.text != ""
