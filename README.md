@@ -138,7 +138,7 @@ Rust dependency license metadata is listed in
 
 ### ZIP backend selection
 
-Settings > **ZIP backend** offers **7z** (default, existing engine), **zlib-ng**,
+Settings > **ZIP backend** offers **7z** (default), **zlib-ng**,
 and **zlib-rs**. The preference applies to GUI compression, Explorer compression,
 and CLI commands unless overridden with `-zip-backend=...`. The flate2 engines
 support file-level parallelism, CPU feature detection, AES-256 passwords and
