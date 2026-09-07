@@ -139,9 +139,9 @@ Rust dependency license metadata is listed in
 ### ZIP backend selection
 
 Settings > **ZIP backend** offers **7z** (default), **zlib-ng**,
-and **zlib-rs**. The preference applies to GUI compression, Explorer compression,
+and **zlib-rs**. The preference applies to GUI and Explorer ZIP compression/extraction,
 and CLI commands unless overridden with `-zip-backend=...`. The flate2 engines
-support file-level parallelism, CPU feature detection, AES-256 passwords and
+support grouped file-level parallelism, reusable codecs, CPU feature detection, AES-256 passwords and
 split ZIP output. See [CLI.md](CLI.md#zip-backends) for examples and resource limits.
 
 Building zlib-ng requires CMake and the Visual Studio C/C++ build tools in addition

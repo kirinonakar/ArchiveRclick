@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) enum RuntimeConflictPolicy {
+pub(crate) enum RuntimeConflictPolicy {
     Ask,
     OverwriteAll,
     SkipAll,
@@ -18,12 +18,12 @@ impl From<InitialConflictPolicy> for RuntimeConflictPolicy {
     }
 }
 
-pub(super) enum ConflictAction {
+pub(crate) enum ConflictAction {
     Overwrite,
     Skip,
 }
 
-pub(super) fn resolve_existing(
+pub(crate) fn resolve_existing(
     target: &Path,
     policy: &mut RuntimeConflictPolicy,
     resolver: &dyn ConflictResolver,
@@ -59,7 +59,7 @@ pub(super) fn resolve_existing(
     }
 }
 
-pub(super) fn prepare_directory(
+pub(crate) fn prepare_directory(
     root: &Path,
     target: &Path,
     policy: &mut RuntimeConflictPolicy,
@@ -94,7 +94,7 @@ pub(super) fn prepare_directory(
     Ok(ConflictAction::Overwrite)
 }
 
-pub(super) fn ensure_parent_directories(root: &Path, target: &Path) -> ArchiveResult<()> {
+pub(crate) fn ensure_parent_directories(root: &Path, target: &Path) -> ArchiveResult<()> {
     let parent = target
         .parent()
         .ok_or_else(|| ArchiveError::UnsafeEntryPath(target.display().to_string()))?;
@@ -104,7 +104,7 @@ pub(super) fn ensure_parent_directories(root: &Path, target: &Path) -> ArchiveRe
     verify_directory_handle(root, parent)
 }
 
-pub(super) fn verification_handle(path: &Path) -> ArchiveResult<File> {
+pub(crate) fn verification_handle(path: &Path) -> ArchiveResult<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
@@ -112,7 +112,7 @@ pub(super) fn verification_handle(path: &Path) -> ArchiveResult<File> {
         .map_err(|error| ArchiveError::io(path, error))
 }
 
-pub(super) fn final_path_by_handle(file: &File, subject: &Path) -> ArchiveResult<PathBuf> {
+pub(crate) fn final_path_by_handle(file: &File, subject: &Path) -> ArchiveResult<PathBuf> {
     let mut buffer = vec![0u16; 512];
     loop {
         // SAFETY: `file` owns a live Windows handle and `buffer` is writable
@@ -145,7 +145,7 @@ pub(super) fn final_path_by_handle(file: &File, subject: &Path) -> ArchiveResult
     }
 }
 
-pub(super) fn path_is_within_case_insensitive(candidate: &Path, root: &Path) -> bool {
+pub(crate) fn path_is_within_case_insensitive(candidate: &Path, root: &Path) -> bool {
     let mut candidate = candidate.components();
     root.components().all(|root_component| {
         candidate.next().is_some_and(|component| {
@@ -157,7 +157,7 @@ pub(super) fn path_is_within_case_insensitive(candidate: &Path, root: &Path) -> 
     })
 }
 
-pub(super) fn verified_root_final_path(root: &Path) -> ArchiveResult<PathBuf> {
+pub(crate) fn verified_root_final_path(root: &Path) -> ArchiveResult<PathBuf> {
     let metadata = fs::symlink_metadata(root).map_err(|error| ArchiveError::io(root, error))?;
     if is_reparse(&metadata) {
         return Err(ArchiveError::ReparsePoint(root.to_path_buf()));
@@ -166,7 +166,7 @@ pub(super) fn verified_root_final_path(root: &Path) -> ArchiveResult<PathBuf> {
     final_path_by_handle(&handle, root)
 }
 
-pub(super) fn verify_directory_handle(root: &Path, directory: &Path) -> ArchiveResult<()> {
+pub(crate) fn verify_directory_handle(root: &Path, directory: &Path) -> ArchiveResult<()> {
     let root_final = verified_root_final_path(root)?;
     let metadata =
         fs::symlink_metadata(directory).map_err(|error| ArchiveError::io(directory, error))?;
@@ -191,7 +191,7 @@ pub(super) fn verify_directory_handle(root: &Path, directory: &Path) -> ArchiveR
     }
 }
 
-pub(super) fn verify_file_handle_within_root(
+pub(crate) fn verify_file_handle_within_root(
     root: &Path,
     file: &File,
     subject: &Path,
@@ -209,32 +209,32 @@ pub(super) fn verify_file_handle_within_root(
     }
 }
 
-pub(super) static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct TemporaryPath {
-    pub(super) path: PathBuf,
-    pub(super) file: Option<File>,
-    pub(super) armed: bool,
+pub(crate) struct TemporaryPath {
+    pub(crate) path: PathBuf,
+    pub(crate) file: Option<File>,
+    pub(crate) armed: bool,
 }
 
 impl TemporaryPath {
-    pub(super) fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         self.file
             .as_ref()
             .expect("temporary file handle is still open")
     }
 
-    pub(super) fn file_mut(&mut self) -> &mut File {
+    pub(crate) fn file_mut(&mut self) -> &mut File {
         self.file
             .as_mut()
             .expect("temporary file handle is still open")
     }
 
-    pub(super) fn close_file(&mut self) {
+    pub(crate) fn close_file(&mut self) {
         drop(self.file.take());
     }
 
-    pub(super) fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -248,7 +248,7 @@ impl Drop for TemporaryPath {
     }
 }
 
-pub(super) fn temporary_file(directory: &Path) -> ArchiveResult<TemporaryPath> {
+pub(crate) fn temporary_file(directory: &Path) -> ArchiveResult<TemporaryPath> {
     for _ in 0..128 {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!(".archiverclick-{}-{id}.tmp", std::process::id()));
@@ -269,7 +269,7 @@ pub(super) fn temporary_file(directory: &Path) -> ArchiveResult<TemporaryPath> {
     ))
 }
 
-pub(super) fn install_temporary(root: &Path, temporary: &Path, target: &Path) -> ArchiveResult<()> {
+pub(crate) fn install_temporary(root: &Path, temporary: &Path, target: &Path) -> ArchiveResult<()> {
     ensure_no_reparse_ancestors(root, target)?;
     let target_parent = target
         .parent()

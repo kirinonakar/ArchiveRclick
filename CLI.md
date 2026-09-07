@@ -55,10 +55,10 @@ After installing the MSIX, you can call it from a terminal using the execution a
 
 ## ZIP backends
 
-`-zip-backend=7z|zlib-ng|zlib-rs` selects the ZIP creation engine for that command.
+`-zip-backend=7z|zlib-ng|zlib-rs` selects the ZIP creation/extraction engine for that command.
 An explicit value overrides the saved Settings > ZIP backend preference. When
 omitted, the saved preference is used; unset or unrecognized saved settings use
-`7z`. Other archive formats, listing, extraction, and integrity tests retain the
+`7z`. Other archive formats, listing, and integrity tests retain the
 existing engines. Invalid CLI backend names return exit code 7.
 
 - `7z` (default): the existing native engine and compression behavior.
@@ -70,10 +70,12 @@ passwords (ASCII, matching the native ZIP writer), ZIP64, Unicode names, empty d
 split-volume convention. They use runtime CPU feature detection for SIMD and
 checksum acceleration; no `target-cpu=native` or GPU is required.
 
-`-mmt=on|off|N` controls file-level parallel compression for these backends.
+`-mmt=on|off|N` controls file-level parallel compression and extraction for these backends.
 The worker count is limited to the number of entries and 32 to bound memory.
 Small inputs below 256 KiB and single-worker jobs write directly to the archive.
-Parallel jobs retain up to 8 MiB of compressed data per worker in memory and spill
+Compression groups up to 256 entries per job and reuses each worker’s codec
+allocations between independent ZIP members. Parallel jobs retain up to 8 MiB
+of compressed data per worker in memory and spill
 larger entries to temporary disk on the destination drive. One large file uses
 one codec stream. Temporary disk space must accommodate outstanding compressed
 entries in addition to the final output. Runtime speed and compression ratio
@@ -82,3 +84,17 @@ vary by CPU, data, level, and storage device.
 ZIP passwords containing non-ASCII characters are rejected before writing: the
 bundled Windows 7-Zip reader uses a different password encoding from UTF-8 ZIP
 writers. Use the 7z archive format for Unicode passwords.
+
+```powershell
+.\archive-rclick-cli.exe x backup.zip -zip-backend=zlib-ng -mmt=4 -ooutput -y
+.\archive-rclick-cli.exe e backup.zip -zip-backend=zlib-rs -ooutput -y
+```
+
+The selected flate2 backend decodes ZIP STORE/DEFLATE entries, including AES,
+ZIP64 and numbered split streams. Other ZIP methods (such as Deflate64 or BZip2)
+use the existing native engine; this is detected before any files are written.
+Extraction shares the central directory and read-only file handles across workers,
+keeps per-reader offsets independent, and validates CRC/authentication before
+replacing each destination. Selection, legacy filename code pages, size limits,
+conflicts and cancellation remain supported. Colliding flattened paths are
+processed sequentially to preserve archive order.

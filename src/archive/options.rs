@@ -39,6 +39,8 @@ impl ExtractSelection {
 
 #[derive(Clone)]
 pub struct ExtractOptions {
+    pub zip_backend: ZipBackend,
+    pub threads: ThreadCount,
     /// Extract files directly into the destination (7-Zip's `e` command).
     pub flatten_paths: bool,
     pub selection: ExtractSelection,
@@ -60,6 +62,8 @@ impl fmt::Debug for ExtractOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtractOptions")
+            .field("zip_backend", &self.zip_backend)
+            .field("threads", &self.threads)
             .field("flatten_paths", &self.flatten_paths)
             .field("selection", &self.selection)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -77,6 +81,8 @@ impl fmt::Debug for ExtractOptions {
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
+            zip_backend: ZipBackend::SevenZip,
+            threads: ThreadCount::Auto,
             flatten_paths: false,
             selection: ExtractSelection::All,
             password: None,
@@ -141,7 +147,7 @@ impl CreateFormat {
     }
 }
 
-/// ZIP creation backend. Reading and extraction keep the existing engines.
+/// ZIP creation and DEFLATE extraction backend. Listing keeps the native engine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ZipBackend {
     #[default]
@@ -178,7 +184,7 @@ impl ZipBackend {
     }
 }
 
-/// CPU thread count used by the 7z backend when it compresses LZMA2.
+/// Codec/worker count for archive creation and ZIP extraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCount {
     Exact(u32),

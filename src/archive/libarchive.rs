@@ -14,3 +14,6 @@ mod platform_impl;
 mod platform_impl;
 
 pub use platform_impl::{LibArchiveEngine, load};
+
+#[cfg(windows)]
+pub(crate) use platform_impl::output;

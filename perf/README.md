@@ -39,3 +39,9 @@ read by Python's independent ZIP reader and checked against source SHA-256
 hashes. JSON contains raw timings, medians, archive sizes, and platform details
 under `perf/results/zip-backends-*`. Measurements include CLI startup and file
 I/O, use warm caches, and are not a general CPU or compression ranking.
+
+Add `--extract` to time and SHA-256-verify extraction with the same selected
+backend, or `--case small-files` to focus on scheduling/allocation overhead.
+Keep a baseline CLI and its runtime DLLs and pass `--cli <baseline-path>` to run
+the same deterministic fixtures against the previous implementation. Benchmark
+without builds or other disk-heavy jobs running in parallel.

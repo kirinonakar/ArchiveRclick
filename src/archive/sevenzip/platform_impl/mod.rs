@@ -93,6 +93,7 @@ mod engine;
 pub use engine::SevenZipEngine;
 
 mod zip_flate;
+mod zip_extract;
 
 mod composite;
 pub use composite::CompositeEngine;

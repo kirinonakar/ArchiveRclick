@@ -1,9 +1,12 @@
 /// Configuration for reading ZIP archives.
-#[repr(transparent)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Config {
     /// An offset into the reader to use to find the start of the archive.
     pub archive_offset: ArchiveOffset,
+    /// Maximum central-directory entry count before allocation. None is unlimited.
+    pub max_entries: Option<usize>,
+    /// Maximum cumulative central-directory bytes. None is unlimited.
+    pub max_metadata_bytes: Option<u64>,
 }
 
 /// The offset of the start of the archive from the beginning of the reader.

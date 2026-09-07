@@ -97,6 +97,12 @@ impl ArchiveEngine for CompositeEngine {
         conflicts: &dyn ConflictResolver,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
+        if options.zip_backend != crate::archive::ZipBackend::SevenZip
+            && archive_format(archive).is_some_and(|format| format.is_zip())
+            && let Some(summary) = super::zip_extract::extract(archive, destination, options, progress, conflicts, cancel)?
+        {
+            return Ok(summary);
+        }
         if let Some(sevenzip) = &self.sevenzip {
             if archive_format(archive).is_some_and(|format| sevenzip.can_read_format(format)) {
                 return sevenzip.extract(

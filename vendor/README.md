@@ -11,7 +11,7 @@
 Cargo features are additive. Enabling `zlib-ng` and `zlib-rs` on the same flate2
 package selects the C implementation for both callers; dependency aliases do not
 isolate features. Distinct package identities let both implementations coexist
-without global or thread-local mutable backend state. Do not replace this with
+without global or thread-local backend selection. Do not replace this with
 two aliases of the same crates.io package or enable C backends on normal flate2.
 
 Upstream: https://github.com/rust-lang/flate2-rs and https://github.com/zip-rs/zip2
@@ -19,3 +19,16 @@ Licenses are retained in each directory. On upgrades, reapply only the documente
 manifest changes and writer extension and run the native ZIP roundtrip tests.
 The feature graph can be audited with `cargo tree -e features -i flate2` and
 `cargo tree -e features -i flate2-zlib-ng`.
+
+Additional ZIP changes:
+
+- `pooled_deflate.rs`: thread-local allocation caches (one context per backend),
+  reset between independent members. Uses flate2's public `Compress` APIs;
+  backend choice is explicit for every writer, never a global selector.
+- `read.rs`, `compression.rs`: per-entry `ZipReadOptions::zlib_ng` selects the
+  isolated decoder; `by_index_metadata` avoids payload seeks and decoder creation;
+  `has_unicode_name` preserves legacy-codepage decisions.
+- `read/config.rs`: optional metadata entry/byte limits bound allocations before
+  extraction. Defaults retain upstream behavior.
+
+Run `tests/zip_backends.rs` as well as `tests/sevenzip_roundtrip.rs` after upgrades.

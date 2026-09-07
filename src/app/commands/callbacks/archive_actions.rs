@@ -47,6 +47,8 @@ pub(super) fn wire(
                     .unwrap_or(0);
 
                 let options = ExtractOptions {
+                    zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
+                    threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
                     selection,
                     password: (!password.is_empty()).then(|| password.to_string()),
                     conflict_policy: match conflict_policy {

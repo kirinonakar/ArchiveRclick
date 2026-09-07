@@ -430,6 +430,7 @@ pub(crate) fn make_crypto_reader<'a, R: Read + ?Sized>(
 
 pub(crate) fn make_reader<R: Read + ?Sized>(
     compression_method: CompressionMethod,
+    zlib_ng: bool,
     uncompressed_size: u64,
     crc32: u32,
     reader: CryptoReader<'_, R>,
@@ -439,12 +440,13 @@ pub(crate) fn make_reader<R: Read + ?Sized>(
     #[cfg(not(feature = "legacy-zip"))]
     let flags = 0;
     Ok(ZipFileReader::Compressed(Box::new(Crc32Reader::new(
-        Decompressor::new(
-            io::BufReader::new(reader),
-            compression_method,
-            uncompressed_size,
-            flags,
-        )?,
+        if zlib_ng && compression_method == CompressionMethod::Deflated {
+            Decompressor::DeflatedNg(flate2_zlib_ng::bufread::DeflateDecoder::new(
+                io::BufReader::with_capacity(64 * 1024, reader),
+            ))
+        } else {
+            Decompressor::new(io::BufReader::with_capacity(64 * 1024, reader), compression_method, uncompressed_size, flags)?
+        },
         crc32,
         ae2_encrypted,
     ))))
@@ -607,6 +609,7 @@ impl<R> ZipArchive<R> {
             dir_start: central_start,
             config: Config {
                 archive_offset: ArchiveOffset::Known(initial_offset),
+                ..Config::default()
             },
             comment,
             zip64_comment,
@@ -744,6 +747,9 @@ impl<R: Read + Seek> ZipArchive<R> {
         config: Config,
         reader: &mut R,
     ) -> Result<zip_archive::SharedBuilder, ZipError> {
+        if config.max_entries.is_some_and(|max| dir_info.number_of_files > max) {
+            return unsupported_zip_error("ZIP metadata entry limit exceeded");
+        }
         // If the parsed number of files is greater than the offset then
         // something fishy is going on and we shouldn't trust number_of_files.
         let file_capacity = if dir_info.number_of_files > dir_info.directory_start as usize {
@@ -764,6 +770,11 @@ impl<R: Read + Seek> ZipArchive<R> {
         reader.seek(SeekFrom::Start(dir_info.directory_start))?;
         for _ in 0..dir_info.number_of_files {
             let file = central_header_to_zip_file(reader, &dir_info)?;
+            if config.max_metadata_bytes.is_some_and(|max| {
+                reader.stream_position().map_or(true, |pos| pos.saturating_sub(dir_info.directory_start) > max)
+            }) {
+                return unsupported_zip_error("ZIP metadata byte limit exceeded");
+            }
             files.push(file);
         }
 
@@ -1267,6 +1278,12 @@ impl<R: Read + Seek> ZipArchive<R> {
         })
     }
 
+    /// Borrow entry metadata without seeking to its payload or initializing a decoder.
+    pub fn by_index_metadata(&self, index: usize) -> ZipResult<ZipFile<'_, R>> {
+        let (_, data) = self.shared.files.get_index(index).ok_or(ZipError::FileNotFound)?;
+        Ok(ZipFile { data: Cow::Borrowed(data), reader: ZipFileReader::NoReader })
+    }
+
     /// Get a contained file by index with options.
     pub fn by_index_with_options(
         &mut self,
@@ -1302,6 +1319,7 @@ impl<R: Read + Seek> ZipArchive<R> {
             data: Cow::Borrowed(data),
             reader: make_reader(
                 data.compression_method,
+                options.zlib_ng,
                 data.uncompressed_size,
                 data.crc32,
                 crypto_reader,
@@ -1748,6 +1766,7 @@ pub trait HasZipMetadata {
 /// Options for reading a file from an archive.
 #[derive(Default)]
 pub struct ZipReadOptions<'a> {
+    zlib_ng: bool,
     /// The password to use when decrypting the file.  This is ignored if not required.
     password: Option<&'a [u8]>,
 
@@ -1761,6 +1780,9 @@ impl<'a> ZipReadOptions<'a> {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Select the isolated flate2 zlib-ng DEFLATE decoder for this entry.
+    pub fn zlib_ng(mut self, enabled: bool) -> Self { self.zlib_ng = enabled; self }
 
     /// Set the password, if any, to use.  Return for chaining.
     #[must_use]
@@ -1813,6 +1835,9 @@ impl<'a, R: Read + ?Sized> ZipFile<'a, R> {
     pub fn name_raw(&self) -> &[u8] {
         &self.get_metadata().file_name_raw
     }
+
+    /// Whether the decoded name is explicitly Unicode (including a Unicode path extra field).
+    pub fn has_unicode_name(&self) -> bool { self.get_metadata().is_utf8 }
 
     /// Get the name of the file in a sanitized form. It truncates the name to the first NULL byte,
     /// removes a leading '/' and removes '..' parts.
@@ -2200,6 +2225,7 @@ pub fn read_zipfile_from_stream<R: Read>(reader: &mut R) -> ZipResult<Option<Zip
         data: Cow::Owned(result),
         reader: make_reader(
             compression_method,
+            false,
             uncompressed_size,
             crc32,
             crypto_reader,
@@ -2329,6 +2355,7 @@ pub fn read_zipfile_from_stream_with_compressed_size<R: io::Read>(
         data: Cow::Owned(result),
         reader: make_reader(
             compression_method,
+            false,
             uncompressed_size,
             crc32,
             crypto_reader,

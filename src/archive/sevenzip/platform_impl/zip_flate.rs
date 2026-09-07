@@ -127,15 +127,10 @@ fn write_item<W: Write + Seek>(
     if let Some(password) = options.password.as_deref().filter(|p| !p.is_empty()) {
         entry_options = entry_options.with_aes_encryption(zip::AesMode::Aes256, password);
     }
-    // Do not follow a source that became a reparse point after enumeration.
-    let metadata = fs::symlink_metadata(&item.source)
-        .map_err(|error| ArchiveError::io(&item.source, error))?;
-    if is_reparse(&metadata) {
-        return Err(ArchiveError::ReparsePoint(item.source.clone()));
-    }
+    // Open the link itself if a source changed after enumeration; never follow it.
     let mut input = OpenOptions::new()
         .read(true)
-        .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+        .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN | 0x0020_0000) // FILE_FLAG_OPEN_REPARSE_POINT
         .open(&item.source)
         .map_err(|error| ArchiveError::io(&item.source, error))?;
     match options.zip_backend {
@@ -238,6 +233,24 @@ pub(super) fn create(
             .clamp(1, MAX_WORKERS)
             .min(items.len().max(1))
     };
+    // Amortize ZIP metadata, task scheduling, and merge costs across groups.
+    // Bound both input bytes and entry count so tiny-file workloads remain balanced.
+    let target_bytes = (total / workers as u64).clamp(256 * 1024, SPOOL_BYTES as u64);
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut group_bytes = 0;
+    for (index, item) in items.iter().enumerate() {
+        group_bytes += item.size;
+        if group_bytes >= target_bytes || index + 1 - start >= 256 {
+            groups.push(&items[start..=index]);
+            start = index + 1;
+            group_bytes = 0;
+        }
+    }
+    if start < items.len() {
+        groups.push(&items[start..]);
+    }
+    let workers = workers.min(groups.len().max(1));
     let result = (|| {
         let buffered = BufWriter::with_capacity(STREAM_BUFFER_SIZE, &mut output);
         let mut writer = ZipWriter::new(buffered);
@@ -253,16 +266,26 @@ pub(super) fn create(
                 .map_err(|e| ArchiveError::Worker(e.to_string()))?;
             // Fixed-size batches bound both outstanding spools and open files.
             // Merge in source order without recompression or decryption.
-            for batch in items.chunks(workers) {
+            for batch in groups.chunks(workers) {
                 check_cancel(cancel)?;
                 let results: Vec<ArchiveResult<SpooledTempFile>> = pool.install(|| {
                     batch
                         .par_iter()
-                        .map(|item| {
+                        .map(|group| {
                             let spool = tempfile::spooled_tempfile_in(SPOOL_BYTES, work.path());
                             let mut entry = ZipWriter::new(spool);
-                            let mut buffer = vec![0; stream_buffer_size(item.size)];
-                            write_item(&mut entry, item, options, &progress, cancel, &mut buffer)?;
+                            let max_size = group.iter().map(|item| item.size).max().unwrap_or(0);
+                            let mut buffer = vec![0; stream_buffer_size(max_size)];
+                            for item in *group {
+                                write_item(
+                                    &mut entry,
+                                    item,
+                                    options,
+                                    &progress,
+                                    cancel,
+                                    &mut buffer,
+                                )?;
+                            }
                             entry.finish().map_err(zip_error)
                         })
                         .collect()

@@ -41,7 +41,7 @@ use super::super::{
 
 mod api;
 mod engine;
-mod output;
+pub(crate) mod output;
 mod reader;
 mod source;
 mod util;

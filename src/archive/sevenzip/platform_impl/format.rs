@@ -248,9 +248,9 @@ const ZIP_EOCD_SIZE: usize = 22;
 const ZIP_MAX_COMMENT_SIZE: u64 = 65_535;
 
 pub(super) struct ZipNameRecord {
-    raw_name: Vec<u8>,
-    flags: u16,
-    unicode_name: Option<String>,
+    pub(super) raw_name: Vec<u8>,
+    pub(super) flags: u16,
+    pub(super) unicode_name: Option<String>,
 }
 
 struct ZipDirectoryLayout {
@@ -392,7 +392,7 @@ pub(super) fn read_zip_name_records(path: &Path) -> ArchiveResult<Option<Vec<Zip
         .map_or(Ok(None), |records| Ok(Some(records)))
 }
 
-fn decode_zip_name(record: &ZipNameRecord, codepage: u32) -> Option<String> {
+pub(super) fn decode_zip_name(record: &ZipNameRecord, codepage: u32) -> Option<String> {
     if let Some(unicode_name) = &record.unicode_name {
         return Some(unicode_name.clone());
     }

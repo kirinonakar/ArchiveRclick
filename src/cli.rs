@@ -24,8 +24,8 @@ Switches:
   -o{directory}       Extraction directory (default: current directory)
   -p{password}        Archive password (-p prompts for a password)
   -mx=0..9           Compression level (default: 5)
-  -zip-backend=7z|zlib-ng|zlib-rs  ZIP backend (default: saved setting or 7z)
-  -mmt=on|off|N      Compression threads
+  -zip-backend=7z|zlib-ng|zlib-rs  ZIP create/extract backend (default: saved setting or 7z)
+  -mmt=on|off|N      Compression / flate2 ZIP extraction threads
   -mhe=on|off        Encrypt 7z headers
   -v{size}           Split ZIP/7z, e.g. -v100m or -v1g
   -y / -aoa          Overwrite existing extracted files
@@ -97,7 +97,10 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
             format: CreateFormat::SevenZip,
             ..Default::default()
         },
-        extract: ExtractOptions::default(),
+        extract: ExtractOptions {
+            zip_backend: ZipBackend::from_registry_key(&archive_rclick_core::platform::load_zip_backend_preference()),
+            ..Default::default()
+        },
         recursive: false,
         technical: false,
         progress: true,
@@ -127,6 +130,7 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
                         "zlib-rs" => ZipBackend::ZlibRs,
                         _ => return Err(usage("ZIP backend must be 7z, zlib-ng, or zlib-rs")),
                     };
+                    args.extract.zip_backend = args.create.zip_backend;
                 }
                 _ if arg.starts_with("-mmt=") => {
                     args.create.threads = match &arg[5..] {
@@ -140,6 +144,7 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
                                 .ok_or_else(|| usage("-mmt requires on, off, or 1..1024"))?,
                         ),
                     };
+                    args.extract.threads = args.create.threads;
                 }
                 _ if arg.starts_with("-mx=") => {
                     args.create.compression_level = arg[4..]
@@ -541,6 +546,7 @@ mod zip_backend_tests {
             ])
             .unwrap();
             assert_eq!(args.create.zip_backend, backend);
+            assert_eq!(args.extract.zip_backend, backend);
         }
     }
 

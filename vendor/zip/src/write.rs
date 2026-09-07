@@ -1,6 +1,9 @@
 //! Writing a ZIP archive
 
 use crate::compression::CompressionMethod;
+#[path = "pooled_deflate.rs"]
+mod pooled_deflate;
+use pooled_deflate::PooledDeflater;
 use crate::extra_fields::UsedExtraField;
 use crate::extra_fields::Zip64ExtendedInformation;
 use crate::read::{Config, ZipArchive, ZipFile, parse_single_extra_field};
@@ -88,11 +91,11 @@ impl<W: Write> Write for MaybeEncrypted<W> {
 
 #[allow(clippy::large_enum_variant)]
 enum GenericZipWriter<W: Write + Seek> {
-    NgDeflater(flate2_zlib_ng::write::DeflateEncoder<MaybeEncrypted<W>>),
+    NgDeflater(PooledDeflater<MaybeEncrypted<W>>),
     Closed,
     Storer(MaybeEncrypted<W>),
     #[cfg(feature = "deflate-flate2")]
-    Deflater(flate2::write::DeflateEncoder<MaybeEncrypted<W>>),
+    Deflater(PooledDeflater<MaybeEncrypted<W>>),
     #[cfg(feature = "deflate-zopfli")]
     ZopfliDeflater(zopfli::DeflateEncoder<MaybeEncrypted<W>>),
     #[cfg(feature = "deflate-zopfli")]
@@ -1509,10 +1512,7 @@ impl<W: Write + Seek> ZipWriter<W> {
         self.start_entry(name, options, None)?;
         let result = self.inner.switch_to(Box::new(move |bare| {
             Ok(GenericZipWriter::NgDeflater(
-                flate2_zlib_ng::write::DeflateEncoder::new(
-                    bare,
-                    flate2_zlib_ng::Compression::new(level as u32),
-                ),
+                PooledDeflater::new(bare, level as u32, true),
             ))
         }));
         self.ok_or_abort_file(result)?;
@@ -2126,10 +2126,7 @@ impl<W: Write + Seek> GenericZipWriter<W> {
                 {
                     Ok(Box::new(move |bare| {
                         Ok(GenericZipWriter::Deflater(
-                            flate2::write::DeflateEncoder::new(
-                                bare,
-                                flate2::Compression::new(level),
-                            ),
+                            PooledDeflater::new(bare, level, false),
                         ))
                     }))
                 }

@@ -280,6 +280,7 @@ pub const SUPPORTED_COMPRESSION_METHODS: &[CompressionMethod] = &[
 ];
 
 pub(crate) enum Decompressor<R: io::BufRead> {
+    DeflatedNg(flate2_zlib_ng::bufread::DeflateDecoder<R>),
     Stored(R),
     #[cfg(feature = "deflate-flate2")]
     Deflated(flate2::bufread::DeflateDecoder<R>),
@@ -306,6 +307,7 @@ pub(crate) enum Decompressor<R: io::BufRead> {
 impl<R: io::BufRead> Debug for Decompressor<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DeflatedNg(_) => write!(f, "ZlibNgDecompressor"),
             Self::Stored(_) => write!(f, "StoredDecompressor"),
             #[cfg(feature = "deflate-flate2")]
             Self::Deflated(_) => write!(f, "DeflatedDecompressor"),
@@ -349,6 +351,7 @@ pub(crate) enum Ppmd<R: io::BufRead> {
 impl<R: io::BufRead> io::Read for Decompressor<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
+            Decompressor::DeflatedNg(r) => r.read(buf),
             Decompressor::Stored(r) => r.read(buf),
             #[cfg(feature = "deflate-flate2")]
             Decompressor::Deflated(r) => r.read(buf),
@@ -525,6 +528,7 @@ impl<R: io::BufRead> Decompressor<R> {
     #[allow(clippy::infallible_destructuring_match)]
     pub fn into_inner(self) -> io::Result<R> {
         let inner = match self {
+            Decompressor::DeflatedNg(r) => r.into_inner(),
             Decompressor::Stored(r) => r,
             #[cfg(feature = "deflate-flate2")]
             Decompressor::Deflated(r) => r.into_inner(),
