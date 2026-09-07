@@ -24,6 +24,7 @@ Switches:
   -o{directory}       Extraction directory (default: current directory)
   -p{password}        Archive password (-p prompts for a password)
   -mx=0..9           Compression level (default: 5)
+  -zip-backend=7z|zlib-ng|zlib-rs  ZIP backend (default: saved setting or 7z)
   -mmt=on|off|N      Compression threads
   -mhe=on|off        Encrypt 7z headers
   -v{size}           Split ZIP/7z, e.g. -v100m or -v1g
@@ -90,6 +91,9 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
         files: Vec::new(),
         create: CreateOptions {
             preserve_root: true,
+            zip_backend: ZipBackend::from_registry_key(
+                &archive_rclick_core::platform::load_zip_backend_preference(),
+            ),
             format: CreateFormat::SevenZip,
             ..Default::default()
         },
@@ -116,6 +120,14 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
                 "-sccUTF-8" => {}
                 "-mhe=on" => args.create.encrypt_headers = true,
                 "-mhe=off" => args.create.encrypt_headers = false,
+                _ if arg.starts_with("-zip-backend=") => {
+                    args.create.zip_backend = match &arg[13..] {
+                        "7z" => ZipBackend::SevenZip,
+                        "zlib-ng" => ZipBackend::ZlibNg,
+                        "zlib-rs" => ZipBackend::ZlibRs,
+                        _ => return Err(usage("ZIP backend must be 7z, zlib-ng, or zlib-rs")),
+                    };
+                }
                 _ if arg.starts_with("-mmt=") => {
                     args.create.threads = match &arg[5..] {
                         "on" => ThreadCount::Auto,
@@ -511,6 +523,39 @@ fn main() {
         Err((code, message)) => {
             eprintln!("\nERROR: {message}");
             std::process::exit(code);
+        }
+    }
+}
+
+#[cfg(test)]
+mod zip_backend_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_zip_backend_overrides_saved_preference() {
+        for backend in ZipBackend::ALL {
+            let args = parse(vec![
+                "a".into(),
+                "test.zip".into(),
+                format!("-zip-backend={}", backend.registry_key()),
+            ])
+            .unwrap();
+            assert_eq!(args.create.zip_backend, backend);
+        }
+    }
+
+    #[test]
+    fn invalid_zip_backend_is_a_command_line_error() {
+        for value in ["", "zlib", "ZLIB-NG", "unknown"] {
+            let error = parse(vec![
+                "a".into(),
+                "test.zip".into(),
+                format!("-zip-backend={value}"),
+            ])
+            .err()
+            .unwrap();
+            assert_eq!(error.0, 7);
+            assert!(error.1.contains("ZIP backend"));
         }
     }
 }

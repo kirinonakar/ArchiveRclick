@@ -122,3 +122,17 @@ The separately bundled libarchive, codec, 7-Zip, and Microsoft runtime files
 are documented in
 [`runtime/THIRD-PARTY-NOTICES.md`](runtime/THIRD-PARTY-NOTICES.md), with full
 native license texts in [`runtime/licenses/`](runtime/licenses/).
+
+## Additional ZIP compression components
+
+ZIP creation also statically links `zip` 8.2.0 (MIT), flate2 1.1.9
+(MIT OR Apache-2.0), `libz-ng-sys` 1.1.29 (MIT OR Apache-2.0) with zlib-ng
+(zlib license), and `zlib-rs` 0.6.7 (Zlib). The isolated flate2 package is named
+`flate2-zlib-ng`. The small local ZIP writer extension and package isolation are
+documented in `vendor/README.md`. Upstream license texts are retained in
+`vendor/zip`, `vendor/flate2-zlib-ng`, and the shipped runtime license folder.
+
+Supporting dependencies include RustCrypto AES, cipher, HMAC, PBKDF2 and SHA-1
+(MIT OR Apache-2.0), constant_time_eq (CC0-1.0 OR MIT-0 OR Apache-2.0), zeroize
+(Apache-2.0 OR MIT), time (MIT OR Apache-2.0), typed-path (MIT OR Apache-2.0),
+rayon (MIT OR Apache-2.0), and tempfile (MIT OR Apache-2.0).

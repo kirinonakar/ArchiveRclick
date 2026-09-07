@@ -19,3 +19,11 @@ Source and project information:
 - LZ4: <https://github.com/lz4/lz4>
 - Zstandard: <https://github.com/facebook/zstd>
 - 7-Zip: <https://www.7-zip.org/>
+
+## Statically linked ZIP backends
+
+ZIP creation additionally uses zip 8.2.0, flate2 1.1.9, libz-ng-sys 1.1.29
+(with zlib-ng), and zlib-rs 0.6.7. License texts are in `licenses/zip.txt`,
+`licenses/flate2-mit.txt`, `licenses/flate2-apache.txt`, `licenses/zlib-ng.txt`,
+and `licenses/zlib-rs.txt`. See the main THIRD-PARTY-LICENSES.md for supporting
+Rust dependencies and vendor/README.md in source distributions for local changes.

@@ -6,6 +6,9 @@ It works without installing `7z.exe`. Keep the DLL shipped with the executable i
 ```powershell
 .\archive-rclick-cli.exe a backup.7z .\my-folder -mx=5
 .\archive-rclick-cli.exe a backup.zip .\file1.txt .\file2.txt
+.\archive-rclick-cli.exe a fast.zip .\my-folder -zip-backend=zlib-ng -mmt=8
+.\archive-rclick-cli.exe a rust.zip .\my-folder -zip-backend=zlib-rs
+.\archive-rclick-cli.exe a original.zip .\my-folder -zip-backend=7z
 .\archive-rclick-cli.exe a secret.7z .\my-folder -pMyPassword -mhe=on
 .\archive-rclick-cli.exe a split.7z .\my-folder -v100m -mmt=8
 .\archive-rclick-cli.exe x backup.7z "-o.\output" -y
@@ -49,3 +52,33 @@ The GUI, `archive-rclick-cli.exe`, the shared DLLs, and this document are all in
 It uses the existing output path `dist\msix` and does not create a CLI-only deployment folder.
 You can run the package configuration files directly from `dist\msix\package`.
 After installing the MSIX, you can call it from a terminal using the execution alias `archive-rclick-cli.exe`.
+
+## ZIP backends
+
+`-zip-backend=7z|zlib-ng|zlib-rs` selects the ZIP creation engine for that command.
+An explicit value overrides the saved Settings > ZIP backend preference. When
+omitted, the saved preference is used; unset or unrecognized saved settings use
+`7z`. Other archive formats, listing, extraction, and integrity tests retain the
+existing engines. Invalid CLI backend names return exit code 7.
+
+- `7z` (default): the existing native engine and compression behavior.
+- `zlib-ng`: flate2 with its native `zlib-ng` backend, statically linked.
+- `zlib-rs`: flate2 with its Rust `zlib-rs` backend.
+
+Both flate2 choices support levels 0–9 (0 stores without compression), AES-256
+passwords (ASCII, matching the native ZIP writer), ZIP64, Unicode names, empty directories, and the existing numbered
+split-volume convention. They use runtime CPU feature detection for SIMD and
+checksum acceleration; no `target-cpu=native` or GPU is required.
+
+`-mmt=on|off|N` controls file-level parallel compression for these backends.
+The worker count is limited to the number of entries and 32 to bound memory.
+Small inputs below 256 KiB and single-worker jobs write directly to the archive.
+Parallel jobs retain up to 8 MiB of compressed data per worker in memory and spill
+larger entries to temporary disk on the destination drive. One large file uses
+one codec stream. Temporary disk space must accommodate outstanding compressed
+entries in addition to the final output. Runtime speed and compression ratio
+vary by CPU, data, level, and storage device.
+
+ZIP passwords containing non-ASCII characters are rejected before writing: the
+bundled Windows 7-Zip reader uses a different password encoding from UTF-8 ZIP
+writers. Use the 7z archive format for Unicode passwords.

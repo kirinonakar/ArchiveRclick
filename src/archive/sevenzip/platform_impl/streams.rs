@@ -644,6 +644,48 @@ impl VolumeOutput {
     }
 }
 
+// Standard I/O adapter shared by the flate2 ZIP writer and the native stream.
+impl std::io::Write for VolumeOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        VolumeOutput::write(self, bytes).map_err(|()| {
+            std::io::Error::other(
+                self.take_error()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "volume write failed".into()),
+            )
+        })?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        for part in &mut self.parts {
+            if let Some(file) = &mut part.file {
+                file.flush()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Seek for VolumeOutput {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let (offset, origin) = match from {
+            SeekFrom::Start(value) => (
+                i64::try_from(value).map_err(std::io::Error::other)?,
+                SEEK_SET,
+            ),
+            SeekFrom::Current(value) => (value, SEEK_CUR),
+            SeekFrom::End(value) => (value, SEEK_END),
+        };
+        VolumeOutput::seek(self, offset, origin).map_err(|()| {
+            std::io::Error::other(
+                self.take_error()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "volume seek failed".into()),
+            )
+        })
+    }
+}
+
 #[repr(C)]
 pub(super) struct VolumeOutStream {
     pub(super) vtbl: &'static OutStreamVtbl,

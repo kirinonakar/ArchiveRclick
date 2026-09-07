@@ -27,6 +27,11 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 thiserror = "2.0.18"
+# Isolate flate2 backends so Cargo feature unification cannot override selection.
+zip = { path = "vendor/zip", default-features = false, features = ["deflate-flate2-zlib-rs", "aes-crypto", "time"] }
+tempfile = "3.27"
+rayon = "1.12"
+time = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = [

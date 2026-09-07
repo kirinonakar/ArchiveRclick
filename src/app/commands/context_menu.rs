@@ -220,6 +220,7 @@ fn run_gui_create_to(args: &[OsString], format: CreateFormat) -> Result<(), Stri
     let destination = unique_path(&destination_folder.join(archive_name));
     let engine: Engine = load_engine()?;
     let options = CreateOptions {
+        zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
         format,
         threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         ..CreateOptions::default()
@@ -289,6 +290,7 @@ fn run_gui_create_each_to(args: &[OsString], format: CreateFormat) -> Result<(),
 
     let engine: Engine = load_engine()?;
     let options = CreateOptions {
+        zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
         format,
         threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         ..CreateOptions::default()
@@ -364,6 +366,7 @@ fn run_gui_create(
         .unwrap_or_else(|| unique_path(&cli_archive_destination(&sources, format)));
     let engine: Engine = load_engine()?;
     let options = CreateOptions {
+        zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
         format,
         threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         ..CreateOptions::default()
@@ -419,6 +422,7 @@ fn run_gui_create_each(
 
     let engine: Engine = load_engine()?;
     let options = CreateOptions {
+        zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
         format,
         threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         ..CreateOptions::default()

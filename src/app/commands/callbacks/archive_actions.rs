@@ -184,6 +184,7 @@ pub(super) fn wire(
                     VolumeSizePreset::from_ui_index(volume_index).bytes()
                 };
                 let options = CreateOptions {
+                    zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
                     preserve_root: false,
                     format,
                     compression_level: level.clamp(0, 9) as u8,

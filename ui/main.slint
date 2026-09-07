@@ -730,6 +730,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> font-options;
     in-out property <int> font-selection;
     in-out property <int> settings-thread-selection: 0;
+    in-out property <int> settings-zip-backend-selection: 0;
     in-out property <bool> settings-header-encryption: false;
     in-out property <bool> esc-close-main-window: false;
     in-out property <int> theme-selection: 0;
@@ -772,7 +773,7 @@ export component AppWindow inherits Window {
     callback dropped(data-transfer);
 
     callback settings-requested();
-    callback settings-applied(int, int, int, int, bool, bool);
+    callback settings-applied(int, int, int, int, int, bool, bool);
     callback main-window-close-requested();
     callback settings-cancelled();
     callback github-requested();
@@ -1236,6 +1237,7 @@ export component AppWindow inherits Window {
         font-options: root.font-options;
         font-selection: root.font-selection;
         thread-selection: root.settings-thread-selection;
+        zip-backend-selection: root.settings-zip-backend-selection;
         header-encryption: root.settings-header-encryption;
         theme-selection: root.theme-selection;
         esc-close-main-window: root.esc-close-main-window;
@@ -1252,9 +1254,9 @@ export component AppWindow inherits Window {
         open-github => { root.github-requested(); }
         open-third-party-notices => { root.third-party-notices-requested(); }
         open-third-party-licenses => { root.third-party-licenses-requested(); }
-        accepted(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window) => {
+        accepted(font-selection, thread-index, zip-backend-index, theme-index, language-index, header_encryption, esc_close_main_window) => {
             root.settings-visible = false;
-            root.settings-applied(font-selection, thread-index, theme-index, language-index, header_encryption, esc_close_main_window);
+            root.settings-applied(font-selection, thread-index, zip-backend-index, theme-index, language-index, header_encryption, esc_close_main_window);
             // The focused OK button is destroyed together with the overlay.
             // Restore focus explicitly so the main-window Escape binding keeps
             // receiving key events after settings are applied.

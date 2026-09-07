@@ -92,6 +92,8 @@ use source::collect_sources;
 mod engine;
 pub use engine::SevenZipEngine;
 
+mod zip_flate;
+
 mod composite;
 pub use composite::CompositeEngine;
 

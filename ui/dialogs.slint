@@ -401,6 +401,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <[string]> font-options;
     in property <int> font-selection;
     in property <int> thread-selection;
+    in property <int> zip-backend-selection;
     in property <bool> header-encryption: false;
     in property <int> theme-selection;
     in property <bool> esc-close-main-window: false;
@@ -414,12 +415,13 @@ export component SettingsOverlay inherits Rectangle {
     private property <int> active-tab: 0;
     private property <int> font-index: root.font-selection;
     private property <bool> header-encryption-value: root.header-encryption;
+    private property <int> zip-backend-index: root.zip-backend-selection;
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
     private property <int> selected-language: root.language-preference-selection;
     private property <bool> esc-close-main-window-value: root.esc-close-main-window;
 
-    callback accepted(int, int, int, int, bool, bool);
+    callback accepted(int, int, int, int, int, bool, bool);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
@@ -442,7 +444,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 460px;
-        height: 380px;
+        height: 420px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -551,7 +553,25 @@ export component SettingsOverlay inherits Rectangle {
                 HorizontalLayout {
                     spacing: 8px;
                     Text {
-                        text: root.language-selection == 1 ? "CPU 스레드 (7z)" : root.language-selection == 2 ? "CPU スレッド（7z）" : "CPU threads (7z)";
+                        text: root.language-selection == 1 ? "ZIP 백엔드" : root.language-selection == 2 ? "ZIP バックエンド" : "ZIP backend";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    zip-backend := ComboBox {
+                        height: 28px;
+                        horizontal-stretch: 1;
+                        model: ["7z", "zlib-ng", "zlib-rs"];
+                        current-index: root.zip-backend-index;
+                        changed current-index => { root.zip-backend-index = self.current-index; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.language-selection == 1 ? "CPU 스레드" : root.language-selection == 2 ? "CPU スレッド" : "CPU threads";
                         color: Palette.foreground;
                         font-weight: 600;
                         width: 150px;
@@ -809,7 +829,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(root.font-index, root.thread-index, root.theme-index, root.selected-language, root.header-encryption-value, root.esc-close-main-window-value); }
+                    clicked => { root.accepted(root.font-index, root.thread-index, root.zip-backend-index, root.theme-index, root.selected-language, root.header-encryption-value, root.esc-close-main-window-value); }
                 }
             }
         }

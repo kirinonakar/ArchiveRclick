@@ -135,3 +135,15 @@ Rust dependency license metadata is listed in
 - `src/app`: Slint state and command wiring.
 - `src/platform`: Windows dialogs, settings, file associations, and Explorer integration.
 - `ui`: Slint components.
+
+### ZIP backend selection
+
+Settings > **ZIP backend** offers **7z** (default, existing engine), **zlib-ng**,
+and **zlib-rs**. The preference applies to GUI compression, Explorer compression,
+and CLI commands unless overridden with `-zip-backend=...`. The flate2 engines
+support file-level parallelism, CPU feature detection, AES-256 passwords and
+split ZIP output. See [CLI.md](CLI.md#zip-backends) for examples and resource limits.
+
+Building zlib-ng requires CMake and the Visual Studio C/C++ build tools in addition
+to Rust. Release builds retain ThinLTO and one codegen unit. Build for the portable
+target CPU so runtime dispatch can choose instructions safely on each machine.

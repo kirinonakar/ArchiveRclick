@@ -121,6 +121,11 @@ impl ArchiveEngine for CompositeEngine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
+        if options.format == CreateFormat::Zip
+            && options.zip_backend != crate::archive::ZipBackend::SevenZip
+        {
+            return super::zip_flate::create(destination, files, options, progress, cancel);
+        }
         if options.format == CreateFormat::SevenZip
             || (options.format == CreateFormat::Zip
                 && self

@@ -24,3 +24,18 @@ development only, `-AllowUnsupportedRuntime` permits the Windows
 Generated fixtures, extracted data, and result JSON are ignored by Git. `Prepare`,
 `Engine`, and `App` modes are available when only one stage needs to be rerun.
 
+
+## ZIP backend comparison (CLI only)
+
+After `cargo build --release --locked`, run:
+
+```powershell
+python perf/compare_zip_backends.py --runs 3 --threads 4 --level 5
+```
+
+This compares `7z`, `zlib-ng`, and `zlib-rs` on text, incompressible data,
+and many small files, rotating backend order between runs. Every archive is
+read by Python's independent ZIP reader and checked against source SHA-256
+hashes. JSON contains raw timings, medians, archive sizes, and platform details
+under `perf/results/zip-backends-*`. Measurements include CLI startup and file
+I/O, use warm caches, and are not a general CPU or compression ranking.

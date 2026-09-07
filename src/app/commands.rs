@@ -22,7 +22,7 @@ use crate::{
     archive::{
         ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
         CreateFormat, CreateOptions, ExtractOptions, ExtractSelection, InitialConflictPolicy,
-        SevenZipEngine, ThreadCount, VOLUME_CUSTOM_UI_INDEX, VolumeSizePreset,
+        SevenZipEngine, ThreadCount, VOLUME_CUSTOM_UI_INDEX, VolumeSizePreset, ZipBackend,
         libarchive::LibArchiveEngine, parse_volume_size,
     },
     platform,

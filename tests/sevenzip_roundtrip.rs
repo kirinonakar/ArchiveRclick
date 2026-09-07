@@ -816,3 +816,209 @@ fn bundled_7z_create_handles_multiple_inputs_and_password() {
         b"standalone 7z\n"
     );
 }
+
+#[test]
+fn flate_zip_backends_roundtrip_through_native_sevenzip() {
+    use archive_rclick_core::archive::ZipBackend;
+    let engine = load_composite();
+    let reader = load_engine();
+    for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
+        // Single-stream, parallel encrypted, split encrypted, and STORE.
+        for (level, threads, password, split) in [
+            (1, 1, None, None),
+            (5, 1, Some("test-password"), None),
+            (5, 4, Some("test-password"), None),
+            (9, 4, Some("test-password"), Some(4096)),
+            (0, 4, None, Some(65536)),
+            (0, 4, Some("test-password"), None),
+        ] {
+            let work = Work::new();
+            let source = work.0.join("input");
+            fs::create_dir_all(source.join("빈 폴더")).unwrap();
+            let payload: Vec<u8> = (0..180_000u32)
+                .map(|n| ((n * 31 + n / 17) % 251) as u8)
+                .collect();
+            for name in ["한글.txt", "two.bin", "three.bin"] {
+                fs::write(source.join(name), &payload).unwrap();
+            }
+            fs::write(source.join("empty"), []).unwrap();
+            let destination = work.0.join("test.zip");
+            let options = CreateOptions {
+                zip_backend: backend,
+                compression_level: level,
+                threads: ThreadCount::Exact(threads),
+                password: password.map(str::to_owned),
+                split_size: split,
+                ..Default::default()
+            };
+            let summary = engine
+                .create(
+                    &destination,
+                    &[source],
+                    &options,
+                    &quiet,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            assert_eq!(summary.entries_processed, 4);
+            assert_eq!(summary.bytes_processed, payload.len() as u64 * 3);
+            let archive = if split.is_some() {
+                work.0.join("test.zip.001")
+            } else {
+                destination
+            };
+            reader
+                .test(&archive, password, &quiet, &CancellationToken::new())
+                .unwrap();
+            let extracted = work.0.join("extracted");
+            reader
+                .extract(
+                    &archive,
+                    &extracted,
+                    &ExtractOptions {
+                        password: password.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    &quiet,
+                    &Overwrite,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            for name in ["한글.txt", "two.bin", "three.bin"] {
+                assert_eq!(fs::read(extracted.join(name)).unwrap(), payload);
+            }
+            assert!(extracted.join("빈 폴더").is_dir());
+            assert_eq!(fs::metadata(extracted.join("empty")).unwrap().len(), 0);
+            assert!(!fs::read_dir(&work.0).unwrap().flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".archive-rclick-zip-")
+            }));
+        }
+    }
+}
+
+#[test]
+fn flate_zip_cancellation_preserves_existing_output() {
+    use archive_rclick_core::archive::ZipBackend;
+    for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
+        let work = Work::new();
+        let source = work.0.join("source.bin");
+        fs::write(&source, vec![42; 2 * 1024 * 1024]).unwrap();
+        let destination = work.0.join("output.zip");
+        fs::write(&destination, b"keep original").unwrap();
+        let cancel = CancellationToken::new();
+        let progress = |snapshot: ProgressSnapshot| {
+            if snapshot.phase == ProgressPhase::Compressing {
+                cancel.cancel();
+            }
+        };
+        let result = load_composite().create(
+            &destination,
+            &[source],
+            &CreateOptions {
+                zip_backend: backend,
+                ..Default::default()
+            },
+            &progress,
+            &cancel,
+        );
+        assert!(matches!(result, Err(ArchiveError::Cancelled)));
+        assert_eq!(fs::read(&destination).unwrap(), b"keep original");
+        assert_eq!(fs::read_dir(&work.0).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn flate_zip_rejects_duplicate_names_before_replacing_output() {
+    use archive_rclick_core::archive::ZipBackend;
+    let work = Work::new();
+    let source = work.0.join("same.txt");
+    fs::write(&source, b"source").unwrap();
+    let destination = work.0.join("output.zip");
+    fs::write(&destination, b"keep original").unwrap();
+    let result = load_composite().create(
+        &destination,
+        &[source.clone(), source],
+        &CreateOptions {
+            zip_backend: ZipBackend::ZlibNg,
+            ..Default::default()
+        },
+        &quiet,
+        &CancellationToken::new(),
+    );
+    assert!(matches!(result, Err(ArchiveError::InvalidInput(_))));
+    assert_eq!(fs::read(&destination).unwrap(), b"keep original");
+}
+
+#[test]
+fn flate_zip_rejects_incompatible_password_without_touching_output() {
+    use archive_rclick_core::archive::ZipBackend;
+    for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
+        let work = Work::new();
+        let source = work.0.join("source");
+        fs::write(&source, b"source").unwrap();
+        let destination = work.0.join("output.zip");
+        fs::write(&destination, b"original").unwrap();
+        let result = load_composite().create(
+            &destination,
+            &[source],
+            &CreateOptions {
+                zip_backend: backend,
+                password: Some("한글암호".into()),
+                ..Default::default()
+            },
+            &quiet,
+            &CancellationToken::new(),
+        );
+        assert!(matches!(result, Err(ArchiveError::UnsupportedOption(_))));
+        assert_eq!(fs::read(destination).unwrap(), b"original");
+    }
+}
+
+#[test]
+fn flate_zip_large_parallel_entries_spill_and_roundtrip() {
+    use archive_rclick_core::archive::ZipBackend;
+    let mut state = 0x12345678u32;
+    let payload: Vec<u8> = (0..9 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
+        let work = Work::new();
+        let source = work.0.join("input");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("one.bin"), &payload).unwrap();
+        fs::write(source.join("two.bin"), &payload).unwrap();
+        let destination = work.0.join("output.zip");
+        load_composite()
+            .create(
+                &destination,
+                &[source],
+                &CreateOptions {
+                    zip_backend: backend,
+                    compression_level: 1,
+                    threads: ThreadCount::Exact(2),
+                    ..Default::default()
+                },
+                &quiet,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(fs::metadata(&destination).unwrap().len() > 16 * 1024 * 1024);
+        load_engine()
+            .test(&destination, None, &quiet, &CancellationToken::new())
+            .unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap();
+        for name in ["one.bin", "two.bin"] {
+            let mut actual = Vec::new();
+            std::io::Read::read_to_end(&mut archive.by_name(name).unwrap(), &mut actual).unwrap();
+            assert_eq!(actual, payload);
+        }
+        assert_eq!(fs::read_dir(&work.0).unwrap().count(), 2);
+    }
+}

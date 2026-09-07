@@ -141,6 +141,43 @@ impl CreateFormat {
     }
 }
 
+/// ZIP creation backend. Reading and extraction keep the existing engines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ZipBackend {
+    #[default]
+    SevenZip,
+    ZlibNg,
+    ZlibRs,
+}
+
+impl ZipBackend {
+    pub const ALL: [Self; 3] = [Self::SevenZip, Self::ZlibNg, Self::ZlibRs];
+
+    pub fn registry_key(self) -> &'static str {
+        match self {
+            Self::SevenZip => "7z",
+            Self::ZlibNg => "zlib-ng",
+            Self::ZlibRs => "zlib-rs",
+        }
+    }
+
+    pub fn from_registry_key(key: &str) -> Self {
+        match key {
+            "zlib-ng" => Self::ZlibNg,
+            "zlib-rs" => Self::ZlibRs,
+            _ => Self::SevenZip,
+        }
+    }
+
+    pub fn from_ui_index(index: i32) -> Self {
+        Self::ALL.get(index as usize).copied().unwrap_or_default()
+    }
+
+    pub fn ui_index(self) -> i32 {
+        Self::ALL.iter().position(|v| *v == self).unwrap_or(0) as i32
+    }
+}
+
 /// CPU thread count used by the 7z backend when it compresses LZMA2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCount {
@@ -350,6 +387,7 @@ pub struct CreateOptions {
     pub preserve_root: bool,
     pub format: CreateFormat,
     pub compression_level: u8,
+    pub zip_backend: ZipBackend,
     /// Optional maximum physical size of each output volume.  When set, the
     /// 7z backend writes `<archive>.<nnn>` parts through a multi-volume stream.
     pub split_size: Option<u64>,
@@ -366,6 +404,7 @@ impl fmt::Debug for CreateOptions {
             .debug_struct("CreateOptions")
             .field("preserve_root", &self.preserve_root)
             .field("format", &self.format)
+            .field("zip_backend", &self.zip_backend)
             .field("compression_level", &self.compression_level)
             .field("split_size", &self.split_size)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -385,6 +424,7 @@ impl Default for CreateOptions {
             // the same output size, so keep both GUI and shell operations on
             // the upstream Normal default unless the user explicitly changes it.
             compression_level: 5,
+            zip_backend: ZipBackend::SevenZip,
             split_size: None,
             password: None,
             encrypt_headers: false,
@@ -397,6 +437,32 @@ impl Default for CreateOptions {
 mod tests {
     use super::{CreateOptions, ExtractOptions, VolumeSizePreset};
     use super::{VOLUME_CUSTOM_UI_INDEX, parse_volume_size};
+
+    #[test]
+    fn zip_backend_defaults_and_roundtrips() {
+        assert_eq!(
+            CreateOptions::default().zip_backend,
+            super::ZipBackend::SevenZip
+        );
+        for backend in super::ZipBackend::ALL {
+            assert_eq!(
+                super::ZipBackend::from_registry_key(backend.registry_key()),
+                backend
+            );
+            assert_eq!(
+                super::ZipBackend::from_ui_index(backend.ui_index()),
+                backend
+            );
+        }
+        assert_eq!(
+            super::ZipBackend::from_registry_key("unknown"),
+            super::ZipBackend::SevenZip
+        );
+        assert_eq!(
+            super::ZipBackend::from_ui_index(-1),
+            super::ZipBackend::SevenZip
+        );
+    }
 
     #[test]
     fn create_options_default_to_normal_compression() {

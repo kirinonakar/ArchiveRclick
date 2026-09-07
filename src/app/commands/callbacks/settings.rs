@@ -12,6 +12,10 @@ pub(super) fn wire(ui: &AppWindow) {
                 ui.set_settings_thread_selection(
                     ThreadCount::from_registry_key(&platform::load_thread_preference()).ui_index(),
                 );
+                ui.set_settings_zip_backend_selection(
+                    ZipBackend::from_registry_key(&platform::load_zip_backend_preference())
+                        .ui_index(),
+                );
                 ui.set_settings_header_encryption(platform::load_header_encryption_preference());
                 ui.set_esc_close_main_window(platform::load_esc_close_main_window_preference());
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
@@ -174,6 +178,7 @@ pub(super) fn wire(ui: &AppWindow) {
         ui.on_settings_applied(
             move |font_selection,
                   thread_selection,
+                  zip_backend_selection,
                   theme_selection,
                   language_preference_selection,
                   header_encryption,
@@ -184,6 +189,10 @@ pub(super) fn wire(ui: &AppWindow) {
                     .unwrap_or("auto");
                 let mut failure: Option<String> = None;
                 if let Err(error) = platform::save_font_preference(preference) {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) = platform::save_zip_backend_preference(
+                    ZipBackend::from_ui_index(zip_backend_selection).registry_key(),
+                ) {
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) = platform::save_thread_preference(
                     ThreadCount::from_ui_index(thread_selection).registry_key(),

@@ -164,6 +164,43 @@ mod imp {
         Ok(())
     }
 
+    pub fn load_zip_backend_preference() -> String {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return "7z".to_owned();
+        };
+        match read_string_value(key.0, "ZipBackend") {
+            Some(value) if !value.is_empty() => value,
+            _ => "7z".to_owned(),
+        }
+    }
+
+    /// Persists the ZIP backend ("7z", "zlib-ng", "zlib-rs").
+    pub fn save_zip_backend_preference(preference: &str) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        let value = HSTRING::from("ZipBackend");
+        let data = utf16_bytes(preference);
+        // SAFETY: key is live and data is valid UTF-16 including its terminator.
+        let status =
+            unsafe { RegSetValueExW(key.0, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&data)) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not write the settings registry value (Windows error {})",
+                status.0
+            ));
+        }
+        Ok(())
+    }
+
     /// Loads the saved cumulative column boundaries. Invalid or incomplete
     /// values fall back to the responsive default layout.
     pub fn load_column_boundaries() -> super::ColumnBoundaries {
@@ -667,6 +704,13 @@ mod imp {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
+    pub fn load_zip_backend_preference() -> String {
+        "7z".to_owned()
+    }
+    pub fn save_zip_backend_preference(_preference: &str) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
     pub fn load_thread_preference() -> String {
         "auto".to_owned()
     }
@@ -747,6 +791,7 @@ mod imp {
 }
 
 pub use imp::{
+    load_zip_backend_preference, save_zip_backend_preference,
     load_column_boundaries, load_esc_close_main_window_preference, load_font_preference,
     load_header_encryption_preference, load_language_preference, load_theme_preference,
     load_thread_preference, load_window_geometry,
