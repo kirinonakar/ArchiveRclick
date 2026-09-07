@@ -39,6 +39,8 @@ impl ExtractSelection {
 
 #[derive(Clone)]
 pub struct ExtractOptions {
+    /// Extract files directly into the destination (7-Zip's `e` command).
+    pub flatten_paths: bool,
     pub selection: ExtractSelection,
     pub password: Option<String>,
     pub conflict_policy: InitialConflictPolicy,
@@ -58,6 +60,7 @@ impl fmt::Debug for ExtractOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtractOptions")
+            .field("flatten_paths", &self.flatten_paths)
             .field("selection", &self.selection)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("conflict_policy", &self.conflict_policy)
@@ -74,6 +77,7 @@ impl fmt::Debug for ExtractOptions {
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
+            flatten_paths: false,
             selection: ExtractSelection::All,
             password: None,
             conflict_policy: InitialConflictPolicy::Ask,
@@ -140,6 +144,7 @@ impl CreateFormat {
 /// CPU thread count used by the 7z backend when it compresses LZMA2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadCount {
+    Exact(u32),
     Auto,
     Four,
     Six,
@@ -271,6 +276,7 @@ impl ThreadCount {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Exact(_) => "Custom",
             Self::Auto => "Auto",
             Self::Four => "4",
             Self::Six => "6",
@@ -297,6 +303,7 @@ impl ThreadCount {
 
     pub fn registry_key(self) -> &'static str {
         match self {
+            Self::Exact(_) => "auto",
             Self::Auto => "auto",
             Self::Four => "4",
             Self::Six => "6",
@@ -324,6 +331,7 @@ impl ThreadCount {
     /// ZIP follows the same `-mmt=on` behavior as the 7-Zip CLI.
     pub fn sevenzip_threads(self) -> Option<u32> {
         match self {
+            Self::Exact(count) => Some(count.max(1)),
             Self::Auto | Self::All => std::thread::available_parallelism()
                 .ok()
                 .and_then(|count| u32::try_from(count.get()).ok()),
@@ -338,6 +346,8 @@ impl ThreadCount {
 
 #[derive(Clone)]
 pub struct CreateOptions {
+    /// Preserve the selected directory itself, as the CLI does.
+    pub preserve_root: bool,
     pub format: CreateFormat,
     pub compression_level: u8,
     /// Optional maximum physical size of each output volume.  When set, the
@@ -354,6 +364,7 @@ impl fmt::Debug for CreateOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CreateOptions")
+            .field("preserve_root", &self.preserve_root)
             .field("format", &self.format)
             .field("compression_level", &self.compression_level)
             .field("split_size", &self.split_size)
@@ -367,6 +378,7 @@ impl fmt::Debug for CreateOptions {
 impl Default for CreateOptions {
     fn default() -> Self {
         Self {
+            preserve_root: false,
             format: CreateFormat::Zip,
             // 7-Zip's Normal preset is level 5. Level 6 switches LZMA2 to a
             // substantially slower mode on large inputs while often producing
@@ -446,7 +458,10 @@ mod tests {
         assert_eq!(parse_volume_size("1.5GiB"), Some(1_610_612_736));
         assert_eq!(parse_volume_size("500KB"), Some(500 * 1024));
         assert_eq!(parse_volume_size("30 mb"), Some(30 * 1024 * 1024));
-        assert_eq!(parse_volume_size("  2T "), Some(2 * 1024 * 1024 * 1024 * 1024));
+        assert_eq!(
+            parse_volume_size("  2T "),
+            Some(2 * 1024 * 1024 * 1024 * 1024)
+        );
         assert_eq!(parse_volume_size("1048576"), Some(1048576));
 
         assert_eq!(parse_volume_size(""), None);

@@ -546,6 +546,18 @@ impl ArchiveEngine for LibArchiveEngine {
                 .or_else(|| (entry.kind == ArchiveEntryKind::Directory).then_some(0));
             snapshot.current_file_bytes_processed = 0;
             let mut completed_progress_bytes = declared_progress_bytes;
+            if options.flatten_paths && entry.kind == ArchiveEntryKind::Directory {
+                continue;
+            }
+            let relative = if options.flatten_paths {
+                PathBuf::from(
+                    relative
+                        .file_name()
+                        .ok_or_else(|| ArchiveError::UnsafeEntryPath(entry.display_path.clone()))?,
+                )
+            } else {
+                relative
+            };
             let target = root.join(&relative);
             ensure_no_reparse_ancestors(&root, &target)?;
             match entry.kind {
@@ -732,7 +744,8 @@ impl ArchiveEngine for LibArchiveEngine {
         let final_destination = parent.join(file_name);
         ensure_no_reparse_ancestors(&parent, &final_destination)?;
 
-        let (items, total_bytes) = collect_sources(files, &final_destination, cancel)?;
+        let (items, total_bytes) =
+            collect_sources(files, &final_destination, options.preserve_root, cancel)?;
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
         let mut opening = opening_snapshot(&final_destination, total_bytes);
         opening.total_entries = Some(items.len() as u64);

@@ -512,7 +512,17 @@ impl ArchiveEngine for SevenZipEngine {
         let mut selected_bytes = 0u64;
         for entry in &entries {
             let relative = safe_relative_path(&entry.path)?;
-            let include = options.selection.includes(&relative);
+            let include = options.selection.includes(&relative)
+                && !(options.flatten_paths && entry.kind == ArchiveEntryKind::Directory);
+            let relative = if options.flatten_paths {
+                PathBuf::from(
+                    relative
+                        .file_name()
+                        .ok_or_else(|| ArchiveError::UnsafeEntryPath(entry.display_path.clone()))?,
+                )
+            } else {
+                relative
+            };
             if include {
                 selected_count = selected_count.checked_add(1).ok_or_else(|| {
                     ArchiveError::LimitExceeded("entry count overflow".to_owned())
@@ -675,7 +685,8 @@ impl ArchiveEngine for SevenZipEngine {
         let final_destination = parent.join(file_name);
         ensure_no_reparse_ancestors(&parent, &final_destination)?;
 
-        let (mut items, total_bytes) = collect_sources(files, &final_destination, cancel)?;
+        let (mut items, total_bytes) =
+            collect_sources(files, &final_destination, options.preserve_root, cancel)?;
         if options.format == CreateFormat::Zip {
             // ZIP readers infer parent directories from file paths, and
             // the bundled ZIP handler does not safely accept explicit

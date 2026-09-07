@@ -174,6 +174,7 @@ if (-not $SkipBuild) {
 
 $requiredBinaries = @(
     (Join-Path $releaseDirectory "archive-rclick.exe"),
+    (Join-Path $releaseDirectory "archive-rclick-cli.exe"),
     (Join-Path $releaseDirectory "archive_rclick_core.dll")
 )
 foreach ($binary in $requiredBinaries) {
@@ -210,6 +211,8 @@ $assetsRoot = Join-Path $packageRoot "Assets"
 New-Item -ItemType Directory -Force -Path $assetsRoot | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick-cli.exe") -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $repository "CLI.md") -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick_core.dll") -Destination $packageRoot
 foreach ($entry in $expected.GetEnumerator()) {
     Copy-Item -LiteralPath (Join-Path $runtimeDirectory $entry.Key) -Destination $packageRoot
@@ -381,7 +384,7 @@ try {
             $requiredAssets += "Assets\Square44x44Logo.targetsize-${size}${suffix}.png"
         }
     }
-    foreach ($required in @("archive-rclick.exe", "archive_rclick_core.dll") + $requiredAssets) {
+    foreach ($required in @("archive-rclick.exe", "archive-rclick-cli.exe", "CLI.md", "archive_rclick_core.dll") + $requiredAssets) {
         if (-not (Test-Path -LiteralPath (Join-Path $unpacked $required) -PathType Leaf)) {
             throw "The generated MSIX is missing $required"
         }

@@ -19,6 +19,7 @@ pub(super) struct SourceItem {
 pub(super) fn collect_sources(
     files: &[PathBuf],
     destination: &Path,
+    preserve_root: bool,
     cancel: &CancellationToken,
 ) -> ArchiveResult<(Vec<SourceItem>, u64)> {
     let mut items = Vec::new();
@@ -61,7 +62,7 @@ pub(super) fn collect_sources(
         if selected_metadata.is_file() && is_thumbs_db_name(root_name) {
             continue;
         }
-        let archive_name = if files.len() == 1 && selected_metadata.is_dir() {
+        let archive_name = if files.len() == 1 && selected_metadata.is_dir() && !preserve_root {
             String::new()
         } else {
             root_name.to_owned()

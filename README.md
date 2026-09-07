@@ -69,6 +69,13 @@ portable package with hashes and complete license files, run:
 
 Command-line operations:
 
+The console executable `archive-rclick-cli.exe` uses the same archive engines
+with 7-Zip-style `a`, `x`, `e`, `l`, and `t` commands. See [CLI.md](CLI.md)
+for examples and compatibility limits. `package-msix.ps1` packages both the
+GUI and CLI together in `dist/msix`.
+
+GUI/shell command-line operations:
+
 ```text
 ArchiveRclick [archive|command]
   extract <archive>...  Extract each archive into its own subfolder

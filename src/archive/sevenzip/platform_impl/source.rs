@@ -12,6 +12,7 @@ fn is_thumbs_db_name(name: &str) -> bool {
 pub(super) fn collect_sources(
     files: &[PathBuf],
     destination: &Path,
+    preserve_root: bool,
     cancel: &CancellationToken,
 ) -> ArchiveResult<(Vec<SourceItem>, u64)> {
     let mut items = Vec::new();
@@ -40,7 +41,11 @@ pub(super) fn collect_sources(
             continue;
         }
         if metadata.is_dir() {
-            let prefix = if files.len() == 1 { "" } else { &base_name };
+            let prefix = if files.len() == 1 && !preserve_root {
+                ""
+            } else {
+                &base_name
+            };
             walk_directory(
                 &canonical,
                 prefix,
