@@ -24,7 +24,7 @@ and libarchive for broader archive-format support.
   (single or one per folder).
 - English/Korean/Japanese UI, system/light/dark themes, configurable fonts and
   legacy filename code pages.
-- Settings: selectable ZIP backend (**7z** default, **zlib-ng**, **zlib-rs**)
+- Settings: selectable ZIP backend (**7z** (default), **zlib-ng**, **zlib-rs** (fastest))
   and optional Zone.Identifier propagation to extracted files (on by default).
 
 ## Download
