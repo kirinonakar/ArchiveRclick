@@ -128,6 +128,7 @@ fn run_extract_worker(
     policy: RuntimePolicy,
     assume_targets_missing: bool,
     output_budget: Arc<OutputBudget>,
+    zone_identifier: crate::archive::zone_identifier::ZoneIdentifier,
 ) -> ArchiveResult<OperationSummary> {
     let open_archive = open_for_read(api, archive, format, password, pathname_codepage, &cancel)?;
     let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
@@ -136,6 +137,7 @@ fn run_extract_worker(
     let mut prepared_dirs = HashSet::new();
     prepared_dirs.insert(root.clone());
     let context = Arc::new(Mutex::new(ExtractContext {
+        zone_identifier,
         output_budget: Arc::clone(&output_budget),
         root,
         prepared_dirs,
@@ -231,6 +233,7 @@ fn run_parallel_zip_extract(
     progress: Arc<ThrottledProgress<'static>>,
     conflicts: &'static dyn ConflictResolver,
     output_budget: Arc<OutputBudget>,
+    zone_identifier: crate::archive::zone_identifier::ZoneIdentifier,
 ) -> ArchiveResult<OperationSummary> {
     const MAX_WORKERS: usize = 8;
     const MIN_ENTRIES_PER_WORKER: usize = 128;
@@ -260,6 +263,7 @@ fn run_parallel_zip_extract(
             RuntimePolicy::OverwriteAll,
             true,
             output_budget,
+            zone_identifier,
         );
     }
 
@@ -276,6 +280,7 @@ fn run_parallel_zip_extract(
         let indices = chunk.to_vec();
         let cancel = cancel.clone();
         let output_budget = Arc::clone(&output_budget);
+        let zone_identifier = zone_identifier.clone();
         let progress: Arc<dyn ProgressSink> = Arc::new(ParallelWorkerProgress {
             aggregate: Arc::clone(&aggregate),
             worker_index,
@@ -299,6 +304,7 @@ fn run_parallel_zip_extract(
                 RuntimePolicy::OverwriteAll,
                 true,
                 output_budget,
+                zone_identifier,
             )
         }));
     }
@@ -597,6 +603,10 @@ impl ArchiveEngine for SevenZipEngine {
             options.max_file_bytes,
             options.max_total_bytes,
         ));
+        let zone_identifier = crate::archive::zone_identifier::ZoneIdentifier::read(
+            archive,
+            options.copy_zone_identifier,
+        )?;
         let summary = if format == ReadFormat::Zip && assume_targets_missing && indices.len() >= 256
         {
             run_parallel_zip_extract(
@@ -613,6 +623,7 @@ impl ArchiveEngine for SevenZipEngine {
                 Arc::clone(&throttled),
                 conflicts,
                 output_budget,
+                zone_identifier,
             )?
         } else {
             run_extract_worker(
@@ -633,6 +644,7 @@ impl ArchiveEngine for SevenZipEngine {
                 RuntimePolicy::from(options.conflict_policy),
                 assume_targets_missing,
                 output_budget,
+                zone_identifier,
             )?
         };
         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
@@ -974,6 +986,7 @@ impl ArchiveEngine for SevenZipEngine {
         );
         let selected = Arc::new(HashSet::new());
         let context = Arc::new(Mutex::new(ExtractContext {
+            zone_identifier: Default::default(),
             output_budget: Arc::new(OutputBudget::new(u64::MAX, u64::MAX)),
             root: PathBuf::new(),
             prepared_dirs: HashSet::new(),

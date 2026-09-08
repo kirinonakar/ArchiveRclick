@@ -174,6 +174,7 @@ fn extract_file(
     progress: &ExtractProgress<'_>,
     cancel: &CancellationToken,
     buffer: &mut [u8],
+    zone_identifier: &crate::archive::zone_identifier::ZoneIdentifier,
 ) -> ArchiveResult<()> {
     check_cancel(cancel)?;
     let target = root.join(&job.relative);
@@ -246,6 +247,7 @@ fn extract_file(
     if progress.stop.load(Ordering::Relaxed) {
         return Err(ArchiveError::Cancelled);
     }
+    zone_identifier.apply(&temporary.path, &target)?;
     temporary.close_file();
     if !direct {
         output::install_temporary(root, &temporary.path, &target)?;
@@ -265,6 +267,8 @@ pub(super) fn extract(
     cancel: &CancellationToken,
 ) -> ArchiveResult<Option<OperationSummary>> {
     check_cancel(cancel)?;
+    let zone_identifier =
+        crate::archive::zone_identifier::ZoneIdentifier::read(path, options.copy_zone_identifier)?;
     let input = ZipInput::open(path, cancel)?;
     let archive = ZipArchive::with_config(
         zip::read::Config {
@@ -436,6 +440,7 @@ pub(super) fn extract(
                                 &progress,
                                 cancel,
                                 &mut buffer,
+                                &zone_identifier,
                             )
                         });
                         if result.is_err() {
@@ -455,6 +460,7 @@ pub(super) fn extract(
                     &progress,
                     cancel,
                     &mut sequential_buffer,
+                    &zone_identifier,
                 )
             })]
         };

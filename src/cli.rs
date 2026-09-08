@@ -98,7 +98,11 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
             ..Default::default()
         },
         extract: ExtractOptions {
-            zip_backend: ZipBackend::from_registry_key(&archive_rclick_core::platform::load_zip_backend_preference()),
+            copy_zone_identifier:
+                archive_rclick_core::platform::load_copy_zone_identifier_preference(),
+            zip_backend: ZipBackend::from_registry_key(
+                &archive_rclick_core::platform::load_zip_backend_preference(),
+            ),
             ..Default::default()
         },
         recursive: false,

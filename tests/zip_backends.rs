@@ -382,3 +382,113 @@ fn pooled_codecs_reset_across_levels_empty_members_and_flushes() {
         assert_eq!(bytes, expected);
     }
 }
+
+#[test]
+fn zone_identifier_propagates_only_to_extracted_supported_files() {
+    fn ads(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(":Zone.Identifier");
+        name.into()
+    }
+    let engine = engine();
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/x64/archive.dll");
+    let libarchive = libarchive::LibArchiveEngine::load_from_path(&runtime).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("origin.zip");
+    let origin = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/origin.zip\r\n";
+    fs::write(
+        &path,
+        archive(
+            &[
+                ("nested/APP.EXE", b"executable"),
+                ("readme.txt", b"text"),
+                ("document.docx", b"document"),
+            ],
+            None,
+            false,
+        ),
+    )
+    .unwrap();
+    fs::write(ads(&path), origin).unwrap();
+    assert!(ExtractOptions::default().copy_zone_identifier);
+    for index in 0..4 {
+        let backend: &dyn ArchiveEngine = if index == 3 { &libarchive } else { &engine };
+        for enabled in [false, true] {
+            let target = work.path().join(format!("out-{index}-{enabled}"));
+            let options = ExtractOptions {
+                copy_zone_identifier: enabled,
+                zip_backend: ZipBackend::ALL[index.min(2)],
+                ..Default::default()
+            };
+            backend
+                .extract(
+                    &path,
+                    &target,
+                    &options,
+                    &quiet,
+                    &Resolver,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            for name in ["nested/APP.EXE", "document.docx"] {
+                let stream = ads(&target.join(name));
+                if enabled {
+                    assert_eq!(fs::read(stream).unwrap(), origin);
+                } else {
+                    assert!(!stream.exists());
+                }
+            }
+            assert!(!ads(&target.join("readme.txt")).exists());
+            // Skip must leave both the existing bytes and its origin untouched.
+            let preserved = target.join("document.docx");
+            fs::write(&preserved, b"existing").unwrap();
+            fs::write(ads(&preserved), b"existing origin").unwrap();
+            let skipped = ExtractOptions {
+                copy_zone_identifier: true,
+                conflict_policy: InitialConflictPolicy::SkipAll,
+                ..options.clone()
+            };
+            backend
+                .extract(
+                    &path,
+                    &target,
+                    &skipped,
+                    &quiet,
+                    &Resolver,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            assert_eq!(fs::read(&preserved).unwrap(), b"existing");
+            assert_eq!(fs::read(ads(&preserved)).unwrap(), b"existing origin");
+            let overwritten = ExtractOptions {
+                copy_zone_identifier: true,
+                conflict_policy: InitialConflictPolicy::OverwriteAll,
+                ..options
+            };
+            backend
+                .extract(
+                    &path,
+                    &target,
+                    &overwritten,
+                    &quiet,
+                    &Resolver,
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+            assert_eq!(fs::read(ads(&preserved)).unwrap(), origin);
+        }
+    }
+    fs::remove_file(ads(&path)).unwrap();
+    let target = work.path().join("no-origin");
+    extract(
+        &engine,
+        &path,
+        &target,
+        &ExtractOptions {
+            copy_zone_identifier: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!ads(&target.join("document.docx")).exists());
+}

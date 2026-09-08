@@ -147,3 +147,9 @@ split ZIP output. See [CLI.md](CLI.md#zip-backends) for examples and resource li
 Building zlib-ng requires CMake and the Visual Studio C/C++ build tools in addition
 to Rust. Release builds retain ThinLTO and one codegen unit. Build for the portable
 target CPU so runtime dispatch can choose instructions safely on each machine.
+
+### Zone.Identifier copy
+
+Settings > **Zone.Identifier** > **Copy origin info when extracting** is on by
+default. When enabled, GUI, Explorer, drag-out, and CLI extraction copy the
+archive's `Zone.Identifier` NTFS alternate data stream to newly extracted files.

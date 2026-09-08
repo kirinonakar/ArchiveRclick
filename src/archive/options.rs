@@ -39,6 +39,8 @@ impl ExtractSelection {
 
 #[derive(Clone)]
 pub struct ExtractOptions {
+    /// Copy the archive download-origin stream to supported extracted files.
+    pub copy_zone_identifier: bool,
     pub zip_backend: ZipBackend,
     pub threads: ThreadCount,
     /// Extract files directly into the destination (7-Zip's `e` command).
@@ -62,6 +64,7 @@ impl fmt::Debug for ExtractOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtractOptions")
+            .field("copy_zone_identifier", &self.copy_zone_identifier)
             .field("zip_backend", &self.zip_backend)
             .field("threads", &self.threads)
             .field("flatten_paths", &self.flatten_paths)
@@ -83,6 +86,7 @@ impl Default for ExtractOptions {
         Self {
             zip_backend: ZipBackend::SevenZip,
             threads: ThreadCount::Auto,
+            copy_zone_identifier: true,
             flatten_paths: false,
             selection: ExtractSelection::All,
             password: None,

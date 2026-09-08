@@ -67,8 +67,9 @@ pub(super) fn start_archive_drag(
         .expect("password mutex poisoned")
         .clone();
     let options = ExtractOptions {
-                    zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
-                    threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
+        copy_zone_identifier: platform::load_copy_zone_identifier_preference(),
+        zip_backend: ZipBackend::from_registry_key(&platform::load_zip_backend_preference()),
+        threads: ThreadCount::from_registry_key(&platform::load_thread_preference()),
         selection: ExtractSelection::Paths(selection.clone()),
         password,
         conflict_policy: InitialConflictPolicy::OverwriteAll,

@@ -7,6 +7,8 @@ pub mod libarchive;
 mod options;
 mod path_safety;
 pub mod sevenzip;
+#[cfg(windows)]
+mod zone_identifier;
 
 pub use engine::{ArchiveEngine, ConflictResolver, ProgressSink};
 pub use entry::{ArchiveEntry, ArchiveEntryKind, ArchiveListing, OperationSummary};

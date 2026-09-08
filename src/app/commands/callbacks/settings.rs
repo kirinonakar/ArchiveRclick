@@ -17,6 +17,9 @@ pub(super) fn wire(ui: &AppWindow) {
                         .ui_index(),
                 );
                 ui.set_settings_header_encryption(platform::load_header_encryption_preference());
+                ui.set_settings_copy_zone_identifier(
+                    platform::load_copy_zone_identifier_preference(),
+                );
                 ui.set_esc_close_main_window(platform::load_esc_close_main_window_preference());
                 ui.set_theme_selection(theme_selection_index(&platform::load_theme_preference()));
                 let language_preference = platform::load_language_preference();
@@ -182,7 +185,8 @@ pub(super) fn wire(ui: &AppWindow) {
                   theme_selection,
                   language_preference_selection,
                   header_encryption,
-                  esc_close_main_window| {
+                  esc_close_main_window,
+                  copy_zone_identifier| {
                 let preference = FONT_OPTIONS
                     .get(font_selection.max(0) as usize)
                     .map(|(_, key)| *key)
@@ -200,6 +204,10 @@ pub(super) fn wire(ui: &AppWindow) {
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) =
                     platform::save_header_encryption_preference(header_encryption)
+                {
+                    failure = Some(format!("Could not save settings: {error}"));
+                } else if let Err(error) =
+                    platform::save_copy_zone_identifier_preference(copy_zone_identifier)
                 {
                     failure = Some(format!("Could not save settings: {error}"));
                 } else if let Err(error) =
@@ -226,6 +234,7 @@ pub(super) fn wire(ui: &AppWindow) {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_font_family(family.into());
                     ui.set_settings_header_encryption(header_encryption);
+                    ui.set_settings_copy_zone_identifier(copy_zone_identifier);
                     ui.set_esc_close_main_window(esc_close_main_window);
                     ui.set_create_header_encryption(header_encryption);
                     ui.set_theme_selection(theme_selection);

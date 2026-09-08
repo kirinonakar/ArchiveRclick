@@ -55,6 +55,7 @@ mod imp {
     const FONT_VALUE: &str = "FontFamily";
     const THREAD_VALUE: &str = "CpuThreads";
     const ENCRYPT_HEADERS_VALUE: &str = "EncryptHeaders";
+    const COPY_ZONE_IDENTIFIER_VALUE: &str = "CopyZoneIdentifier";
     const ESC_CLOSE_MAIN_WINDOW_VALUE: &str = "EscCloseMainWindow";
     const THEME_VALUE: &str = "Theme";
     const LANGUAGE_VALUE: &str = "Language";
@@ -235,9 +236,7 @@ mod imp {
     }
 
     /// Persists the cumulative column boundaries after a completed drag.
-    pub fn save_column_boundaries(
-        boundaries: &super::ColumnBoundaries,
-    ) -> Result<(), String> {
+    pub fn save_column_boundaries(boundaries: &super::ColumnBoundaries) -> Result<(), String> {
         if !valid_column_boundaries(boundaries) {
             return Err("Invalid archive-list column boundaries".to_owned());
         }
@@ -349,6 +348,37 @@ mod imp {
         write_string_value(
             key.0,
             ESC_CLOSE_MAIN_WINDOW_VALUE,
+            if enabled { "1" } else { "0" },
+        )
+    }
+
+    /// Loads whether extraction copies Zone.Identifier; enabled by default.
+    pub fn load_copy_zone_identifier_preference() -> bool {
+        let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
+            return true;
+        };
+        !matches!(
+            read_string_value(key.0, COPY_ZONE_IDENTIFIER_VALUE).as_deref(),
+            Some("0" | "false" | "off")
+        )
+    }
+
+    /// Persists the Zone.Identifier copy preference.
+    pub fn save_copy_zone_identifier_preference(enabled: bool) -> Result<(), String> {
+        let key_name = HSTRING::from(SETTINGS_KEY);
+        let mut raw = HKEY(ptr::null_mut());
+        // SAFETY: the key name stays live and `raw` is an out-parameter.
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut raw) };
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not open the settings registry key (Windows error {})",
+                status.0
+            ));
+        }
+        let key = OwnedKey(raw);
+        write_string_value(
+            key.0,
+            COPY_ZONE_IDENTIFIER_VALUE,
             if enabled { "1" } else { "0" },
         )
     }
@@ -723,9 +753,7 @@ mod imp {
         super::ColumnBoundaries::default()
     }
 
-    pub fn save_column_boundaries(
-        _boundaries: &super::ColumnBoundaries,
-    ) -> Result<(), String> {
+    pub fn save_column_boundaries(_boundaries: &super::ColumnBoundaries) -> Result<(), String> {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
@@ -734,6 +762,13 @@ mod imp {
     }
 
     pub fn save_header_encryption_preference(_enabled: bool) -> Result<(), String> {
+        Err("Settings persistence is only available on Windows".to_owned())
+    }
+
+    pub fn load_copy_zone_identifier_preference() -> bool {
+        true
+    }
+    pub fn save_copy_zone_identifier_preference(_enabled: bool) -> Result<(), String> {
         Err("Settings persistence is only available on Windows".to_owned())
     }
 
@@ -791,12 +826,12 @@ mod imp {
 }
 
 pub use imp::{
-    load_zip_backend_preference, save_zip_backend_preference,
-    load_column_boundaries, load_esc_close_main_window_preference, load_font_preference,
-    load_header_encryption_preference, load_language_preference, load_theme_preference,
-    load_thread_preference, load_window_geometry,
-    default_language_preference, resolve_language_preference,
-    resolve_font_family, save_column_boundaries, save_esc_close_main_window_preference,
-    save_font_preference, save_header_encryption_preference, save_language_preference,
-    save_theme_preference, save_thread_preference, save_window_geometry,
+    default_language_preference, load_column_boundaries, load_copy_zone_identifier_preference,
+    load_esc_close_main_window_preference, load_font_preference, load_header_encryption_preference,
+    load_language_preference, load_theme_preference, load_thread_preference, load_window_geometry,
+    load_zip_backend_preference, resolve_font_family, resolve_language_preference,
+    save_column_boundaries, save_copy_zone_identifier_preference,
+    save_esc_close_main_window_preference, save_font_preference, save_header_encryption_preference,
+    save_language_preference, save_theme_preference, save_thread_preference, save_window_geometry,
+    save_zip_backend_preference,
 };

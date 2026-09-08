@@ -403,6 +403,7 @@ export component SettingsOverlay inherits Rectangle {
     in property <int> thread-selection;
     in property <int> zip-backend-selection;
     in property <bool> header-encryption: false;
+    in property <bool> copy-zone-identifier: true;
     in property <int> theme-selection;
     in property <bool> esc-close-main-window: false;
     in property <[string]> language-options;
@@ -415,13 +416,14 @@ export component SettingsOverlay inherits Rectangle {
     private property <int> active-tab: 0;
     private property <int> font-index: root.font-selection;
     private property <bool> header-encryption-value: root.header-encryption;
+    private property <bool> copy-zone-identifier-value: root.copy-zone-identifier;
     private property <int> zip-backend-index: root.zip-backend-selection;
     private property <int> thread-index: root.thread-selection;
     private property <int> theme-index: root.theme-selection;
     private property <int> selected-language: root.language-preference-selection;
     private property <bool> esc-close-main-window-value: root.esc-close-main-window;
 
-    callback accepted(int, int, int, int, int, bool, bool);
+    callback accepted(int, int, int, int, int, bool, bool, bool);
     callback cancelled();
     callback register-context-menu();
     callback unregister-context-menu();
@@ -444,7 +446,7 @@ export component SettingsOverlay inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 460px;
-        height: 360px;
+        height: 400px;
         background: Palette.background;
         border-width: 1px;
         border-color: AppTheme.border;
@@ -529,6 +531,25 @@ export component SettingsOverlay inherits Rectangle {
                             : root.language-selection == 2
                                 ? "パスワード設定時にファイル名を隠す"
                                 : "Hide names when a password is set";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Zone.Identifier";
+                        color: Palette.foreground;
+                        font-weight: 600;
+                        width: 150px;
+                        vertical-alignment: center;
+                    }
+                    CheckBox {
+                        horizontal-stretch: 1;
+                        checked: root.copy-zone-identifier-value;
+                        changed checked => { root.copy-zone-identifier-value = self.checked; }
+                        text: root.language-selection == 1 ? "압축 해제 시 출처 정보 복사"
+                            : root.language-selection == 2 ? "展開時に取得元情報をコピー"
+                            : "Copy origin info when extracting";
                     }
                 }
 
@@ -829,7 +850,7 @@ export component SettingsOverlay inherits Rectangle {
                 Button {
                     text: root.language-selection == 1 ? "확인" : root.language-selection == 2 ? "OK" : "OK";
                     primary: true;
-                    clicked => { root.accepted(root.font-index, root.thread-index, root.zip-backend-index, root.theme-index, root.selected-language, root.header-encryption-value, root.esc-close-main-window-value); }
+                    clicked => { root.accepted(root.font-index, root.thread-index, root.zip-backend-index, root.theme-index, root.selected-language, root.header-encryption-value, root.esc-close-main-window-value, root.copy-zone-identifier-value); }
                 }
             }
         }

@@ -501,6 +501,7 @@ impl From<InitialConflictPolicy> for RuntimePolicy {
 }
 
 pub(super) struct ExtractContext {
+    pub(super) zone_identifier: crate::archive::zone_identifier::ZoneIdentifier,
     pub(super) output_budget: Arc<OutputBudget>,
     pub(super) root: PathBuf,
     pub(super) prepared_dirs: HashSet<PathBuf>,
@@ -840,6 +841,13 @@ unsafe extern "system" fn extract_set_operation_result(
         }
         return S_OK;
     };
+    if let Err(error) = context.zone_identifier.apply(
+        pending.temp_path.as_deref().unwrap_or(&pending.target),
+        &pending.target,
+    ) {
+        context.error = Some(error);
+        return E_ABORT;
+    }
     {
         let mut guard = pending
             .file

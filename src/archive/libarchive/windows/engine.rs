@@ -458,6 +458,10 @@ impl ArchiveEngine for LibArchiveEngine {
         let pathname_codepage = effective_lha_codepage(archive, options.pathname_codepage);
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
         throttled.report(opening_snapshot(archive, total_input), true);
+        let zone_identifier = crate::archive::zone_identifier::ZoneIdentifier::read(
+            archive,
+            options.copy_zone_identifier,
+        )?;
         let mut reader = Reader::open(&self.api, archive, options.password.as_deref())?;
         let mut summary = OperationSummary::default();
         let mut selected_entries = 0u64;
@@ -646,6 +650,7 @@ impl ArchiveEngine for LibArchiveEngine {
                                 .file_mut()
                                 .flush()
                                 .map_err(|error| ArchiveError::io(&temporary.path, error))?;
+                            zone_identifier.apply(&temporary.path, &target)?;
                             temporary.close_file();
                             install_temporary(&root, &temporary.path, &target)?;
                             temporary.disarm();
