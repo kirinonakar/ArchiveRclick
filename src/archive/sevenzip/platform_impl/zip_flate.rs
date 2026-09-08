@@ -1,15 +1,79 @@
 //! ZIP creation with isolated flate2 backends and bounded file-level parallelism.
 use super::*;
 use crate::archive::ZipBackend;
-use rayon::prelude::*;
 use std::io::{self, BufWriter};
-use tempfile::{NamedTempFile, SpooledTempFile};
+use tempfile::NamedTempFile;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 // At most 256 MiB of compressed staging data, plus codec and I/O buffers.
 // Large entries spill to disk; a single worker writes directly to the output.
 const SPOOL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKERS: usize = 32;
+
+// Only `workers` jobs may own a spool, including the one being merged. Each
+// slot is refilled after its result is consumed, so slow groups cannot create
+// an unbounded reorder buffer. Other slots compress while the caller merges.
+fn ordered_pipeline<T: Send>(
+    count: usize,
+    workers: usize,
+    produce: impl Fn(usize) -> ArchiveResult<T> + Sync,
+    mut consume: impl FnMut(T) -> ArchiveResult<()>,
+) -> ArchiveResult<()> {
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let result = (|| {
+            let mut slots = Vec::new();
+            for first in 0..workers.min(count) {
+                let (jobs, input) = std::sync::mpsc::sync_channel(1);
+                let (output, results) = std::sync::mpsc::sync_channel(1);
+                let produce = &produce;
+                handles.push(
+                    std::thread::Builder::new()
+                        .name(format!("zip-compress-{first}"))
+                        .spawn_scoped(scope, move || {
+                            while let Ok(index) = input.recv() {
+                                let result = produce(index);
+                                let failed = result.is_err();
+                                if output.send(result).is_err() || failed {
+                                    break;
+                                }
+                            }
+                        })
+                        .map_err(|error| ArchiveError::Worker(error.to_string()))?,
+                );
+                jobs.send(first)
+                    .map_err(|error| ArchiveError::Worker(error.to_string()))?;
+                slots.push((jobs, results));
+            }
+            for index in 0..count {
+                let (jobs, results) = &slots[index % slots.len()];
+                let value = results
+                    .recv()
+                    .map_err(|error| ArchiveError::Worker(error.to_string()))??;
+                consume(value)?;
+                let next = index + slots.len();
+                if next < count {
+                    jobs.send(next)
+                        .map_err(|error| ArchiveError::Worker(error.to_string()))?;
+                }
+            }
+            Ok(())
+            // Drop all channel endpoints before joining, also on an error. This
+            // releases workers waiting to receive jobs or send pending results.
+        })();
+        let mut panicked = false;
+        for handle in handles {
+            panicked |= handle.join().is_err();
+        }
+        result?;
+        if panicked {
+            return Err(ArchiveError::Worker(
+                "ZIP compression worker panicked".into(),
+            ));
+        }
+        Ok(())
+    })
+}
 
 enum Output {
     Single(NamedTempFile),
@@ -260,44 +324,28 @@ pub(super) fn create(
                 write_item(&mut writer, item, options, &progress, cancel, &mut buffer)?;
             }
         } else {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(workers)
-                .build()
-                .map_err(|e| ArchiveError::Worker(e.to_string()))?;
-            // Fixed-size batches bound both outstanding spools and open files.
-            // Merge in source order without recompression or decryption.
-            for batch in groups.chunks(workers) {
-                check_cancel(cancel)?;
-                let results: Vec<ArchiveResult<SpooledTempFile>> = pool.install(|| {
-                    batch
-                        .par_iter()
-                        .map(|group| {
-                            let spool = tempfile::spooled_tempfile_in(SPOOL_BYTES, work.path());
-                            let mut entry = ZipWriter::new(spool);
-                            let max_size = group.iter().map(|item| item.size).max().unwrap_or(0);
-                            let mut buffer = vec![0; stream_buffer_size(max_size)];
-                            for item in *group {
-                                write_item(
-                                    &mut entry,
-                                    item,
-                                    options,
-                                    &progress,
-                                    cancel,
-                                    &mut buffer,
-                                )?;
-                            }
-                            entry.finish().map_err(zip_error)
-                        })
-                        .collect()
-                });
-                for result in results {
-                    let spool = result?;
+            ordered_pipeline(
+                groups.len(),
+                workers,
+                |index| {
+                    check_cancel(cancel)?;
+                    let group = groups[index];
+                    let spool = tempfile::spooled_tempfile_in(SPOOL_BYTES, work.path());
+                    let mut entry = ZipWriter::new(spool);
+                    let max_size = group.iter().map(|item| item.size).max().unwrap_or(0);
+                    let mut buffer = vec![0; stream_buffer_size(max_size)];
+                    for item in group {
+                        write_item(&mut entry, item, options, &progress, cancel, &mut buffer)?;
+                    }
+                    entry.finish().map_err(zip_error)
+                },
+                |spool| {
                     check_cancel(cancel)?;
                     let archive =
                         ZipArchive::new(CancelReader(spool, cancel)).map_err(zip_error)?;
-                    writer.merge_archive(archive).map_err(zip_error)?;
-                }
-            }
+                    writer.merge_archive(archive).map_err(zip_error)
+                },
+            )?;
         }
         let mut buffered = writer.finish().map_err(zip_error)?;
         buffered.flush().map_err(|e| ArchiveError::io(&target, e))?;
@@ -331,4 +379,89 @@ pub(super) fn create(
     snapshot.current_file.clear();
     progress.sink.report(snapshot, true);
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn pipeline_refills_before_slow_group_finishes_and_bounds_spools() {
+        struct Staged(usize, Arc<AtomicUsize>);
+        impl Drop for Staged {
+            fn drop(&mut self) {
+                self.1.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = AtomicUsize::new(0);
+        let (ready, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let mut order = Vec::new();
+        ordered_pipeline(
+            19,
+            2,
+            |index| {
+                let count = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                let staged = Staged(index, live.clone());
+                if index == 1 {
+                    // A batch barrier would time out: group 2 must start while
+                    // group 1 is still running, after the caller merges group 0.
+                    wait.lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                if index == 2 {
+                    ready.send(()).unwrap();
+                }
+                Ok(staged)
+            },
+            |staged| {
+                order.push(staged.0);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(order, (0..19).collect::<Vec<_>>());
+        assert!(peak.load(Ordering::SeqCst) <= 2);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn pipeline_disconnects_pending_workers_on_produce_or_merge_error() {
+        for fail_in_producer in [false, true] {
+            let result = ordered_pipeline(
+                19,
+                4,
+                |index| {
+                    if fail_in_producer && index == 1 {
+                        Err(ArchiveError::Worker("producer failure".into()))
+                    } else {
+                        Ok(index)
+                    }
+                },
+                |index| {
+                    if !fail_in_producer && index == 1 {
+                        Err(ArchiveError::Worker("merge failure".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let expected = if fail_in_producer {
+                "producer failure"
+            } else {
+                "merge failure"
+            };
+            assert!(matches!(result, Err(ArchiveError::Worker(message)) if message == expected));
+        }
+    }
 }

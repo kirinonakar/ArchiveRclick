@@ -1,6 +1,6 @@
 [package]
 name = "archive-rclick"
-version = "1.2.8"
+version = "1.2.9"
 edition = "2024"
 rust-version = "1.92"
 description = "A fast, lightweight Windows archive manager built with Rust, Slint, and libarchive"
@@ -26,7 +26,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "accessibility",
     "unstable-winit-030",
 ] }
-thiserror = "2.0.18"
+thiserror = "2.0.20"
 # Isolate flate2 backends so Cargo feature unification cannot override selection.
 zip = { path = "vendor/zip", default-features = false, features = ["deflate-flate2-zlib-rs", "aes-crypto", "time"] }
 tempfile = "3.27"
@@ -34,7 +34,7 @@ rayon = "1.12"
 time = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Globalization",
@@ -52,13 +52,14 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-core = "0.61"
+# Must match windows: COM implement macros require the same windows-core ABI.
+windows-core = "0.62.2"
 raw-window-handle = "0.6.2"
 
 [build-dependencies]
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 slint-build = "=1.17.1"
-embed-resource = "=3.0.9"
+embed-resource = "=3.0.11"
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]

@@ -218,7 +218,10 @@ fn validate_runtime_bundle(manifest_dir: &std::path::Path, runtime_dir: &std::pa
         let path = runtime_dir.join(name);
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let actual = format!("{:x}", Sha256::digest(bytes));
+        let actual: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let wanted = expected.get(name).expect("runtime file was checked above");
         if &actual != wanted {
             panic!(

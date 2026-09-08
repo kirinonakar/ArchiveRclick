@@ -24,7 +24,7 @@ Switches:
   -o{directory}       Extraction directory (default: current directory)
   -p{password}        Archive password (-p prompts for a password)
   -mx=0..9           Compression level (default: 5)
-  -zip-backend=7z|zlib-ng|zlib-rs  ZIP create/extract backend (default: saved setting or 7z)
+  -zip-backend=7z|zlib-ng|zlib-rs  ZIP create/extract backend (default: saved setting or zlib-rs)
   -mmt=on|off|N      Compression / flate2 ZIP extraction threads
   -mhe=on|off        Encrypt 7z headers
   -v{size}           Split ZIP/7z, e.g. -v100m or -v1g

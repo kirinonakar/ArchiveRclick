@@ -5,33 +5,34 @@
 mod imp {
     use std::{
         cell::Cell,
-        mem::{size_of, ManuallyDrop},
+        mem::{ManuallyDrop, size_of},
         os::windows::ffi::OsStrExt,
         path::PathBuf,
         ptr,
     };
 
     use windows::{
-        core::{implement, Error, Ref, BOOL, HRESULT},
         Win32::{
             Foundation::{
-                GlobalFree, DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
-                DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC, E_NOTIMPL, E_POINTER, HGLOBAL, POINT,
+                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
+                DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC, E_NOTIMPL, E_POINTER, GlobalFree,
+                HGLOBAL, POINT,
             },
             System::{
                 Com::{
-                    IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
-                    IEnumFORMATETC_Impl, IEnumSTATDATA, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
+                    DATADIR_GET, DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject,
+                    IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, IEnumSTATDATA,
                     STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
                 },
-                Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT},
+                Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock},
                 Ole::{
-                    DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize,
-                    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+                    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
+                    IDropSource_Impl, OleInitialize, OleUninitialize,
                 },
                 SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
             },
         },
+        core::{BOOL, Error, HRESULT, Ref, implement},
     };
 
     const CF_HDROP: u16 = 15;
@@ -286,7 +287,7 @@ mod imp {
         let locked = unsafe { GlobalLock(hglobal) };
         if locked.is_null() {
             let _ = unsafe { GlobalFree(Some(hglobal)) };
-            return Err(Error::from_win32());
+            return Err(Error::from_thread());
         }
 
         let header = DropFilesHeader {

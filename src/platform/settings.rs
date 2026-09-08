@@ -167,11 +167,15 @@ mod imp {
 
     pub fn load_zip_backend_preference() -> String {
         let Some(key) = open_key(HKEY_CURRENT_USER, SETTINGS_KEY) else {
-            return "7z".to_owned();
+            return crate::archive::ZipBackend::default()
+                .registry_key()
+                .to_owned();
         };
         match read_string_value(key.0, "ZipBackend") {
             Some(value) if !value.is_empty() => value,
-            _ => "7z".to_owned(),
+            _ => crate::archive::ZipBackend::default()
+                .registry_key()
+                .to_owned(),
         }
     }
 
@@ -712,10 +716,7 @@ mod imp {
                 "Yu Gothic Regular & Yu Gothic UI Semilight (TrueType)",
                 "yu gothic"
             ));
-            assert!(!value_name_matches(
-                "Meiryo (TrueType)",
-                "noto sans cjk jp"
-            ));
+            assert!(!value_name_matches("Meiryo (TrueType)", "noto sans cjk jp"));
             assert!(!value_name_matches(
                 "Noto Sans CJK KR (TrueType)",
                 "noto sans cjk jp"
@@ -735,7 +736,9 @@ mod imp {
     }
 
     pub fn load_zip_backend_preference() -> String {
-        "7z".to_owned()
+        crate::archive::ZipBackend::default()
+            .registry_key()
+            .to_owned()
     }
     pub fn save_zip_backend_preference(_preference: &str) -> Result<(), String> {
         Err("Settings persistence is only available on Windows".to_owned())

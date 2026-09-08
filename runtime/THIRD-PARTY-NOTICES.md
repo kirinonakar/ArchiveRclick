@@ -22,7 +22,7 @@ Source and project information:
 
 ## Statically linked ZIP backends
 
-ZIP creation additionally uses zip 8.2.0, flate2 1.1.9, libz-ng-sys 1.1.29
+ZIP creation additionally uses zip 8.6.0, flate2 1.1.10, libz-ng-sys 1.1.29
 (with zlib-ng), and zlib-rs 0.6.7. License texts are in `licenses/zip.txt`,
 `licenses/flate2-mit.txt`, `licenses/flate2-apache.txt`, `licenses/zlib-ng.txt`,
 and `licenses/zlib-rs.txt`. See the main THIRD-PARTY-LICENSES.md for supporting

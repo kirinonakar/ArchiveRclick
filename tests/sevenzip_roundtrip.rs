@@ -268,10 +268,12 @@ fn bundled_7z_header_encryption_hides_file_names() {
             .iter()
             .any(|entry| entry.display_path == "secret.txt")
     );
-    assert!(listing
-        .entries
-        .iter()
-        .all(|entry| !entry.display_path.contains("secret-folder")));
+    assert!(
+        listing
+            .entries
+            .iter()
+            .all(|entry| !entry.display_path.contains("secret-folder"))
+    );
 
     let output = work.0.join("out");
     engine
@@ -318,10 +320,7 @@ fn legacy_zip_codepage_is_applied_by_7z_for_list_and_extract() {
             &cancel,
         )
         .expect("extract legacy-name ZIP archive");
-    assert_eq!(
-        fs::read(output.join("한글.txt")).unwrap(),
-        b"legacy ZIP\n"
-    );
+    assert_eq!(fs::read(output.join("한글.txt")).unwrap(), b"legacy ZIP\n");
 }
 
 #[test]
@@ -390,7 +389,10 @@ fn bundled_zip_many_files_extracts_with_parallel_workers() {
             );
         }
     }
-    assert!(previous_bytes > 0, "parallel extraction emitted no progress");
+    assert!(
+        previous_bytes > 0,
+        "parallel extraction emitted no progress"
+    );
     assert_eq!(summary.entries_processed, 512);
     assert_eq!(fs::read_dir(&output).unwrap().count(), 512);
     assert_eq!(
@@ -416,7 +418,13 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
 
     let engine = load_composite();
     let cancel = CancellationToken::new();
-    for format in [CreateFormat::Zip, CreateFormat::SevenZip] {
+    use archive_rclick_core::archive::ZipBackend;
+    for (format, backend) in [
+        (CreateFormat::Zip, ZipBackend::SevenZip),
+        (CreateFormat::Zip, ZipBackend::ZlibNg),
+        (CreateFormat::Zip, ZipBackend::ZlibRs),
+        (CreateFormat::SevenZip, ZipBackend::SevenZip),
+    ] {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let progress = DelayedRecordingProgress(Arc::clone(&recorded));
         let archive = work.0.join(format!("debug.{}", format.default_extension()));
@@ -426,6 +434,7 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
                 std::slice::from_ref(&input),
                 &CreateOptions {
                     format,
+                    zip_backend: backend,
                     ..CreateOptions::default()
                 },
                 &progress,
@@ -462,12 +471,17 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
                 saw_last_quarter_advance = true;
             }
             assert_eq!(snapshot.total_entries, Some(4));
-            assert_eq!(
-                snapshot.entries_processed,
-                (snapshot.bytes_processed / (8 * 1024 * 1024)).min(4),
-                "{format:?} reported the wrong processed-file count at {} bytes",
-                snapshot.bytes_processed,
-            );
+            // Native 7-Zip accounts entries by source bytes. The Rust pipeline
+            // reports completed files at EOF, while other files may be in flight.
+            assert!(snapshot.entries_processed <= 4);
+            if backend == ZipBackend::SevenZip {
+                assert_eq!(
+                    snapshot.entries_processed,
+                    (snapshot.bytes_processed / (8 * 1024 * 1024)).min(4),
+                    "{format:?} reported the wrong processed-file count at {} bytes",
+                    snapshot.bytes_processed,
+                );
+            }
             if let Some(current_total) = snapshot.current_file_total_bytes {
                 assert!(
                     snapshot.current_file_bytes_processed <= current_total,
@@ -480,7 +494,7 @@ fn compression_progress_uses_source_bytes_for_zip_and_7z() {
                         "overall compression reached 100% before the current file finished"
                     );
                 }
-                if current_total > 0 && !snapshot.current_file.is_empty() {
+                if backend == ZipBackend::SevenZip && current_total > 0 && !snapshot.current_file.is_empty() {
                     assert!(
                         snapshot.current_file_bytes_processed > 0,
                         "{} was displayed before 7-Zip read any of its bytes",
@@ -634,10 +648,7 @@ fn cancelled_7z_extraction_removes_temporary_file() {
     );
 
     assert!(matches!(result, Err(ArchiveError::Cancelled)));
-    assert_eq!(
-        fs::read(output.join("hello.txt")).unwrap(),
-        b"old\n"
-    );
+    assert_eq!(fs::read(output.join("hello.txt")).unwrap(), b"old\n");
     assert_no_archive_temporary_files(&output);
 }
 
@@ -684,10 +695,12 @@ fn split_zip_and_7z_round_trip_through_volume_files() {
         let listing = engine
             .list(&first, None, 0, &quiet, &cancel)
             .unwrap_or_else(|error| panic!("list split {extension} archive: {error}"));
-        assert!(listing
-            .entries
-            .iter()
-            .any(|entry| entry.display_path.ends_with("large.bin")));
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.display_path.ends_with("large.bin"))
+        );
 
         let output = work.0.join(format!("out-{extension}"));
         engine
@@ -845,7 +858,14 @@ fn flate_zip_cancellation_preserves_existing_output() {
     for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
         let work = Work::new();
         let source = work.0.join("source.bin");
-        fs::write(&source, vec![42; 2 * 1024 * 1024]).unwrap();
+        fs::create_dir(&source).unwrap();
+        for index in 0..12 {
+            fs::write(
+                source.join(format!("{index}.bin")),
+                vec![42; 2 * 1024 * 1024],
+            )
+            .unwrap();
+        }
         let destination = work.0.join("output.zip");
         fs::write(&destination, b"keep original").unwrap();
         let cancel = CancellationToken::new();
@@ -859,6 +879,7 @@ fn flate_zip_cancellation_preserves_existing_output() {
             &[source],
             &CreateOptions {
                 zip_backend: backend,
+                threads: ThreadCount::Exact(4),
                 ..Default::default()
             },
             &progress,
@@ -935,6 +956,9 @@ fn flate_zip_large_parallel_entries_spill_and_roundtrip() {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("one.bin"), &payload).unwrap();
         fs::write(source.join("two.bin"), &payload).unwrap();
+        fs::write(source.join("three.bin"), &payload).unwrap();
+        fs::write(source.join("four.bin"), &payload).unwrap();
+        fs::write(source.join("five.bin"), &payload).unwrap();
         let destination = work.0.join("output.zip");
         load_composite()
             .create(
@@ -955,7 +979,7 @@ fn flate_zip_large_parallel_entries_spill_and_roundtrip() {
             .test(&destination, None, &quiet, &CancellationToken::new())
             .unwrap();
         let mut archive = zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap();
-        for name in ["one.bin", "two.bin"] {
+        for name in ["one.bin", "two.bin", "three.bin", "four.bin", "five.bin"] {
             let mut actual = Vec::new();
             std::io::Read::read_to_end(&mut archive.by_name(name).unwrap(), &mut actual).unwrap();
             assert_eq!(actual, payload);

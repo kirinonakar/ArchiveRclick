@@ -1,3 +1,5 @@
+//! Read Config
+
 /// Configuration for reading ZIP archives.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Config {

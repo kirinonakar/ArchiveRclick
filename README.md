@@ -5,8 +5,9 @@
 </p>
 
 ArchiveRclick is a small, portable Windows x64 archive manager written in Rust.
-It uses Slint for the native UI, bundled 7-Zip (`7z.dll`) for ZIP/7z operations,
-and libarchive for broader archive-format support.
+It uses Slint for the native UI, zlib-rs for ZIP creation/extraction by default,
+bundled 7-Zip (`7z.dll`) for 7z and fallback ZIP operations, and libarchive for
+broader archive-format support.
 
 <img src="screenshot.png" alt="ArchiveRclick screenshot" width="70%">
 
@@ -24,7 +25,7 @@ and libarchive for broader archive-format support.
   (single or one per folder).
 - English/Korean/Japanese UI, system/light/dark themes, configurable fonts and
   legacy filename code pages.
-- Settings: selectable ZIP backend (**7z** (default), **zlib-ng**, **zlib-rs** (fastest))
+- Settings: selectable ZIP backend (**7z**, **zlib-ng**, **zlib-rs** (default))
   and optional Zone.Identifier propagation to extracted files (on by default).
 
 ## Download

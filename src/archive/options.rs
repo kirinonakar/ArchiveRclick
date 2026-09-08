@@ -84,7 +84,7 @@ impl fmt::Debug for ExtractOptions {
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
-            zip_backend: ZipBackend::SevenZip,
+            zip_backend: ZipBackend::default(),
             threads: ThreadCount::Auto,
             copy_zone_identifier: true,
             flatten_paths: false,
@@ -154,9 +154,9 @@ impl CreateFormat {
 /// ZIP creation and DEFLATE extraction backend. Listing keeps the native engine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ZipBackend {
-    #[default]
     SevenZip,
     ZlibNg,
+    #[default]
     ZlibRs,
 }
 
@@ -175,7 +175,8 @@ impl ZipBackend {
         match key {
             "zlib-ng" => Self::ZlibNg,
             "zlib-rs" => Self::ZlibRs,
-            _ => Self::SevenZip,
+            "7z" => Self::SevenZip,
+            _ => Self::default(),
         }
     }
 
@@ -434,7 +435,7 @@ impl Default for CreateOptions {
             // the same output size, so keep both GUI and shell operations on
             // the upstream Normal default unless the user explicitly changes it.
             compression_level: 5,
-            zip_backend: ZipBackend::SevenZip,
+            zip_backend: ZipBackend::default(),
             split_size: None,
             password: None,
             encrypt_headers: false,
@@ -452,7 +453,15 @@ mod tests {
     fn zip_backend_defaults_and_roundtrips() {
         assert_eq!(
             CreateOptions::default().zip_backend,
-            super::ZipBackend::SevenZip
+            super::ZipBackend::ZlibRs
+        );
+        assert_eq!(
+            ExtractOptions::default().zip_backend,
+            super::ZipBackend::ZlibRs
+        );
+        assert_eq!(
+            super::ZipBackend::from_registry_key(""),
+            super::ZipBackend::ZlibRs
         );
         for backend in super::ZipBackend::ALL {
             assert_eq!(
@@ -466,11 +475,11 @@ mod tests {
         }
         assert_eq!(
             super::ZipBackend::from_registry_key("unknown"),
-            super::ZipBackend::SevenZip
+            super::ZipBackend::ZlibRs
         );
         assert_eq!(
             super::ZipBackend::from_ui_index(-1),
-            super::ZipBackend::SevenZip
+            super::ZipBackend::ZlibRs
         );
     }
 
