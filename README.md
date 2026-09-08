@@ -15,27 +15,17 @@ and libarchive for broader archive-format support.
 ## Features
 
 - Open and browse ZIP, 7z, RAR/RAR5, TAR, CAB, ISO/IMG, LHA/LZH, CPIO, AR, XAR,
-  WARC, and other formats supported by the bundled libarchive runtime. Formats
-  are detected from archive contents rather than filename extensions.
-- Navigate folders, sort and resize columns, select individual entries or a
-  contiguous range with Shift-click, drag and drop to extract.
-- Extract all or selected entries to a chosen directory, the current directory,
-  or an archive-name directory. Choose how existing files are handled, enter a
-  password when needed, cancel long operations, and monitor progress.
-- Create ZIP or 7z archives from files and folders with selectable compression
-  level and CPU threads. Password protection is supported; 7z can also encrypt
-  file names (headers).
-- Create split ZIP/7z archives from the create dialog with volume-size presets
-  ranging from 10 MB to 92.4 GB, or enter a custom size such as 30 MB or 1 GB.
-  Parts are written as `.zip.001` or `.7z.001` sequences; open the first part
-  to browse or extract the complete archive.
-- Drag selected entries from the archive to Explorer. Drop a single archive onto
-  the window to open it, or drop multiple files/a folder to prepare a new archive.
-- Optional Explorer right-click commands for extraction, one-archive creation,
-  and one-archive-per-folder batch creation.
-- English, Korean, and Japanese UI; system/light/dark themes; configurable
-  fonts, legacy filename code pages, 7z thread count, and header-encryption
-  defaults.
+  WARC, and more.
+- Create ZIP or 7z archives with compression level, thread count, and password
+  protection (7z can also encrypt file names), plus split volumes.
+- Drag and drop: drag entries out to extract, drop an archive to open it, or
+  drop files/folders to start a new archive.
+- Optional Explorer right-click commands for extraction and archive creation
+  (single or one per folder).
+- English/Korean/Japanese UI, system/light/dark themes, configurable fonts and
+  legacy filename code pages.
+- Settings: selectable ZIP backend (**7z** default, **zlib-ng**, **zlib-rs**)
+  and optional Zone.Identifier propagation to extracted files (on by default).
 
 ## Download
 
@@ -135,21 +125,3 @@ Rust dependency license metadata is listed in
 - `src/app`: Slint state and command wiring.
 - `src/platform`: Windows dialogs, settings, file associations, and Explorer integration.
 - `ui`: Slint components.
-
-### ZIP backend selection
-
-Settings > **ZIP backend** offers **7z** (default), **zlib-ng**,
-and **zlib-rs**. The preference applies to GUI and Explorer ZIP compression/extraction,
-and CLI commands unless overridden with `-zip-backend=...`. The flate2 engines
-support grouped file-level parallelism, reusable codecs, CPU feature detection, AES-256 passwords and
-split ZIP output. See [CLI.md](CLI.md#zip-backends) for examples and resource limits.
-
-Building zlib-ng requires CMake and the Visual Studio C/C++ build tools in addition
-to Rust. Release builds retain ThinLTO and one codegen unit. Build for the portable
-target CPU so runtime dispatch can choose instructions safely on each machine.
-
-### Zone.Identifier copy
-
-Settings > **Zone.Identifier** > **Copy origin info when extracting** is on by
-default. When enabled, GUI, Explorer, drag-out, and CLI extraction copy the
-archive's `Zone.Identifier` NTFS alternate data stream to newly extracted files.
