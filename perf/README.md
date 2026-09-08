@@ -45,3 +45,24 @@ backend, or `--case small-files` to focus on scheduling/allocation overhead.
 Keep a baseline CLI and its runtime DLLs and pass `--cli <baseline-path>` to run
 the same deterministic fixtures against the previous implementation. Benchmark
 without builds or other disk-heavy jobs running in parallel.
+
+## Native 7z stream comparison
+
+Build `cargo build --release --locked --example create_perf --example extract_perf`
+before and after the change. Preserve the baseline executables and runtime DLLs
+in a separate directory, then run:
+
+```powershell
+python perf/compare_sevenzip.py --baseline target/perf-sevenzip-baseline `
+  --candidate target/release/examples --runs 3 --mib 32 --data random `
+  --output perf/results/sevenzip-random.json
+```
+
+Repeat with `--data text` and a different output filename for compressible data.
+The probe compares levels 0 and 5 with four threads, single-volume creation, and
+single/split-volume extraction. Split inputs are identical archive bytes divided
+into 4 MiB parts. Every extraction is SHA-256 checked against its source. It
+excludes one warm-up, alternates executable order, and saves raw measurements and
+medians. Timings measure the engine call with warm OS caches; they do not measure
+GUI startup, cold storage, or split-volume creation. Fixtures live in a private
+temporary directory and are removed after the run.

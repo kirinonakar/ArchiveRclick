@@ -770,6 +770,7 @@ unsafe extern "system" fn extract_get_stream(
         budget: Some(Arc::clone(&context.output_budget)),
         written: AtomicU64::new(0),
         charged: AtomicU64::new(0),
+        position: AtomicU64::new(0),
     });
     // Ownership of the stream (and the final reference to `shared`) moves
     // to 7-Zip; it releases the stream when the item is finished.

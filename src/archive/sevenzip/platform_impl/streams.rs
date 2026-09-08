@@ -144,7 +144,7 @@ static MULTI_IN_STREAM_VTBL: InStreamVtbl = InStreamVtbl {
 pub(super) struct MultiInStream {
     vtbl: &'static InStreamVtbl,
     refs: AtomicU32,
-    files: Mutex<Vec<BufReader<File>>>,
+    files: Mutex<Vec<(BufReader<File>, Option<u64>)>>,
     starts: Vec<u64>,
     lengths: Vec<u64>,
     total_length: u64,
@@ -177,7 +177,7 @@ impl MultiInStream {
             total_length = total_length.checked_add(length).ok_or_else(|| {
                 ArchiveError::LimitExceeded("split archive size overflow".to_owned())
             })?;
-            files.push(BufReader::with_capacity(STREAM_BUFFER_SIZE, file));
+            files.push((BufReader::with_capacity(STREAM_BUFFER_SIZE, file), Some(0)));
         }
         Ok(Self {
             vtbl: &MULTI_IN_STREAM_VTBL,
@@ -257,17 +257,21 @@ unsafe extern "system" fn multi_in_stream_read(
             continue;
         }
         let amount = remaining.min(usize::try_from(available).unwrap_or(remaining));
-        let file = &mut files[index];
-        if file.seek(SeekFrom::Start(local)).is_err() {
+        let (file, cursor) = &mut files[index];
+        if seek_buffered(file, cursor, local).is_err() {
             return E_FAIL;
         }
         let read = match file.read(&mut destination[..amount]) {
             Ok(read) => read,
-            Err(_) => return E_FAIL,
+            Err(_) => {
+                *cursor = None;
+                return E_FAIL;
+            }
         };
         if read == 0 {
             return E_FAIL;
         }
+        *cursor = Some(local + read as u64);
         position = position.saturating_add(read as u64);
         remaining -= read;
         destination = &mut destination[read..];
@@ -277,6 +281,26 @@ unsafe extern "system" fn multi_in_stream_read(
         unsafe { *processed = (size as usize - remaining) as u32 };
     }
     S_OK
+}
+
+// BufReader::seek discards read-ahead even for a no-op seek. Keep the logical
+// cursor separately so sequential volume reads do not seek, and short backward
+// seeks can reuse buffered bytes without querying the OS file position.
+fn seek_buffered<R: Read + Seek>(
+    file: &mut BufReader<R>,
+    cursor: &mut Option<u64>,
+    target: u64,
+) -> std::io::Result<()> {
+    let previous = cursor.take();
+    if let Some(offset) =
+        previous.and_then(|position| i64::try_from(i128::from(target) - i128::from(position)).ok())
+    {
+        file.seek_relative(offset)?;
+    } else {
+        file.seek(SeekFrom::Start(target))?;
+    }
+    *cursor = Some(target);
+    Ok(())
 }
 
 unsafe extern "system" fn multi_in_stream_seek(
@@ -336,6 +360,9 @@ pub(super) struct OutStream {
     // Protected by the file mutex, including across reservation and I/O.
     pub(super) written: AtomicU64,
     pub(super) charged: AtomicU64,
+    // Protected by the file mutex. u64::MAX means unknown after an I/O error.
+    // Other owners may close the file, but must not move its cursor.
+    pub(super) position: AtomicU64,
 }
 
 /// One budget for the entire extraction, including parallel native workers.
@@ -406,6 +433,7 @@ mod output_limit_tests {
             budget: Some(budget),
             written: AtomicU64::new(0),
             charged: AtomicU64::new(0),
+            position: AtomicU64::new(0),
         }
     }
 
@@ -516,6 +544,114 @@ mod output_limit_tests {
         assert_eq!(write(&mut output, 1), E_ABORT);
         assert_eq!(length(&output), 0);
     }
+
+    #[test]
+    fn native_output_tracks_relative_end_and_unknown_positions() {
+        let mut output = stream(Arc::new(OutputBudget::new(64, 64)));
+        assert_eq!(write(&mut output, 8), S_OK);
+        for (offset, origin, expected) in [(-3, SEEK_CUR, 5), (-2, SEEK_END, 6)] {
+            let mut position = 0;
+            assert_eq!(
+                unsafe {
+                    out_stream_seek(
+                        (&mut output as *mut OutStream).cast(),
+                        offset,
+                        origin,
+                        &mut position,
+                    )
+                },
+                S_OK
+            );
+            assert_eq!(position, expected);
+            assert_eq!(output.position.load(Ordering::Relaxed), expected);
+        }
+        // Exercise recovery after a write/seek failure invalidates the cache.
+        output.position.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(write(&mut output, 4), S_OK);
+        assert_eq!(output.position.load(Ordering::Relaxed), 10);
+        assert_eq!(length(&output), 10);
+        assert_eq!(size(&mut output, 2), S_OK);
+        assert_eq!(write(&mut output, 1), S_OK);
+        assert_eq!(length(&output), 11);
+    }
+}
+
+#[cfg(test)]
+mod seek_performance_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct CountedInput {
+        data: Cursor<Vec<u8>>,
+        reads: usize,
+        seeks: usize,
+    }
+
+    impl Read for CountedInput {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.data.read(bytes)
+        }
+    }
+
+    impl Seek for CountedInput {
+        fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+            self.seeks += 1;
+            self.data.seek(from)
+        }
+    }
+
+    #[test]
+    fn repeated_small_reads_and_backward_seek_reuse_read_ahead() {
+        let mut reader = BufReader::with_capacity(
+            64,
+            CountedInput {
+                data: Cursor::new((0..128).collect()),
+                reads: 0,
+                seeks: 0,
+            },
+        );
+        let mut cursor = Some(0);
+        for target in [0, 8, 16, 24, 8, 16] {
+            seek_buffered(&mut reader, &mut cursor, target).unwrap();
+            let mut bytes = [0; 8];
+            reader.read_exact(&mut bytes).unwrap();
+            cursor = Some(target + 8);
+            assert_eq!(
+                bytes.to_vec(),
+                (target as u8..target as u8 + 8).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(reader.get_ref().reads, 1);
+        assert_eq!(reader.get_ref().seeks, 0);
+        seek_buffered(&mut reader, &mut cursor, 100).unwrap();
+        let mut byte = [0];
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [100]);
+        // Unknown positions force an absolute seek before reusing the stream.
+        cursor = None;
+        seek_buffered(&mut reader, &mut cursor, 3).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [3]);
+    }
+
+    #[test]
+    fn split_output_revisits_volumes_and_preserves_position_after_resize() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut output = VolumeOutput::new(directory.path().join("sample.7z"), 8);
+        output.write(b"abcdefghijklmnopqrst").unwrap();
+        output.seek(6, SEEK_SET).unwrap();
+        output.write(b"123456").unwrap();
+        output.set_size(22).unwrap();
+        output.write(b"XY").unwrap();
+        output.close_files();
+        let contents: Vec<u8> = output
+            .paths()
+            .iter()
+            .flat_map(|path| fs::read(path).unwrap())
+            .collect();
+        assert_eq!(contents, b"abcdef123456XYopqrst\0\0");
+    }
 }
 
 unsafe extern "system" fn out_stream_query_interface(
@@ -567,9 +703,12 @@ unsafe extern "system" fn out_stream_write(
         return E_FAIL;
     };
     if let Some(budget) = &stream.budget {
-        let position = match file.stream_position() {
-            Ok(position) => position,
-            Err(_) => return E_FAIL,
+        let position = match stream.position.load(Ordering::Relaxed) {
+            u64::MAX => match file.stream_position() {
+                Ok(position) => position,
+                Err(_) => return E_FAIL,
+            },
+            position => position,
         };
         // Reserve before writing. Keep the reservation on an I/O failure,
         // because write_all may already have written part of the buffer.
@@ -580,15 +719,24 @@ unsafe extern "system" fn out_stream_write(
         ) {
             return E_ABORT;
         }
+        stream.position.store(position, Ordering::Relaxed);
     }
     match file.write_all(bytes) {
         Ok(()) => {
+            let position = stream.position.load(Ordering::Relaxed);
+            stream
+                .position
+                .store(position.saturating_add(u64::from(size)), Ordering::Relaxed);
             if !processed.is_null() {
                 unsafe { *processed = size };
             }
             S_OK
         }
-        Err(_) => E_FAIL,
+        Err(_) => {
+            // write_all may have advanced the file before failing.
+            stream.position.store(u64::MAX, Ordering::Relaxed);
+            E_FAIL
+        }
     }
 }
 
@@ -614,8 +762,14 @@ unsafe extern "system" fn out_stream_seek(
             return E_FAIL;
         };
         match file.seek(from) {
-            Ok(position) => position,
-            Err(_) => return E_FAIL,
+            Ok(position) => {
+                stream.position.store(position, Ordering::Relaxed);
+                position
+            }
+            Err(_) => {
+                stream.position.store(u64::MAX, Ordering::Relaxed);
+                return E_FAIL;
+            }
         }
     };
     if !new_position.is_null() {
@@ -657,6 +811,7 @@ struct VolumePart {
     path: PathBuf,
     file: Option<File>,
     length: u64,
+    position: Option<u64>,
 }
 
 pub(super) struct VolumeOutput {
@@ -710,6 +865,7 @@ impl VolumeOutput {
                 path,
                 file: Some(file),
                 length: 0,
+                position: Some(0),
             });
         }
         Ok(())
@@ -736,10 +892,15 @@ impl VolumeOutput {
                 return Err(());
             }
             let path = self.parts[volume_index].path.clone();
-            let write_result = match self.parts[volume_index].file.as_mut() {
-                Some(file) => file
-                    .seek(SeekFrom::Start(local_position))
-                    .and_then(|_| file.write_all(&remaining[..amount])),
+            let part = &mut self.parts[volume_index];
+            let previous = part.position.take();
+            let write_result = match part.file.as_mut() {
+                Some(file) => (if previous == Some(local_position) {
+                    Ok(local_position)
+                } else {
+                    file.seek(SeekFrom::Start(local_position))
+                })
+                .and_then(|_| file.write_all(&remaining[..amount])),
                 None => {
                     self.remember_message(format!(
                         "output volume {} is already closed",
@@ -754,6 +915,7 @@ impl VolumeOutput {
             }
             let amount = amount as u64;
             let part = &mut self.parts[volume_index];
+            part.position = Some(local_position + amount);
             part.length = part.length.max(local_position.saturating_add(amount));
             self.position = self.position.saturating_add(amount);
             self.length = self.length.max(self.position);

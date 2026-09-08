@@ -791,6 +791,7 @@ impl ArchiveEngine for SevenZipEngine {
                             budget: None,
                             written: AtomicU64::new(0),
                             charged: AtomicU64::new(0),
+                            position: AtomicU64::new(0),
                             vtbl: &OUT_STREAM_VTBL,
                             refs: AtomicU32::new(1),
                             file: Arc::clone(
