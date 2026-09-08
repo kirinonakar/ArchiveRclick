@@ -127,6 +127,7 @@ fn run_extract_worker(
     conflicts: &'static dyn ConflictResolver,
     policy: RuntimePolicy,
     assume_targets_missing: bool,
+    output_budget: Arc<OutputBudget>,
 ) -> ArchiveResult<OperationSummary> {
     let open_archive = open_for_read(api, archive, format, password, pathname_codepage, &cancel)?;
     let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
@@ -135,6 +136,7 @@ fn run_extract_worker(
     let mut prepared_dirs = HashSet::new();
     prepared_dirs.insert(root.clone());
     let context = Arc::new(Mutex::new(ExtractContext {
+        output_budget: Arc::clone(&output_budget),
         root,
         prepared_dirs,
         assume_targets_missing,
@@ -187,6 +189,10 @@ fn run_extract_worker(
     // files left in the pending queue by cancellation or failure.
     cleanup_pending_temp_files(&callback);
 
+    if let Some(error) = output_budget.error() {
+        return Err(error);
+    }
+
     // If 7-Zip requested a password while none was supplied, preserve the
     // retryable password error even when the native callback also reported
     // a generic extraction error.
@@ -224,6 +230,7 @@ fn run_parallel_zip_extract(
     cancel: &CancellationToken,
     progress: Arc<ThrottledProgress<'static>>,
     conflicts: &'static dyn ConflictResolver,
+    output_budget: Arc<OutputBudget>,
 ) -> ArchiveResult<OperationSummary> {
     const MAX_WORKERS: usize = 8;
     const MIN_ENTRIES_PER_WORKER: usize = 128;
@@ -252,6 +259,7 @@ fn run_parallel_zip_extract(
             conflicts,
             RuntimePolicy::OverwriteAll,
             true,
+            output_budget,
         );
     }
 
@@ -267,6 +275,7 @@ fn run_parallel_zip_extract(
         let selected = Arc::new(chunk.iter().copied().collect::<HashSet<_>>());
         let indices = chunk.to_vec();
         let cancel = cancel.clone();
+        let output_budget = Arc::clone(&output_budget);
         let progress: Arc<dyn ProgressSink> = Arc::new(ParallelWorkerProgress {
             aggregate: Arc::clone(&aggregate),
             worker_index,
@@ -289,6 +298,7 @@ fn run_parallel_zip_extract(
                 conflicts,
                 RuntimePolicy::OverwriteAll,
                 true,
+                output_budget,
             )
         }));
     }
@@ -326,6 +336,9 @@ fn run_parallel_zip_extract(
                 cancel.cancel();
             }
         }
+    }
+    if let Some(error) = output_budget.error() {
+        return Err(error);
     }
     if let Some(error) = first_error {
         return Err(error);
@@ -580,6 +593,10 @@ impl ArchiveEngine for SevenZipEngine {
             .collect();
         let total_entries = options.total_entries_hint.unwrap_or(items.len() as u64);
         let total_bytes = options.total_bytes_hint.or(Some(selected_bytes));
+        let output_budget = Arc::new(OutputBudget::new(
+            options.max_file_bytes,
+            options.max_total_bytes,
+        ));
         let summary = if format == ReadFormat::Zip && assume_targets_missing && indices.len() >= 256
         {
             run_parallel_zip_extract(
@@ -595,6 +612,7 @@ impl ArchiveEngine for SevenZipEngine {
                 cancel,
                 Arc::clone(&throttled),
                 conflicts,
+                output_budget,
             )?
         } else {
             run_extract_worker(
@@ -614,6 +632,7 @@ impl ArchiveEngine for SevenZipEngine {
                 conflicts,
                 RuntimePolicy::from(options.conflict_policy),
                 assume_targets_missing,
+                output_budget,
             )?
         };
         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
@@ -757,6 +776,9 @@ impl ArchiveEngine for SevenZipEngine {
                         Box::into_raw(stream).cast::<c_void>()
                     } else {
                         let stream = Box::new(OutStream {
+                            budget: None,
+                            written: AtomicU64::new(0),
+                            charged: AtomicU64::new(0),
                             vtbl: &OUT_STREAM_VTBL,
                             refs: AtomicU32::new(1),
                             file: Arc::clone(
@@ -952,6 +974,7 @@ impl ArchiveEngine for SevenZipEngine {
         );
         let selected = Arc::new(HashSet::new());
         let context = Arc::new(Mutex::new(ExtractContext {
+            output_budget: Arc::new(OutputBudget::new(u64::MAX, u64::MAX)),
             root: PathBuf::new(),
             prepared_dirs: HashSet::new(),
             assume_targets_missing: false,

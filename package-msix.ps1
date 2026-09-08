@@ -367,6 +367,12 @@ $unpacked = Join-Path $output "package-verify"
 Invoke-Native -FilePath $makeAppx -ArgumentList @("unpack", "/p", $msixPath, "/d", $unpacked, "/o")
 try {
     $verifyManifest = Join-Path $unpacked "AppxManifest.xml"
+    foreach ($entry in $expected.GetEnumerator()) {
+        $packagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $unpacked $entry.Key)).Hash.ToLowerInvariant()
+        if ($packagedHash -ne $entry.Value) {
+            throw "MSIX runtime hash mismatch for $($entry.Key)"
+        }
+    }
     if (-not (Test-Path -LiteralPath $verifyManifest -PathType Leaf)) {
         throw "The generated MSIX does not contain AppxManifest.xml"
     }

@@ -2,7 +2,7 @@
 
 ArchiveRclick includes unmodified Windows x64 runtime binaries for libarchive
 3.8.9, zlib 1.3.2, bzip2 1.0.8, XZ Utils/liblzma 5.8.3, LZ4 1.10.0,
-Zstandard 1.5.7, and 7-Zip 26.02 (7z.dll). Their complete license texts are
+Zstandard 1.5.7, and 7-Zip 26.03 (7z.dll). Their complete license texts are
 in the adjacent `licenses` directory in the source distribution.
 
 The portable package also includes Microsoft's unmodified

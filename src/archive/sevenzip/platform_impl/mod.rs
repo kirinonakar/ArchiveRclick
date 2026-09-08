@@ -70,8 +70,8 @@ const FILETIME_EPOCH_SECONDS: i64 = 11_644_473_600;
 
 mod streams;
 use streams::{
-    IN_STREAM_VTBL, InStream, MultiInStream, OUT_STREAM_VTBL, OutStream, VOLUME_OUT_STREAM_VTBL,
-    VolumeOutStream, VolumeOutput,
+    IN_STREAM_VTBL, InStream, MultiInStream, OUT_STREAM_VTBL, OutStream, OutputBudget,
+    VOLUME_OUT_STREAM_VTBL, VolumeOutStream, VolumeOutput,
 };
 
 mod callbacks;
@@ -92,8 +92,8 @@ use source::collect_sources;
 mod engine;
 pub use engine::SevenZipEngine;
 
-mod zip_flate;
 mod zip_extract;
+mod zip_flate;
 
 mod composite;
 pub use composite::CompositeEngine;

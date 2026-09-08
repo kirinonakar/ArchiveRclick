@@ -332,6 +332,190 @@ pub(super) struct OutStream {
     pub(super) vtbl: &'static OutStreamVtbl,
     pub(super) refs: AtomicU32,
     pub(super) file: Arc<Mutex<Option<File>>>,
+    pub(super) budget: Option<Arc<OutputBudget>>,
+    // Protected by the file mutex, including across reservation and I/O.
+    pub(super) written: AtomicU64,
+    pub(super) charged: AtomicU64,
+}
+
+/// One budget for the entire extraction, including parallel native workers.
+/// Charge the greater of decoded bytes and the file's high-water extent, so
+/// preallocation is not charged again when filled, but rewrites still count.
+pub(super) struct OutputBudget {
+    max_file: u64,
+    max_total: u64,
+    total: Mutex<u64>,
+    exceeded: AtomicBool,
+}
+
+impl OutputBudget {
+    pub(super) fn new(max_file: u64, max_total: u64) -> Self {
+        Self {
+            max_file,
+            max_total,
+            total: Mutex::new(0),
+            exceeded: AtomicBool::new(false),
+        }
+    }
+
+    pub(super) fn error(&self) -> Option<ArchiveError> {
+        self.exceeded.load(Ordering::Acquire).then(|| {
+            ArchiveError::LimitExceeded(
+                "7z actual output exceeds the extraction byte limit".to_owned(),
+            )
+        })
+    }
+
+    fn reserve(&self, stream: &OutStream, amount: u64, extent: Option<u64>) -> bool {
+        let mut total = self
+            .total
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if self.exceeded.load(Ordering::Acquire) {
+            return false;
+        }
+        let written = stream.written.load(Ordering::Relaxed).checked_add(amount);
+        let previous = stream.charged.load(Ordering::Relaxed);
+        let charge = written
+            .zip(extent)
+            .map(|(written, extent)| previous.max(written).max(extent));
+        let next = charge.and_then(|charge| total.checked_add(charge - previous));
+        if let (Some(written), Some(charge), Some(next)) = (written, charge, next)
+            && charge <= self.max_file
+            && next <= self.max_total
+        {
+            *total = next;
+            stream.written.store(written, Ordering::Relaxed);
+            stream.charged.store(charge, Ordering::Relaxed);
+            return true;
+        }
+        self.exceeded.store(true, Ordering::Release);
+        false
+    }
+}
+
+#[cfg(test)]
+mod output_limit_tests {
+    use super::*;
+
+    fn stream(budget: Arc<OutputBudget>) -> OutStream {
+        OutStream {
+            vtbl: &OUT_STREAM_VTBL,
+            refs: AtomicU32::new(1),
+            file: Arc::new(Mutex::new(Some(tempfile::tempfile().unwrap()))),
+            budget: Some(budget),
+            written: AtomicU64::new(0),
+            charged: AtomicU64::new(0),
+        }
+    }
+
+    fn write(stream: &mut OutStream, size: u32) -> i32 {
+        let data = vec![42u8; size as usize];
+        let mut processed = u32::MAX;
+        let hr = unsafe {
+            out_stream_write(
+                (stream as *mut OutStream).cast(),
+                data.as_ptr().cast(),
+                size,
+                &mut processed,
+            )
+        };
+        assert_eq!(processed, if hr == S_OK { size } else { 0 });
+        hr
+    }
+
+    fn size(stream: &mut OutStream, size: u64) -> i32 {
+        unsafe { out_stream_set_size((stream as *mut OutStream).cast(), size) }
+    }
+
+    fn seek(stream: &mut OutStream, position: i64) {
+        assert_eq!(
+            unsafe {
+                out_stream_seek(
+                    (stream as *mut OutStream).cast(),
+                    position,
+                    SEEK_SET,
+                    ptr::null_mut(),
+                )
+            },
+            S_OK
+        );
+    }
+
+    fn length(stream: &OutStream) -> u64 {
+        stream
+            .file
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len()
+    }
+
+    #[test]
+    fn native_output_counts_rewrites_and_rejects_before_io() {
+        let budget = Arc::new(OutputBudget::new(8, 100));
+        let mut output = stream(Arc::clone(&budget));
+        assert_eq!(write(&mut output, 4), S_OK);
+        seek(&mut output, 0);
+        assert_eq!(write(&mut output, 4), S_OK);
+        assert_eq!(write(&mut output, 1), E_ABORT);
+        assert_eq!(length(&output), 4);
+        assert!(matches!(
+            budget.error(),
+            Some(ArchiveError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn native_output_shares_total_across_threads() {
+        let budget = Arc::new(OutputBudget::new(8, 8));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let budget = Arc::clone(&budget);
+                std::thread::spawn(move || write(&mut stream(budget), 4))
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|&&hr| hr == S_OK).count(), 2);
+        assert_eq!(results.iter().filter(|&&hr| hr == E_ABORT).count(), 2);
+    }
+
+    #[test]
+    fn native_output_preallocation_is_not_double_charged_or_refunded() {
+        let budget = Arc::new(OutputBudget::new(8, 8));
+        let mut first = stream(Arc::clone(&budget));
+        assert_eq!(size(&mut first, 8), S_OK);
+        assert_eq!(write(&mut first, 8), S_OK);
+        assert_eq!(size(&mut first, 0), S_OK);
+        let mut second = stream(budget);
+        assert_eq!(size(&mut second, 1), E_ABORT);
+        assert_eq!(length(&second), 0);
+    }
+
+    #[test]
+    fn native_output_rejects_oversized_set_size_and_sparse_write() {
+        let mut output = stream(Arc::new(OutputBudget::new(8, 100)));
+        assert_eq!(size(&mut output, 9), E_ABORT);
+        assert_eq!(length(&output), 0);
+        let mut output = stream(Arc::new(OutputBudget::new(8, 100)));
+        seek(&mut output, 8);
+        assert_eq!(write(&mut output, 1), E_ABORT);
+        assert_eq!(length(&output), 0);
+    }
+
+    #[test]
+    fn native_output_rejects_counter_overflow() {
+        let mut output = stream(Arc::new(OutputBudget::new(u64::MAX, u64::MAX)));
+        output.written.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(write(&mut output, 1), E_ABORT);
+        assert_eq!(length(&output), 0);
+    }
 }
 
 unsafe extern "system" fn out_stream_query_interface(
@@ -382,6 +566,21 @@ unsafe extern "system" fn out_stream_write(
     let Some(file) = guard.as_mut() else {
         return E_FAIL;
     };
+    if let Some(budget) = &stream.budget {
+        let position = match file.stream_position() {
+            Ok(position) => position,
+            Err(_) => return E_FAIL,
+        };
+        // Reserve before writing. Keep the reservation on an I/O failure,
+        // because write_all may already have written part of the buffer.
+        if !budget.reserve(
+            stream,
+            u64::from(size),
+            position.checked_add(u64::from(size)),
+        ) {
+            return E_ABORT;
+        }
+    }
     match file.write_all(bytes) {
         Ok(()) => {
             if !processed.is_null() {
@@ -434,6 +633,11 @@ unsafe extern "system" fn out_stream_set_size(this: *mut c_void, size: u64) -> i
     let Some(file) = guard.as_mut() else {
         return E_FAIL;
     };
+    if let Some(budget) = &stream.budget
+        && !budget.reserve(stream, 0, Some(size))
+    {
+        return E_ABORT;
+    }
     match file.set_len(size) {
         Ok(()) => S_OK,
         Err(_) => E_FAIL,

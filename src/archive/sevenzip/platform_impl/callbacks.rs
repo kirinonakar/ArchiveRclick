@@ -501,6 +501,7 @@ impl From<InitialConflictPolicy> for RuntimePolicy {
 }
 
 pub(super) struct ExtractContext {
+    pub(super) output_budget: Arc<OutputBudget>,
     pub(super) root: PathBuf,
     pub(super) prepared_dirs: HashSet<PathBuf>,
     pub(super) assume_targets_missing: bool,
@@ -765,6 +766,9 @@ unsafe extern "system" fn extract_get_stream(
         vtbl: &OUT_STREAM_VTBL,
         refs: AtomicU32::new(1),
         file: Arc::clone(&shared),
+        budget: Some(Arc::clone(&context.output_budget)),
+        written: AtomicU64::new(0),
+        charged: AtomicU64::new(0),
     });
     // Ownership of the stream (and the final reference to `shared`) moves
     // to 7-Zip; it releases the stream when the item is finished.
@@ -792,6 +796,10 @@ unsafe extern "system" fn extract_set_operation_result(
         .context
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(error) = context.output_budget.error() {
+        context.error = Some(error);
+        return E_ABORT;
+    }
     if operation_result != OPERATION_RESULT_OK {
         let message = match operation_result {
             OPERATION_RESULT_UNSUPPORTED_METHOD => "unsupported compression method",

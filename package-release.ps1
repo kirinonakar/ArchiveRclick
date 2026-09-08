@@ -72,6 +72,10 @@ try {
             throw "Hash mismatch for $($entry.Key): expected $($entry.Value), got $actual"
         }
         Copy-Item -LiteralPath $source -Destination (Join-Path $output $entry.Key)
+        $packagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $output $entry.Key)).Hash.ToLowerInvariant()
+        if ($packagedHash -ne $entry.Value) {
+            throw "Packaged runtime hash mismatch for $($entry.Key)"
+        }
     }
 
     $releaseDirectory = Join-Path $repository "target\release"

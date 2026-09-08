@@ -118,7 +118,7 @@ their own terms:
 | XZ Utils / liblzma | 5.8.3 | 0BSD for liblzma; see package notice |
 | LZ4 | 1.10.0 | BSD 2-Clause |
 | Zstandard | 1.5.7 | BSD or GPLv2 |
-| 7-Zip (`7z.dll`) | 26.02 | LGPL with the 7-Zip unRAR restriction and BSD portions |
+| 7-Zip (`7z.dll`) | 26.03 | LGPL with the 7-Zip unRAR restriction and BSD portions |
 | Microsoft VC runtime | 14.51.36247.0 | Microsoft Visual Studio REDIST terms |
 
 The complete notices and license texts are included in
