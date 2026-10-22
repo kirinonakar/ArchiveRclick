@@ -12,6 +12,7 @@ pub(super) fn load_engine() -> Result<Engine, String> {
         Ok(engine) => Some(engine),
         Err(error) => {
             eprintln!("7z.dll unavailable; 7z archives will not open: {error}");
+            crate::diagnostics::log(&format!("7z.dll unavailable: {error}"));
             None
         }
     };

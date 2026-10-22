@@ -1,5 +1,6 @@
 pub mod app;
 pub mod archive;
+pub mod diagnostics;
 pub mod platform;
 pub mod tasks;
 

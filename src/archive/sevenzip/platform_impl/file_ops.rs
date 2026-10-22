@@ -3,12 +3,8 @@
 use super::*;
 
 pub(super) fn build_path(display: &str) -> ArchiveResult<PathBuf> {
-    let mut path = PathBuf::new();
-    for component in display.trim_end_matches(['/', '\\']).split(['/', '\\']) {
-        if !component.is_empty() {
-            path.push(component);
-        }
-    }
+    // Preserve roots and prefixes so extraction can reject absolute paths.
+    let path = PathBuf::from(display.replace('\\', "/"));
     if path.as_os_str().is_empty() {
         return Err(ArchiveError::UnsafeEntryPath(display.to_owned()));
     }

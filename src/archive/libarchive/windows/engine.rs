@@ -450,6 +450,37 @@ impl ArchiveEngine for LibArchiveEngine {
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
         check_cancel(cancel)?;
+        if options.incompatible_names == crate::archive::UnsupportedEntryPolicy::Fail
+            || options.unsupported_entries == crate::archive::UnsupportedEntryPolicy::Fail
+        {
+            // Strict mode preflights entry policy before touching the destination.
+            // Streaming formats otherwise discover a late link after earlier files
+            // have already been installed.
+            let mut preflight = Reader::open(&self.api, archive, options.password.as_deref())?;
+            let mut scan = ScanBudget::new(
+                MAX_EXTRACT_SCAN_ENTRIES,
+                MAX_EXTRACT_SCAN_DECODED_BYTES,
+                "strict extraction preflight",
+            );
+            let mut buffer = vec![0u8; IO_BUFFER_SIZE];
+            let mut ignored = OperationSummary::default();
+            while let Some(entry) =
+                preflight.next_entry(effective_lha_codepage(archive, options.pathname_codepage))?
+            {
+                check_cancel(cancel)?;
+                scan.visit_entry()?;
+                crate::archive::extraction_policy::selected_path(
+                    &entry.path,
+                    entry.kind,
+                    options,
+                    &mut ignored,
+                )?;
+                if entry.kind == ArchiveEntryKind::File {
+                    preflight.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {})?;
+                }
+            }
+            preflight.finish()?;
+        }
         fs::create_dir_all(destination).map_err(|error| ArchiveError::io(destination, error))?;
         let root =
             fs::canonicalize(destination).map_err(|error| ArchiveError::io(destination, error))?;
@@ -493,14 +524,19 @@ impl ArchiveEngine for LibArchiveEngine {
             };
             visited_entries = visited_entries.saturating_add(1);
             scan.visit_entry()?;
-            let relative = safe_relative_path(&entry.path)?;
-            if !options.selection.includes(&relative) {
+            let relative = crate::archive::extraction_policy::selected_path(
+                &entry.path,
+                entry.kind,
+                options,
+                &mut summary,
+            )?;
+            let Some(relative) = relative else {
                 snapshot.current_file.clone_from(&entry.display_path);
                 snapshot.current_file_total_bytes = entry
                     .size
                     .or_else(|| (entry.kind == ArchiveEntryKind::Directory).then_some(0));
                 snapshot.current_file_bytes_processed = 0;
-                if entry.kind == ArchiveEntryKind::File {
+                if entry.kind != ArchiveEntryKind::Directory {
                     let drained = reader.drain_current_entry(
                         &mut buffer,
                         cancel,
@@ -519,7 +555,7 @@ impl ArchiveEngine for LibArchiveEngine {
                     }
                 }
                 continue;
-            }
+            };
             selected_entries = selected_entries
                 .checked_add(1)
                 .ok_or_else(|| ArchiveError::LimitExceeded("entry count overflow".to_owned()))?;
@@ -563,6 +599,17 @@ impl ArchiveEngine for LibArchiveEngine {
                 relative
             };
             let target = root.join(&relative);
+            if crate::archive::path_safety::has_type_conflict(
+                &root,
+                &target,
+                entry.kind == ArchiveEntryKind::Directory,
+            )? {
+                summary.skip_entry("file/directory type conflict", &relative);
+                if entry.kind == ArchiveEntryKind::File {
+                    reader.drain_current_entry(&mut buffer, cancel, &mut scan, |_, _| {})?;
+                }
+                continue;
+            }
             ensure_no_reparse_ancestors(&root, &target)?;
             match entry.kind {
                 ArchiveEntryKind::Directory => {
@@ -650,7 +697,7 @@ impl ArchiveEngine for LibArchiveEngine {
                                 .file_mut()
                                 .flush()
                                 .map_err(|error| ArchiveError::io(&temporary.path, error))?;
-                            zone_identifier.apply(&temporary.path, &target)?;
+                            zone_identifier.apply(&temporary.path, &target);
                             temporary.close_file();
                             install_temporary(&root, &temporary.path, &target)?;
                             temporary.disarm();
@@ -711,7 +758,10 @@ impl ArchiveEngine for LibArchiveEngine {
             .unwrap_or(progress_bytes)
             .max(progress_bytes);
         throttled.report(snapshot, true);
-        summary.warning = warning;
+        if let Some(warning) = warning {
+            summary.add_warning(&warning);
+        }
+        zone_identifier.report_warnings(&mut summary);
         Ok(summary)
     }
 

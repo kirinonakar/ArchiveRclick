@@ -140,7 +140,7 @@ fn decoder_choice_selects_the_requested_implementation() {
 fn extraction_rejects_traversal_symlinks_and_declared_limits() {
     let engine = engine();
     for backend in [ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
-        for name in ["../escape", "/absolute", "C:/outside", "file:stream"] {
+        for name in ["../escape", "/absolute", "C:/outside"] {
             let work = tempfile::tempdir().unwrap();
             let path = work.path().join("test.zip");
             fs::write(&path, archive(&[(name, b"bad")], None, false)).unwrap();
@@ -198,6 +198,7 @@ fn extraction_rejects_traversal_symlinks_and_declared_limits() {
                 &work.path().join("out"),
                 &ExtractOptions {
                     zip_backend: backend,
+                    unsupported_entries: UnsupportedEntryPolicy::Fail,
                     ..Default::default()
                 }
             ),
@@ -384,7 +385,7 @@ fn pooled_codecs_reset_across_levels_empty_members_and_flushes() {
 }
 
 #[test]
-fn zone_identifier_propagates_only_to_extracted_supported_files() {
+fn zone_identifier_propagates_to_all_extracted_files() {
     fn ads(path: &Path) -> PathBuf {
         let mut name = path.as_os_str().to_os_string();
         name.push(":Zone.Identifier");
@@ -403,6 +404,25 @@ fn zone_identifier_propagates_only_to_extracted_supported_files() {
                 ("nested/APP.EXE", b"executable"),
                 ("readme.txt", b"text"),
                 ("document.docx", b"document"),
+                ("macro.docm", b"macro"),
+                ("macro.xlsm", b"macro"),
+                ("macro.pptm", b"macro"),
+                ("template.dotm", b"macro"),
+                ("script.hta", b"script"),
+                ("console.msc", b"console"),
+                ("control.cpl", b"control"),
+                ("program.jar", b"program"),
+                ("help.chm", b"help"),
+                ("package.appx", b"package"),
+                ("package.msix", b"package"),
+                ("image.vhd", b"disk"),
+                ("image.vhdx", b"disk"),
+                ("library.dll", b"library"),
+                ("page.html", b"web"),
+                ("page.htm", b"web"),
+                ("document.pdf", b"document"),
+                ("unknown.extension", b"unknown"),
+                ("no-extension", b"unknown"),
             ],
             None,
             false,
@@ -430,7 +450,30 @@ fn zone_identifier_propagates_only_to_extracted_supported_files() {
                     &CancellationToken::new(),
                 )
                 .unwrap();
-            for name in ["nested/APP.EXE", "document.docx"] {
+            for name in [
+                "nested/APP.EXE",
+                "document.docx",
+                "readme.txt",
+                "macro.docm",
+                "macro.xlsm",
+                "macro.pptm",
+                "template.dotm",
+                "script.hta",
+                "console.msc",
+                "control.cpl",
+                "program.jar",
+                "help.chm",
+                "package.appx",
+                "package.msix",
+                "image.vhd",
+                "image.vhdx",
+                "library.dll",
+                "page.html",
+                "page.htm",
+                "document.pdf",
+                "unknown.extension",
+                "no-extension",
+            ] {
                 let stream = ads(&target.join(name));
                 if enabled {
                     assert_eq!(fs::read(stream).unwrap(), origin);
@@ -438,7 +481,6 @@ fn zone_identifier_propagates_only_to_extracted_supported_files() {
                     assert!(!stream.exists());
                 }
             }
-            assert!(!ads(&target.join("readme.txt")).exists());
             // Skip must leave both the existing bytes and its origin untouched.
             let preserved = target.join("document.docx");
             fs::write(&preserved, b"existing").unwrap();

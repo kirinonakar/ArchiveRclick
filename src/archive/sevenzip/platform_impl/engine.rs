@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// Detect a context/progress Arc escaping a synchronous COM operation. Declared
+/// before native owners so their callbacks are dropped before this guard runs.
+struct BorrowedProgressScope<'a>(&'a Arc<ThrottledProgress<'static>>);
+impl Drop for BorrowedProgressScope<'_> {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            Arc::strong_count(self.0),
+            1,
+            "7-Zip retained borrowed progress"
+        );
+    }
+}
+
 // ------------------------------------------------------------------
 
 // Engine
@@ -480,6 +493,7 @@ impl ArchiveEngine for SevenZipEngine {
         let conflicts: &'static dyn ConflictResolver = unsafe { mem::transmute(conflicts) };
         let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
         let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
+        let _borrowed_progress = BorrowedProgressScope(&throttled);
 
         let format = archive_format(archive).ok_or_else(|| {
             ArchiveError::UnsupportedOption(
@@ -529,16 +543,21 @@ impl ArchiveEngine for SevenZipEngine {
         let mut selected = HashSet::with_capacity(entries.len());
         let mut selected_count = 0u64;
         let mut selected_bytes = 0u64;
+        let mut compatibility = OperationSummary::default();
         for entry in &entries {
-            let relative = safe_relative_path(&entry.path)?;
-            let include = options.selection.includes(&relative)
+            let candidate = crate::archive::extraction_policy::selected_path(
+                &entry.path,
+                entry.kind,
+                options,
+                &mut compatibility,
+            )?;
+            let include = candidate.is_some()
                 && !(options.flatten_paths && entry.kind == ArchiveEntryKind::Directory);
+            // Keep the index-aligned metadata array for solid archive callbacks.
+            // Unselected entries never use this placeholder as an output path.
+            let relative = candidate.unwrap_or_default();
             let relative = if options.flatten_paths {
-                PathBuf::from(
-                    relative
-                        .file_name()
-                        .ok_or_else(|| ArchiveError::UnsafeEntryPath(entry.display_path.clone()))?,
-                )
+                relative.file_name().map(PathBuf::from).unwrap_or_default()
             } else {
                 relative
             };
@@ -607,46 +626,51 @@ impl ArchiveEngine for SevenZipEngine {
             archive,
             options.copy_zone_identifier,
         )?;
-        let summary = if format == ReadFormat::Zip && assume_targets_missing && indices.len() >= 256
-        {
-            run_parallel_zip_extract(
-                Arc::clone(&self.api),
-                archive,
-                options.password.as_deref(),
-                pathname_codepage,
-                root,
-                Arc::clone(&items),
-                &indices,
-                total_entries,
-                total_bytes,
-                cancel,
-                Arc::clone(&throttled),
-                conflicts,
-                output_budget,
-                zone_identifier,
-            )?
-        } else {
-            run_extract_worker(
-                &self.api,
-                archive,
-                format,
-                options.password.as_deref(),
-                pathname_codepage,
-                root,
-                items,
-                selected,
-                indices,
-                total_entries,
-                total_bytes,
-                cancel.clone(),
-                throttled.clone(),
-                conflicts,
-                RuntimePolicy::from(options.conflict_policy),
-                assume_targets_missing,
-                output_budget,
-                zone_identifier,
-            )?
-        };
+        let mut summary =
+            if format == ReadFormat::Zip && assume_targets_missing && indices.len() >= 256 {
+                run_parallel_zip_extract(
+                    Arc::clone(&self.api),
+                    archive,
+                    options.password.as_deref(),
+                    pathname_codepage,
+                    root,
+                    Arc::clone(&items),
+                    &indices,
+                    total_entries,
+                    total_bytes,
+                    cancel,
+                    Arc::clone(&throttled),
+                    conflicts,
+                    output_budget,
+                    zone_identifier.clone(),
+                )?
+            } else {
+                run_extract_worker(
+                    &self.api,
+                    archive,
+                    format,
+                    options.password.as_deref(),
+                    pathname_codepage,
+                    root,
+                    items,
+                    selected,
+                    indices,
+                    total_entries,
+                    total_bytes,
+                    cancel.clone(),
+                    throttled.clone(),
+                    conflicts,
+                    RuntimePolicy::from(options.conflict_policy),
+                    assume_targets_missing,
+                    output_budget,
+                    zone_identifier.clone(),
+                )?
+            };
+        summary.entries_skipped += compatibility.entries_skipped;
+        if let Some(warning) = compatibility.warning {
+            summary.add_warning(&warning);
+        }
+        zone_identifier.report_warnings(&mut summary);
         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Finished);
         snapshot.total_entries = Some(total_entries);
         snapshot.total_bytes = total_bytes;
@@ -738,6 +762,7 @@ impl ArchiveEngine for SevenZipEngine {
         // before the borrow ends, so extending the lifetime is sound.
         let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
         let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
+        let _borrowed_progress = BorrowedProgressScope(&throttled);
         let mut opening = ProgressSnapshot::new(ProgressPhase::Opening);
         opening.total_entries = Some(file_count);
         opening.total_bytes = Some(total_bytes);
@@ -944,6 +969,7 @@ impl ArchiveEngine for SevenZipEngine {
         // before the borrow ends, so extending the lifetime is sound.
         let progress: &'static dyn ProgressSink = unsafe { mem::transmute(progress) };
         let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
+        let _borrowed_progress = BorrowedProgressScope(&throttled);
         let mut opening = ProgressSnapshot::new(ProgressPhase::Opening);
         opening.total_bytes = Some(total_input);
         opening.current_file = archive.display().to_string();
@@ -1182,6 +1208,54 @@ fn open_for_read(
     Ok(archive)
 }
 
+fn read_entry_kind(
+    in_archive: &RawInArchive,
+    index: u32,
+    is_dir: bool,
+) -> ArchiveResult<ArchiveEntryKind> {
+    let mut mode = None;
+    let mut attributes = 0;
+    for property in [KPID_SYMLINK, KPID_HARDLINK, KPID_POSIX_ATTRIB, KPID_ATTRIB] {
+        let mut value = PropVariant::empty();
+        let hr = in_archive.get_property(index, property, &mut value);
+        let link = value.as_bstr().is_some_and(|value| !value.is_empty());
+        let number = value.as_u64();
+        value.clear();
+        require_hr(hr, "reading 7z entry type")?;
+        if link {
+            return Ok(if property == KPID_HARDLINK {
+                ArchiveEntryKind::Hardlink
+            } else {
+                ArchiveEntryKind::Symlink
+            });
+        }
+        if property == KPID_POSIX_ATTRIB {
+            mode = number;
+        }
+        if property == KPID_ATTRIB {
+            attributes = number.unwrap_or(0);
+        }
+    }
+    // 7z stores Unix mode in the high 16 bits when FILE_ATTRIBUTE_UNIX_EXTENSION
+    // (0x8000) is set; ZIP also exposes kpidPosixAttrib. Reparse payloads must
+    // never be written out as ordinary files, even when no target is exposed.
+    if attributes & u64::from(FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        return Ok(ArchiveEntryKind::Symlink);
+    }
+    let mode = mode.or_else(|| (attributes & 0x8000 != 0).then_some(attributes >> 16));
+    Ok(match mode.map(|mode| mode & 0o170000).unwrap_or(0) {
+        0o120000 => ArchiveEntryKind::Symlink,
+        0 | 0o100000 | 0o040000 => {
+            if is_dir {
+                ArchiveEntryKind::Directory
+            } else {
+                ArchiveEntryKind::File
+            }
+        }
+        _ => ArchiveEntryKind::Other,
+    })
+}
+
 fn read_entries(
     in_archive: &RawInArchive,
     phase: ProgressPhase,
@@ -1286,11 +1360,7 @@ fn read_entries(
             size,
             compressed_size,
             modified_unix_seconds,
-            kind: if is_dir {
-                ArchiveEntryKind::Directory
-            } else {
-                ArchiveEntryKind::File
-            },
+            kind: read_entry_kind(in_archive, index, is_dir)?,
             encrypted,
         });
         if report_progress {

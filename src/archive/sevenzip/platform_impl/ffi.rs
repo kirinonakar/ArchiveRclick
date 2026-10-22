@@ -20,6 +20,10 @@ pub(super) const KPID_SIZE: u32 = 7;
 pub(super) const KPID_PACK_SIZE: u32 = 8;
 pub(super) const KPID_MTIME: u32 = 12;
 pub(super) const KPID_ENCRYPTED: u32 = 15;
+pub(super) const KPID_ATTRIB: u32 = 9;
+pub(super) const KPID_POSIX_ATTRIB: u32 = 53;
+pub(super) const KPID_SYMLINK: u32 = 54;
+pub(super) const KPID_HARDLINK: u32 = 90;
 
 // PROPVARIANT types.
 pub(super) const VT_EMPTY: u16 = 0;

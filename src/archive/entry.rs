@@ -76,9 +76,27 @@ pub struct OperationSummary {
     pub entries_processed: u64,
     pub bytes_processed: u64,
     pub entries_skipped: u64,
-    /// Non-fatal extraction warning. A value means the operation completed
-    /// with the entries that could be recovered from a damaged archive.
+    /// Non-fatal warnings, including skipped incompatible entries and metadata failures.
     pub warning: Option<String>,
+}
+
+impl OperationSummary {
+    pub(crate) fn add_warning(&mut self, warning: &str) {
+        // Bound diagnostics from untrusted archives, while retaining the skipped count.
+        let message = self.warning.get_or_insert_with(String::new);
+        if message.len() >= 4096 {
+            return;
+        }
+        if !message.is_empty() {
+            message.push('\n');
+        }
+        message.extend(warning.chars().take(512));
+    }
+
+    pub(crate) fn skip_entry(&mut self, reason: &str, path: &Path) {
+        self.entries_skipped += 1;
+        self.add_warning(&format!("Skipped {}: {reason}", path.display()));
+    }
 }
 
 #[cfg(test)]

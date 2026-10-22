@@ -33,6 +33,9 @@ pub(crate) fn resolve_existing(
             if is_reparse(&metadata) {
                 return Err(ArchiveError::ReparsePoint(target.to_path_buf()));
             }
+            if metadata.is_dir() {
+                return Ok(ConflictAction::Skip);
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ConflictAction::Overwrite);
@@ -62,20 +65,15 @@ pub(crate) fn resolve_existing(
 pub(crate) fn prepare_directory(
     root: &Path,
     target: &Path,
-    policy: &mut RuntimeConflictPolicy,
-    resolver: &dyn ConflictResolver,
+    _policy: &mut RuntimeConflictPolicy,
+    _resolver: &dyn ConflictResolver,
 ) -> ArchiveResult<ConflictAction> {
     match fs::symlink_metadata(target) {
         Ok(metadata) if is_reparse(&metadata) => {
             return Err(ArchiveError::ReparsePoint(target.to_path_buf()));
         }
         Ok(metadata) if metadata.is_dir() => return Ok(ConflictAction::Overwrite),
-        Ok(_) => match resolve_existing(target, policy, resolver)? {
-            ConflictAction::Skip => return Ok(ConflictAction::Skip),
-            ConflictAction::Overwrite => {
-                fs::remove_file(target).map_err(|error| ArchiveError::io(target, error))?;
-            }
-        },
+        Ok(_) => return Ok(ConflictAction::Skip),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(ArchiveError::io(target, error)),
     }

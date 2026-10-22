@@ -1,9 +1,14 @@
 //! File-drop bridge from the winit backend to application commands.
 
-use std::{
-    panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
-};
+use std::path::PathBuf;
+
+fn dispatch(handler: &FileDropHandler, paths: Vec<PathBuf>) {
+    // Release uses panic=abort: catch_unwind cannot recover in that profile.
+    #[cfg(panic = "unwind")]
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(paths)));
+    #[cfg(panic = "abort")]
+    handler(paths);
+}
 
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
 
@@ -49,7 +54,7 @@ pub fn install_file_drop_handler(window: &slint::Window, handler: FileDropHandle
             if hovered_paths.is_empty() {
                 let path = path.clone();
                 rejected = true;
-                let _ = catch_unwind(AssertUnwindSafe(|| handler(vec![path])));
+                dispatch(&handler, vec![path]);
                 return EventResult::PreventDefault;
             }
 
@@ -66,7 +71,7 @@ pub fn install_file_drop_handler(window: &slint::Window, handler: FileDropHandle
                 hovered_paths.clear();
                 let paths = std::mem::take(&mut dropped_paths);
                 rejected = true;
-                let _ = catch_unwind(AssertUnwindSafe(|| handler(paths)));
+                dispatch(&handler, paths);
             }
             EventResult::PreventDefault
         }

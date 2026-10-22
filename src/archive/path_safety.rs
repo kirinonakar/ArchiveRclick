@@ -1,24 +1,38 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::{ArchiveError, ArchiveResult};
 
 pub(crate) fn safe_relative_path(path: &Path) -> ArchiveResult<PathBuf> {
+    let relative = traversal_checked_path(path)?;
+    for component in relative.to_string_lossy().split(['/', '\\']) {
+        validate_windows_component(component)?;
+    }
+    Ok(relative)
+}
+
+pub(crate) fn traversal_checked_path(path: &Path) -> ArchiveResult<PathBuf> {
     let display = path.to_string_lossy();
-    if display.is_empty() {
+    let bytes = display.as_bytes();
+    if display.is_empty()
+        || display.starts_with(['/', '\\'])
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+        || display
+            .split(['/', '\\'])
+            .any(|component| component == "..")
+    {
         return Err(ArchiveError::UnsafeEntryPath(display.into_owned()));
     }
 
     let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(value) => {
-                validate_windows_component(value.to_string_lossy().as_ref())?;
-                result.push(value);
-            }
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
-                return Err(ArchiveError::UnsafeEntryPath(display.into_owned()));
-            }
+    // Parse archive separators consistently on all hosts. A colon in a relative
+    // name is incompatible (including drive-relative forms); it is never used
+    // as an output path until safe_relative_path has rejected it.
+    for component in display.split(['/', '\\']) {
+        if !component.is_empty() && component != "." {
+            result.push(component);
         }
     }
 
@@ -56,7 +70,7 @@ fn validate_windows_component(component: &str) -> ArchiveResult<()> {
         });
 
     if invalid || reserved {
-        return Err(ArchiveError::UnsafeEntryPath(component.to_owned()));
+        return Err(ArchiveError::IncompatibleEntryPath(component.to_owned()));
     }
     Ok(())
 }
@@ -89,6 +103,37 @@ pub(crate) fn ensure_no_reparse_ancestors(root: &Path, target: &Path) -> Archive
         }
     }
     Ok(())
+}
+
+/// A regular file blocking a directory (including any parent), or a directory
+/// blocking a file, is skipped without deleting the existing object.
+pub(crate) fn has_type_conflict(
+    root: &Path,
+    target: &Path,
+    directory: bool,
+) -> ArchiveResult<bool> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| ArchiveError::UnsafeEntryPath(target.display().to_string()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if is_reparse_point(&metadata) {
+                    return Err(ArchiveError::ReparsePoint(current));
+                }
+                let want_directory = current != target || directory;
+                if metadata.is_dir() != want_directory {
+                    return Ok(true);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => return Ok(true),
+            Err(error) => return Err(ArchiveError::io(&current, error)),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]

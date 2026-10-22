@@ -564,6 +564,7 @@ pub(super) fn update_selection_ui(weak: &slint::Weak<AppWindow>, state: &AppStat
 }
 
 fn display_operation_error(ui: &AppWindow, title: &str, error: ArchiveError) {
+    crate::diagnostics::log(&format!("{title}: {error}"));
     if matches!(error, ArchiveError::Cancelled) {
         ui.set_status_text("Operation cancelled".into());
         return;
@@ -601,6 +602,7 @@ pub(super) fn error_title(title: &str, language: i32) -> &str {
 }
 
 pub(super) fn show_ui_error(weak: &slint::Weak<AppWindow>, title: &str, message: String) {
+    crate::diagnostics::log(&format!("{title}: {message}"));
     if let Some(ui) = weak.upgrade() {
         ui.set_status_text(message.clone().into());
         ui.set_error_title(error_title(title, ui.get_language_selection()).into());

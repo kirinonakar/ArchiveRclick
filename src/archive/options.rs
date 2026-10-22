@@ -37,10 +37,20 @@ impl ExtractSelection {
     }
 }
 
+/// Policy for entries that cannot be represented safely as regular Windows files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UnsupportedEntryPolicy {
+    Fail,
+    #[default]
+    Skip,
+}
+
 #[derive(Clone)]
 pub struct ExtractOptions {
-    /// Copy the archive download-origin stream to supported extracted files.
+    /// Copy the archive download-origin stream to all extracted files.
     pub copy_zone_identifier: bool,
+    pub incompatible_names: UnsupportedEntryPolicy,
+    pub unsupported_entries: UnsupportedEntryPolicy,
     pub zip_backend: ZipBackend,
     pub threads: ThreadCount,
     /// Extract files directly into the destination (7-Zip's `e` command).
@@ -65,6 +75,8 @@ impl fmt::Debug for ExtractOptions {
         formatter
             .debug_struct("ExtractOptions")
             .field("copy_zone_identifier", &self.copy_zone_identifier)
+            .field("incompatible_names", &self.incompatible_names)
+            .field("unsupported_entries", &self.unsupported_entries)
             .field("zip_backend", &self.zip_backend)
             .field("threads", &self.threads)
             .field("flatten_paths", &self.flatten_paths)
@@ -87,6 +99,8 @@ impl Default for ExtractOptions {
             zip_backend: ZipBackend::default(),
             threads: ThreadCount::Auto,
             copy_zone_identifier: true,
+            incompatible_names: UnsupportedEntryPolicy::Skip,
+            unsupported_entries: UnsupportedEntryPolicy::Skip,
             flatten_paths: false,
             selection: ExtractSelection::All,
             password: None,

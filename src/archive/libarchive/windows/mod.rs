@@ -36,7 +36,6 @@ use super::super::{
     ArchiveEngine, ArchiveEntry, ArchiveEntryKind, ArchiveError, ArchiveListing, ArchiveResult,
     ConflictChoice, ConflictResolver, CreateFormat, CreateOptions, ExtractOptions,
     InitialConflictPolicy, OperationSummary, ProgressSink, encoding, ensure_no_reparse_ancestors,
-    safe_relative_path,
 };
 
 mod api;

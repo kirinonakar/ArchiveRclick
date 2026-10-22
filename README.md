@@ -85,9 +85,30 @@ Settings screen.
 
 ## Security
 
-Archive paths are treated as untrusted. Extraction rejects absolute paths,
-parent traversal, reserved Windows names, links, special files, and reparse
-points. Listing, testing, and extraction apply entry/size limits and verify
+Archive paths are treated as untrusted. Extraction stops on absolute paths,
+parent traversal (even in unselected entries), and destination reparse points.
+Windows-incompatible names, links, and special files are skipped with a warning
+and a skipped-entry count by default, consistently across engines. Existing
+files and directories are preserved on type conflicts, including blocked parents.
+The API's `ExtractOptions.incompatible_names` and `unsupported_entries` policies
+support `Skip` (default) and `Fail`; CLI switches are `-incompatible=skip|fail`
+and `-links=skip|fail`. Strict libarchive extraction preflights these policies
+before creating output. Names are never silently renamed.
+
+When enabled, download-origin metadata (`Zone.Identifier`) is copied to every
+extracted regular file, including unknown extensions. Metadata write failures
+produce warnings while payload extraction continues. Successful files remain
+installed if a later I/O, cancellation, corruption, or traversal error stops
+extraction; extraction is not an archive-wide transaction.
+
+Standalone GUI/CLI errors and panic diagnostics are recorded best-effort in
+`%LOCALAPPDATA%\ArchiveRclick\Logs\diagnostics.log` (bounded to about 1 MiB).
+Release currently uses `panic=abort`, including the shell-extension DLL. Panic
+recovery in Explorer requires a separate unwind-enabled shell build with guards
+inside every COM callback; the standalone panic hook does not protect Explorer
+and is deliberately not installed in its process.
+
+Listing, testing, and extraction apply entry/size limits and verify
 destination handles before installing output. `runtime/SHA256SUMS` records the
 expected hashes of the bundled native files.
 

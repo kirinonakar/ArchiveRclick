@@ -1,14 +1,26 @@
-//! Download-origin propagation, limited to the file types documented by Bandizip.
-use super::{ArchiveError, ArchiveResult};
+//! Download-origin propagation to every extracted file, including unknown types.
+use super::{ArchiveError, ArchiveResult, OperationSummary};
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Clone, Default)]
-pub(crate) struct ZoneIdentifier(Option<Arc<[u8]>>);
+pub(crate) struct ZoneIdentifier {
+    data: Option<Arc<[u8]>>,
+    failures: Arc<Failures>,
+}
+
+#[derive(Default)]
+struct Failures {
+    count: AtomicU64,
+    first: Mutex<Option<String>>,
+}
 
 fn stream_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -43,70 +55,59 @@ impl ZoneIdentifier {
                 "Zone.Identifier exceeds 64 KiB".into(),
             ));
         }
-        Ok(Self(Some(data.into())))
+        Ok(Self {
+            data: Some(data.into()),
+            ..Default::default()
+        })
     }
 
-    /// Write to the new/staged file before installation, using its final name
-    /// for the extension filter. Skipped files never reach this method.
-    pub(crate) fn apply(&self, output: &Path, target: &Path) -> ArchiveResult<()> {
-        let Some(data) = &self.0 else {
-            return Ok(());
+    /// Mark the staged file before installation. Metadata failures become warnings.
+    pub(crate) fn apply(&self, output: &Path, target: &Path) {
+        let Some(data) = &self.data else {
+            return;
         };
-        let extension = target
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !matches!(
-            extension.as_str(),
-            "exe"
-                | "com"
-                | "msi"
-                | "scr"
-                | "bat"
-                | "cmd"
-                | "ps1"           
-                | "pif"
-                | "lnk"
-                | "zip"
-                | "zipx"
-                | "rar"
-                | "7z"
-                | "alz"
-                | "egg"
-                | "cab"
-                | "bh"
-                | "iso"
-                | "img"
-                | "isz"
-                | "udf"
-                | "wim"
-                | "bin"
-                | "i00"
-                | "js"
-                | "jse"
-                | "vbs"
-                | "vbe"
-                | "wsf"
-                | "url"
-                | "reg"
-                | "docx"
-                | "doc"
-                | "xls"
-                | "xlsx"
-                | "ppt"
-                | "pptx"
-                | "hwp"
-                | "hwpx"
-                | "wiz"
-        ) {
-            return Ok(());
+        if let Err(error) = fs::write(stream_path(output), data) {
+            self.failures.count.fetch_add(1, Ordering::Relaxed);
+            let mut first = self
+                .failures
+                .first
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if first.is_none() {
+                *first = Some(format!("{}: {error}", target.display()));
+            }
         }
-        let path = stream_path(output);
-        match fs::write(&path, data) {
-            Ok(()) => Ok(()),
-            Err(error) if unsupported(&error) => Ok(()),
-            Err(error) => Err(ArchiveError::io(&path, error)),
+    }
+
+    pub(crate) fn report_warnings(&self, summary: &mut OperationSummary) {
+        let count = self.failures.count.load(Ordering::Relaxed);
+        if count != 0 {
+            let first = self
+                .failures
+                .first
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            summary.add_warning(&format!(
+                "Could not copy Zone.Identifier to {count} file(s); first failure: {}",
+                first.as_deref().unwrap_or("unknown error")
+            ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ads_failure_becomes_a_warning() {
+        let work = tempfile::tempdir().unwrap();
+        let zone = ZoneIdentifier {
+            data: Some(Arc::from(&b"[ZoneTransfer]\r\nZoneId=3\r\n"[..])),
+            ..Default::default()
+        };
+        zone.apply(&work.path().join("missing/file"), Path::new("file.docm"));
+        let mut summary = OperationSummary::default();
+        zone.report_warnings(&mut summary);
+        assert!(summary.warning.unwrap().contains("1 file(s)"));
     }
 }

@@ -30,6 +30,8 @@ Switches:
   -v{size}           Split ZIP/7z, e.g. -v100m or -v1g
   -y / -aoa          Overwrite existing extracted files
   -aos               Skip existing extracted files
+  -incompatible=skip|fail  Windows-incompatible names (default: skip + warning)
+  -links=skip|fail    Links and special files (default: skip + warning)
   -r                 Search input wildcard patterns recursively
   -slt               Technical listing
   -bsp0 / -bd        Disable progress
@@ -121,6 +123,14 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
             match arg.as_str() {
                 "-y" | "-aoa" => args.extract.conflict_policy = InitialConflictPolicy::OverwriteAll,
                 "-aos" => args.extract.conflict_policy = InitialConflictPolicy::SkipAll,
+                "-incompatible=skip" => {
+                    args.extract.incompatible_names = UnsupportedEntryPolicy::Skip
+                }
+                "-incompatible=fail" => {
+                    args.extract.incompatible_names = UnsupportedEntryPolicy::Fail
+                }
+                "-links=skip" => args.extract.unsupported_entries = UnsupportedEntryPolicy::Skip,
+                "-links=fail" => args.extract.unsupported_entries = UnsupportedEntryPolicy::Fail,
                 "-r" => args.recursive = true,
                 "-slt" => args.technical = true,
                 "-bsp0" | "-bd" => args.progress = false,
@@ -522,6 +532,7 @@ fn run(mut args: Args) -> Result<i32, (i32, String)> {
     }
 }
 fn main() {
+    archive_rclick_core::diagnostics::install_panic_hook();
     let raw: Vec<_> = std::env::args().skip(1).collect();
     if raw.is_empty() || (raw.len() == 1 && ["-h", "--help", "-?"].contains(&raw[0].as_str())) {
         println!("ArchiveRclick CLI {}\n\n{HELP}", env!("CARGO_PKG_VERSION"));
@@ -531,6 +542,7 @@ fn main() {
         Ok(code) => std::process::exit(code),
         Err((code, message)) => {
             eprintln!("\nERROR: {message}");
+            archive_rclick_core::diagnostics::log(&format!("CLI error: {message}"));
             std::process::exit(code);
         }
     }
@@ -539,6 +551,34 @@ fn main() {
 #[cfg(test)]
 mod zip_backend_tests {
     use super::*;
+
+    #[test]
+    fn extraction_policy_switches_allow_strict_and_default_modes() {
+        let args = parse(vec![
+            "x".into(),
+            "test.zip".into(),
+            "-incompatible=fail".into(),
+            "-links=fail".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            args.extract.incompatible_names,
+            UnsupportedEntryPolicy::Fail
+        );
+        assert_eq!(
+            args.extract.unsupported_entries,
+            UnsupportedEntryPolicy::Fail
+        );
+        for invalid in ["-links=sanitize", "-incompatible=unknown"] {
+            assert_eq!(
+                parse(vec!["x".into(), "test.zip".into(), invalid.into()])
+                    .err()
+                    .unwrap()
+                    .0,
+                7
+            );
+        }
+    }
 
     #[test]
     fn explicit_zip_backend_overrides_saved_preference() {

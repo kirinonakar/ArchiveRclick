@@ -348,6 +348,7 @@ pub(super) fn start_extract_batch_window(
     std::thread::spawn(move || {
         let mut processed = 0usize;
         let mut failures: Vec<(PathBuf, PathBuf, ArchiveError)> = Vec::new();
+        let mut warnings = crate::archive::OperationSummary::default();
         for (index, archive) in archives.iter().enumerate() {
             if cancel.is_cancelled() {
                 break;
@@ -399,7 +400,10 @@ pub(super) fn start_extract_batch_window(
                     },
                     &cancel,
                 ) {
-                    Ok(_) => {
+                    Ok(summary) => {
+                        if let Some(warning) = summary.warning {
+                            warnings.add_warning(&format!("{}: {warning}", archive.display()));
+                        }
                         processed += 1;
                         break;
                     }
@@ -460,6 +464,10 @@ pub(super) fn start_extract_batch_window(
                         &format!("Some archives failed:\n{details}"),
                     );
                 }
+                return;
+            }
+            if let Some(warning) = warnings.warning {
+                show_progress_error(&ui, "Extraction warnings", &warning);
                 return;
             }
             close_progress_window(&ui);
@@ -604,6 +612,7 @@ pub(super) fn start_create_batch_window(
 }
 
 fn show_progress_error(ui: &ProgressWindow, title: &str, message: &str) {
+    crate::diagnostics::log(&format!("{title}: {message}"));
     platform::taskbar::clear(ui.window());
     ui.set_password_visible(false);
     ui.set_conflict_visible(false);

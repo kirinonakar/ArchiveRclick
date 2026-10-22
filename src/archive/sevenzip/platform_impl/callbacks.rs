@@ -532,6 +532,38 @@ pub(super) struct ExtractCallback {
     pub(super) context: Arc<Mutex<ExtractContext>>,
 }
 
+// Stack-owned callbacks must regain their sole reference before borrowed
+// progress/resolver lifetimes end. These checks cover early returns as well.
+impl Drop for ExtractCallback {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.refs.load(Ordering::Acquire),
+            1,
+            "7-Zip retained an extract callback"
+        );
+    }
+}
+
+impl Drop for UpdateCallback {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.refs.load(Ordering::Acquire),
+            1,
+            "7-Zip retained an update callback"
+        );
+    }
+}
+
+impl Drop for OpenCallback {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.refs.load(Ordering::Acquire),
+            1,
+            "7-Zip retained an open callback"
+        );
+    }
+}
+
 unsafe extern "system" fn extract_query_interface(
     this: *mut c_void,
     iid: *const Guid,
@@ -657,6 +689,21 @@ unsafe extern "system" fn extract_get_stream(
         return S_OK;
     }
     let target = context.root.join(&item.relative);
+    if !context.assume_targets_missing {
+        match crate::archive::path_safety::has_type_conflict(&context.root, &target, item.is_dir) {
+            Ok(true) => {
+                context
+                    .summary
+                    .skip_entry("file/directory type conflict", &item.relative);
+                return S_OK;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                context.error = Some(error);
+                return E_ABORT;
+            }
+        }
+    }
     if item.is_dir {
         // A large archive commonly contains thousands of files under the
         // same few directories. Validate and create each directory once;
@@ -842,13 +889,10 @@ unsafe extern "system" fn extract_set_operation_result(
         }
         return S_OK;
     };
-    if let Err(error) = context.zone_identifier.apply(
+    context.zone_identifier.apply(
         pending.temp_path.as_deref().unwrap_or(&pending.target),
         &pending.target,
-    ) {
-        context.error = Some(error);
-        return E_ABORT;
-    }
+    );
     {
         let mut guard = pending
             .file

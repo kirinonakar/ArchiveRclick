@@ -20,6 +20,9 @@ pub enum ArchiveError {
     #[error("archive entry has an unsafe path: {0}")]
     UnsafeEntryPath(String),
 
+    #[error("archive entry name is incompatible with Windows: {0}")]
+    IncompatibleEntryPath(String),
+
     #[error("archive entry type is unsafe to extract: {0}")]
     UnsafeEntryType(String),
 
@@ -82,12 +85,20 @@ impl ArchiveError {
                     "eperm",
                     "operation not permitted",
                     "0x80070005",
-                    "error 5",
-                    "error 13",
-                    "errno 13",
                 ]
                 .iter()
                 .any(|marker| message.contains(marker))
+                    || message
+                        .split(|ch: char| !ch.is_ascii_alphanumeric())
+                        .filter(|token| !token.is_empty())
+                        .collect::<Vec<_>>()
+                        .windows(2)
+                        .any(|tokens| {
+                            matches!(
+                                (tokens[0], tokens[1]),
+                                ("error", "5" | "13" | "1314") | ("errno", "13")
+                            )
+                        })
             }
             _ => false,
         }
@@ -102,21 +113,18 @@ mod tests {
 
     #[test]
     fn detects_windows_permission_errors() {
-        assert!(ArchiveError::io(
-            "C:\\Windows",
-            std::io::Error::from_raw_os_error(5),
-        )
-        .requires_elevation());
-        assert!(ArchiveError::io(
-            "C:\\Windows",
-            std::io::Error::from_raw_os_error(1314),
-        )
-        .requires_elevation());
-        assert!(!ArchiveError::io(
-            "C:\\missing",
-            std::io::Error::from_raw_os_error(2),
-        )
-        .requires_elevation());
+        assert!(
+            ArchiveError::io("C:\\Windows", std::io::Error::from_raw_os_error(5),)
+                .requires_elevation()
+        );
+        assert!(
+            ArchiveError::io("C:\\Windows", std::io::Error::from_raw_os_error(1314),)
+                .requires_elevation()
+        );
+        assert!(
+            !ArchiveError::io("C:\\missing", std::io::Error::from_raw_os_error(2),)
+                .requires_elevation()
+        );
     }
 
     #[test]
@@ -129,5 +137,21 @@ mod tests {
 
         let seven_zip = ArchiveError::SevenZip("0x80070005: access denied".to_owned());
         assert!(seven_zip.requires_elevation());
+    }
+
+    #[test]
+    fn elevation_codes_require_complete_numeric_tokens() {
+        for text in ["error 50", "error 53", "error 130", "errno 135", "terror 5"] {
+            assert!(
+                !ArchiveError::SevenZip(text.into()).requires_elevation(),
+                "{text}"
+            );
+        }
+        for text in ["error 5: denied", "error: 1314", "errno 13"] {
+            assert!(
+                ArchiveError::SevenZip(text.into()).requires_elevation(),
+                "{text}"
+            );
+        }
     }
 }

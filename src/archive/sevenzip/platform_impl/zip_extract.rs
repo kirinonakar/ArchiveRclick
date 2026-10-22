@@ -247,7 +247,7 @@ fn extract_file(
     if progress.stop.load(Ordering::Relaxed) {
         return Err(ArchiveError::Cancelled);
     }
-    zone_identifier.apply(&temporary.path, &target)?;
+    zone_identifier.apply(&temporary.path, &target);
     temporary.close_file();
     if !direct {
         output::install_temporary(root, &temporary.path, &target)?;
@@ -295,6 +295,7 @@ pub(super) fn extract(
         effective_zip_codepage(ReadFormat::Zip, options.pathname_codepage, Some(&records));
     let mut jobs = Vec::new();
     let mut total = 0;
+    let mut compatibility = OperationSummary::default();
     for (index, record) in records.iter().enumerate() {
         check_cancel(cancel)?;
         let entry = archive
@@ -302,17 +303,26 @@ pub(super) fn extract(
             .map_err(|e| zip_error(path, e))?;
         let name =
             format::decode_zip_name(record, codepage).unwrap_or_else(|| entry.name().to_owned());
-        let relative = safe_relative_path(Path::new(&name))?;
-        if !options.selection.includes(&relative) {
-            continue;
-        }
-        if entry.is_symlink()
+        let kind = if entry.is_symlink()
             || entry
                 .unix_mode()
                 .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000 | 0o040000))
         {
-            return Err(ArchiveError::UnsafeEntryType(name));
-        }
+            ArchiveEntryKind::Other
+        } else if entry.is_dir() {
+            ArchiveEntryKind::Directory
+        } else {
+            ArchiveEntryKind::File
+        };
+        let Some(relative) = crate::archive::extraction_policy::selected_path(
+            Path::new(&name),
+            kind,
+            options,
+            &mut compatibility,
+        )?
+        else {
+            continue;
+        };
         if !matches!(
             entry.compression(),
             CompressionMethod::Stored | CompressionMethod::Deflated
@@ -399,6 +409,10 @@ pub(super) fn extract(
         for job in batch {
             check_cancel(cancel)?;
             let target = root.join(&job.relative);
+            if crate::archive::path_safety::has_type_conflict(&root, &target, job.directory)? {
+                compatibility.skip_entry("file/directory type conflict", &job.relative);
+                continue;
+            }
             ensure_no_reparse_ancestors(&root, &target)?;
             if job.directory {
                 match output::prepare_directory(&root, &target, &mut policy, conflicts)? {
@@ -483,12 +497,14 @@ pub(super) fn extract(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone();
-    let summary = OperationSummary {
+    let mut summary = OperationSummary {
         entries_processed: snapshot.entries_processed,
         bytes_processed: snapshot.bytes_processed,
-        entries_skipped: skipped,
+        entries_skipped: skipped + compatibility.entries_skipped,
+        warning: compatibility.warning,
         ..Default::default()
     };
+    zone_identifier.report_warnings(&mut summary);
     snapshot.phase = ProgressPhase::Finished;
     snapshot.current_file.clear();
     progress.sink.report(snapshot, true);
