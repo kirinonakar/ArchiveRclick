@@ -7,12 +7,14 @@
 use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
-    fs,
     path::{Component, Path, PathBuf},
     rc::Rc,
     sync::{Arc, Condvar, Mutex, mpsc},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+#[cfg(test)]
+use std::fs;
 
 use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc};
@@ -63,9 +65,7 @@ use context_menu::{
     common_parent_folder, parse_elevated_batch_output, parse_elevated_extract,
     parse_elevated_output, right_drag_extract_destination,
 };
-use drag_drop::{
-    cleanup_drag_staging_directories, handle_file_drop, parse_dropped_path, start_archive_drag,
-};
+use drag_drop::{handle_file_drop, parse_dropped_path, start_archive_drag};
 use engine::{create_formats_for_ui, load_engine};
 use invocation::{LaunchRequest, parse_launch_request};
 use operations::{
@@ -103,7 +103,6 @@ pub fn run() -> Result<(), String> {
 }
 
 fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Result<(), String> {
-    cleanup_drag_staging_directories();
     if let Some(command) = startup_argument.as_deref().and_then(|value| value.to_str()) {
         match command {
             "--register" => {
@@ -186,7 +185,6 @@ fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Re
     {
         result = Err(error);
     }
-    cleanup_drag_staging_directories();
     result
 }
 

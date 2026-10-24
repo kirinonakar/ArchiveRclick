@@ -9,6 +9,27 @@ pub(super) fn start_archive_drag(
     state: &Rc<AppState>,
     engine: &Engine,
     row: usize,
+    progress_window: &Rc<RefCell<Option<ProgressWindow>>>,
+) {
+    start_archive_drag_with(
+        ui,
+        state,
+        engine,
+        row,
+        progress_window,
+        platform::start_file_drag,
+    );
+}
+
+fn start_archive_drag_with(
+    ui: &AppWindow,
+    state: &Rc<AppState>,
+    engine: &Engine,
+    row: usize,
+    progress_window: &Rc<RefCell<Option<ProgressWindow>>>,
+    drag: impl FnOnce(&[PathBuf], mpsc::SyncSender<Result<bool, String>>) -> Result<(), String>
+    + Send
+    + 'static,
 ) {
     if ui.get_busy()
         || ui.get_error_visible()
@@ -44,23 +65,10 @@ pub(super) fn start_archive_drag(
     else {
         return;
     };
-    let mut selection = state.selected_paths();
+    let selection = state.selected_paths();
     if selection.is_empty() {
         return;
     }
-    selection.sort();
-
-    let staging = match create_drag_staging_directory() {
-        Ok(path) => path,
-        Err(error) => {
-            show_ui_error(&ui.as_weak(), "Extract selected items", error);
-            return;
-        }
-    };
-
-    ui.set_busy(true);
-    ui.set_status_text("Preparing selected items for Explorer…".into());
-
     let password = state
         .open_password
         .lock()
@@ -76,54 +84,97 @@ pub(super) fn start_archive_drag(
         pathname_codepage: pathname_codepage(ui.get_encoding_selection()),
         ..ExtractOptions::default()
     };
-    let cancel = CancellationToken::new();
-    let progress = |_: ProgressSnapshot| {};
-    let extraction = engine.extract(
-        &archive,
-        &staging,
-        &options,
-        &progress,
-        &OverwriteAllResolver,
-        &cancel,
-    );
-
-    let result = match extraction {
-        Ok(_) => staged_drag_paths(&staging, &selection)
-            .and_then(|paths| platform::start_file_drag(&paths).map(|()| paths)),
-        Err(error) => Err(error.to_string()),
+    let title = progress_title_with_filename("Preparing selected items for Explorer", &archive);
+    let (cancel, weak_progress) = match operations::begin_progress_window_operation(
+        ui,
+        state,
+        progress_window,
+        &title,
+        &archive.display().to_string(),
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            show_ui_error(&ui.as_weak(), "Drag selected items", error);
+            return;
+        }
     };
-    let _ = fs::remove_dir_all(&staging);
-    ui.set_busy(false);
-
-    match result {
-        Ok(_) => ui.set_status_text("Selected items were sent to Explorer".into()),
-        Err(error) => show_ui_error(&ui.as_weak(), "Drag selected items", error),
-    }
+    let weak = ui.as_weak();
+    let engine = Arc::clone(engine);
+    let cancellation = Arc::clone(&state.cancellation);
+    std::thread::spawn(move || {
+        let mut selection = selection;
+        selection.sort();
+        // The worker owns staging until the target finishes the transfer.
+        // Even a large recursive cleanup must never run on the UI thread.
+        let result = (|| {
+            let staging = create_drag_staging_directory()?;
+            let updates = weak_progress.clone();
+            let summary = engine
+                .extract(
+                    &archive,
+                    staging.path(),
+                    &options,
+                    &move |snapshot| update_progress_window_details(&updates, snapshot),
+                    &OverwriteAllResolver,
+                    &cancel,
+                )
+                .map_err(|error| error.to_string())?;
+            if cancel.is_cancelled() {
+                return Ok((false, summary.warning));
+            }
+            let paths = staged_drag_paths(staging.path(), &selection)?;
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let drag_cancel = cancel.clone();
+            let drag_progress = weak_progress.clone();
+            weak.clone()
+                .upgrade_in_event_loop(move |_ui| {
+                    if let Some(progress) = drag_progress.upgrade() {
+                        platform::taskbar::clear(progress.window());
+                        let _ = progress.hide();
+                    }
+                    // OLE stays on the window's STA thread. Its modal drag loop is
+                    // entered only after the expensive archive work is finished.
+                    if drag_cancel.is_cancelled() {
+                        let _ = sender.try_send(Ok(false));
+                    } else if let Err(error) = drag(&paths, sender.clone()) {
+                        let _ = sender.try_send(Err(error));
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            let dragged = receiver.recv().map_err(|error| error.to_string())??;
+            Ok::<_, String>((dragged, summary.warning))
+            // `staging` is removed here on the worker, after Explorer has
+            // finished consuming the synchronous CF_HDROP payload.
+        })();
+        let cancelled = cancel.is_cancelled();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(progress) = weak_progress.upgrade() {
+                platform::taskbar::clear(progress.window());
+                let _ = progress.hide();
+            }
+            *cancellation.lock().expect("cancellation mutex poisoned") = None;
+            ui.set_busy(false);
+            match result {
+                _ if cancelled => ui.set_status_text("Drag cancelled".into()),
+                Ok((false, _)) => ui.set_status_text("Drag cancelled".into()),
+                Ok((true, warning)) => {
+                    let status = warning.map_or_else(
+                        || "Selected items were sent to Explorer".to_owned(),
+                        |warning| format!("Selected items were sent to Explorer — {warning}"),
+                    );
+                    ui.set_status_text(status.into());
+                }
+                Err(error) => show_ui_error(&ui.as_weak(), "Drag selected items", error),
+            }
+        });
+    });
 }
 
-fn create_drag_staging_directory() -> Result<PathBuf, String> {
-    let temp = std::env::temp_dir();
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("Could not create a drag staging name: {error}"))?
-        .as_nanos();
-    let process = std::process::id();
-    for attempt in 0..100u32 {
-        let path = temp.join(format!(
-            "{DRAG_STAGING_PREFIX}{process}-{timestamp}-{attempt}"
-        ));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(format!(
-                    "Could not create the drag staging directory {}: {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Err("Could not create a unique drag staging directory".to_owned())
+fn create_drag_staging_directory() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix(&format!("{DRAG_STAGING_PREFIX}{}-", std::process::id()))
+        .tempdir()
+        .map_err(|error| format!("Could not create the drag staging directory: {error}"))
 }
 
 fn staged_drag_paths(staging: &Path, selection: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -153,26 +204,6 @@ fn staged_drag_paths(staging: &Path, selection: &[PathBuf]) -> Result<Vec<PathBu
             Ok(staged)
         })
         .collect()
-}
-
-/// Removes this process's temporary Explorer-drag folders. The explicit
-/// process prefix prevents one running instance from deleting another
-/// instance's active drag payload.
-pub(super) fn cleanup_drag_staging_directories() {
-    let process_prefix = format!("{DRAG_STAGING_PREFIX}{}-", std::process::id());
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_owned = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(&process_prefix));
-        if is_owned && path.is_dir() {
-            let _ = fs::remove_dir_all(path);
-        }
-    }
 }
 
 pub(super) fn handle_file_drop(
@@ -258,5 +289,260 @@ fn hex(value: u8) -> Option<u8> {
         b'a'..=b'f' => Some(value - b'a' + 10),
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::archive::{ArchiveListing, ArchiveResult, OperationSummary, ProgressSink};
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicBool, Ordering},
+        time::Instant,
+    };
+
+    struct SlowExtraction {
+        ui_thread: std::thread::ThreadId,
+        staging: Arc<Mutex<Option<PathBuf>>>,
+        ready: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        fail: bool,
+    }
+
+    impl ArchiveEngine for SlowExtraction {
+        fn version(&self) -> String {
+            "test".into()
+        }
+        fn writable_formats(&self) -> Vec<CreateFormat> {
+            vec![]
+        }
+        fn list(
+            &self,
+            _: &Path,
+            _: Option<&str>,
+            _: u32,
+            _: &dyn ProgressSink,
+            _: &CancellationToken,
+        ) -> ArchiveResult<ArchiveListing> {
+            unreachable!()
+        }
+        fn create(
+            &self,
+            _: &Path,
+            _: &[PathBuf],
+            _: &CreateOptions,
+            _: &dyn ProgressSink,
+            _: &CancellationToken,
+        ) -> ArchiveResult<OperationSummary> {
+            unreachable!()
+        }
+        fn test(
+            &self,
+            _: &Path,
+            _: Option<&str>,
+            _: &dyn ProgressSink,
+            _: &CancellationToken,
+        ) -> ArchiveResult<OperationSummary> {
+            unreachable!()
+        }
+        fn extract(
+            &self,
+            _: &Path,
+            destination: &Path,
+            options: &ExtractOptions,
+            progress: &dyn ProgressSink,
+            _: &dyn ConflictResolver,
+            cancel: &CancellationToken,
+        ) -> ArchiveResult<OperationSummary> {
+            assert_ne!(std::thread::current().id(), self.ui_thread);
+            *self.staging.lock().unwrap() = Some(destination.to_owned());
+            let ExtractSelection::Paths(paths) = &options.selection else {
+                panic!()
+            };
+            assert_eq!(paths.len(), 512);
+            for path in paths {
+                fs::write(destination.join(path), b"payload").unwrap();
+            }
+            let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
+            snapshot.current_file = "selected-511.txt".into();
+            snapshot.entries_processed = 512;
+            snapshot.total_entries = Some(512);
+            progress.report(snapshot);
+            self.ready.store(true, Ordering::Release);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.release.load(Ordering::Acquire) && !cancel.is_cancelled() {
+                assert!(Instant::now() < deadline, "UI did not release the worker");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if cancel.is_cancelled() {
+                return Err(ArchiveError::Cancelled);
+            }
+            if self.fail {
+                return Err(ArchiveError::Worker("simulated extraction failure".into()));
+            }
+            Ok(OperationSummary {
+                warning: Some("test warning".into()),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn run_slow_drag(cancel: bool, fail: bool) {
+        let ui = AppWindow::new().unwrap();
+        let state = Rc::new(AppState::new());
+        *state.listing.borrow_mut() = Some(ArchiveListing {
+            archive_path: PathBuf::from("test.zip"),
+            format_name: "ZIP".into(),
+            filter_name: None,
+            warning: None,
+            entries: vec![],
+            total_uncompressed_size: 0,
+        });
+        for index in 0..512 {
+            let path = PathBuf::from(format!("selected-{index}.txt"));
+            state.selected.borrow_mut().insert(path.clone());
+            state
+                .display
+                .borrow_mut()
+                .push(crate::app::state::DisplayEntry {
+                    source_index: None,
+                    name: path.to_string_lossy().into_owned(),
+                    relative_path: path,
+                    is_folder: false,
+                });
+        }
+        ui.set_has_archive(true);
+        ui.show().unwrap();
+        let staging = Arc::new(Mutex::new(None::<PathBuf>));
+        let ready = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let ui_thread = std::thread::current().id();
+        let engine: Engine = Arc::new(SlowExtraction {
+            ui_thread,
+            staging: Arc::clone(&staging),
+            ready: Arc::clone(&ready),
+            release: Arc::clone(&release),
+            fail,
+        });
+        let drag_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&drag_called);
+        let progress_window = Rc::new(RefCell::new(None));
+        start_archive_drag_with(
+            &ui,
+            &state,
+            &engine,
+            0,
+            &progress_window,
+            move |paths, completion| {
+                assert_eq!(
+                    std::thread::current().id(),
+                    ui_thread,
+                    "OLE must stay on the UI STA"
+                );
+                assert_eq!(paths.len(), 512);
+                assert!(
+                    paths.iter().all(|path| path.is_file()),
+                    "payload removed before drop"
+                );
+                called.store(true, Ordering::Release);
+                let paths = paths.to_vec();
+                std::thread::spawn(move || {
+                    // Delay the transfer acknowledgement. Staging must survive
+                    // until it arrives, while the UI keeps processing events.
+                    std::thread::sleep(Duration::from_millis(80));
+                    assert!(paths.iter().all(|path| path.is_file()));
+                    completion.send(Ok(true)).unwrap();
+                });
+                Ok(())
+            },
+        );
+        assert!(ui.get_busy());
+        let ticks = Rc::new(Cell::new(0));
+        let tick_count = Rc::clone(&ticks);
+        let weak = ui.as_weak();
+        let state_for_timer = Rc::clone(&state);
+        let timer = slint::Timer::default();
+        let started = Instant::now();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(10),
+            move || {
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "drag UI stalled"
+                );
+                let ui = weak.upgrade().unwrap();
+                if !ui.get_busy() {
+                    assert!(state_for_timer.cancellation.lock().unwrap().is_none());
+                    slint::quit_event_loop().unwrap();
+                    return;
+                }
+                if ready.load(Ordering::Acquire) {
+                    tick_count.set(tick_count.get() + 1);
+                    if tick_count.get() == 5 {
+                        let progress = progress_window.borrow();
+                        let progress = progress.as_ref().unwrap();
+                        assert_eq!(progress.get_progress_file(), "selected-511.txt");
+                        if cancel {
+                            progress.invoke_cancel_requested();
+                        } else {
+                            release.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            },
+        );
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        assert!(
+            ticks.get() >= 5,
+            "UI must keep processing events during extraction"
+        );
+        assert!(
+            !staging.lock().unwrap().as_ref().unwrap().exists(),
+            "staging leaked"
+        );
+        assert_eq!(drag_called.load(Ordering::Acquire), !cancel && !fail);
+        assert_eq!(ui.get_error_visible(), fail);
+        if cancel {
+            assert_eq!(ui.get_status_text(), "Drag cancelled");
+        }
+        if !cancel && !fail {
+            assert!(ui.get_status_text().contains("test warning"));
+        }
+        ui.hide().unwrap();
+    }
+
+    #[test]
+    fn selected_drag_stays_responsive_and_cleans_up_success_cancel_and_failure() {
+        // Slint's event-loop proxy can be installed only once per process.
+        // Isolate this harness from the other UI tests' backend instances.
+        const CHILD: &str = "ARCHIVERCLICK_DRAG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for scenario in ["success", "cancel", "failure"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::commands::drag_drop::tests::selected_drag_stays_responsive_and_cleans_up_success_cancel_and_failure", "--nocapture"])
+                .env(CHILD, scenario)
+                .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{scenario}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                threading: true,
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .unwrap();
+        let scenario = std::env::var(CHILD).unwrap();
+        run_slow_drag(scenario == "cancel", scenario == "failure");
     }
 }

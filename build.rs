@@ -50,6 +50,18 @@ fn main() {
             target_arch, "x86_64",
             "ArchiveRclick currently bundles only the Windows x86_64 native runtime"
         );
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            // COM loads these entry points by name. Keep the DLL exports, but
+            // omit them from its import library to avoid MSVC's LNK4104 warning.
+            for symbol in [
+                "DllCanUnloadNow",
+                "DllGetClassObject",
+                "DllRegisterServer",
+                "DllUnregisterServer",
+            ] {
+                println!("cargo:rustc-link-arg-cdylib=/EXPORT:{symbol},PRIVATE");
+            }
+        }
         copy_runtime_bundle();
     }
 }

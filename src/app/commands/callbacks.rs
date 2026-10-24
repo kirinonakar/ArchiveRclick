@@ -17,7 +17,12 @@ pub(super) fn wire_callbacks(
     writable_formats: Vec<CreateFormat>,
     operation_progress_window: Rc<RefCell<Option<ProgressWindow>>>,
 ) {
-    archive_view::wire(ui, Rc::clone(&state), Arc::clone(&engine));
+    archive_view::wire(
+        ui,
+        Rc::clone(&state),
+        Arc::clone(&engine),
+        Rc::clone(&operation_progress_window),
+    );
     settings::wire(ui);
     archive_actions::wire(
         ui,

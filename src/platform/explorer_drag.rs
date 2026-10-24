@@ -9,6 +9,7 @@ mod imp {
         os::windows::ffi::OsStrExt,
         path::PathBuf,
         ptr,
+        sync::mpsc,
     };
 
     use windows::{
@@ -107,15 +108,13 @@ mod imp {
         }
     }
 
+    // Staged files have a finite lifetime. Offer only synchronous transfers:
+    // Explorer must finish consuming the payload before DoDragDrop returns.
+    // Advertising IDataObjectAsyncCapability here allowed targets to release
+    // this object without EndOperation, leaving no safe cleanup signal.
     #[implement(IDataObject)]
     struct FileDropDataObject {
         paths: Vec<PathBuf>,
-    }
-
-    impl FileDropDataObject {
-        fn new(paths: Vec<PathBuf>) -> Self {
-            Self { paths }
-        }
     }
 
     impl IDataObject_Impl for FileDropDataObject_Impl {
@@ -310,29 +309,129 @@ mod imp {
         Ok(hglobal)
     }
 
-    pub fn start_file_drag(paths: &[PathBuf]) -> Result<(), String> {
+    /// Enter OLE on the UI STA, then notify the staging worker after the
+    /// synchronous drop has returned. Archive extraction and staging cleanup
+    /// stay on the worker; no optional EndOperation notification is required.
+    pub fn start_file_drag(
+        paths: &[PathBuf],
+        completion: mpsc::SyncSender<Result<bool, String>>,
+    ) -> Result<(), String> {
         if paths.is_empty() {
             return Err("There are no files to drag".to_owned());
         }
         let _com = ComApartment::initialize()?;
-        let data_object: IDataObject = FileDropDataObject::new(paths.to_vec()).into();
+        let data_object: IDataObject = FileDropDataObject {
+            paths: paths.to_vec(),
+        }
+        .into();
         let drop_source: IDropSource = FileDropSource.into();
         let mut effect = DROPEFFECT_NONE;
         let result =
             unsafe { DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect) };
-        if result == DRAGDROP_S_CANCEL || result == DRAGDROP_S_DROP {
+        finish_file_drag(result, effect, &completion)
+    }
+
+    fn finish_file_drag(
+        result: HRESULT,
+        effect: DROPEFFECT,
+        completion: &mpsc::SyncSender<Result<bool, String>>,
+    ) -> Result<(), String> {
+        if result == DRAGDROP_S_CANCEL {
+            let _ = completion.try_send(Ok(false));
+            Ok(())
+        } else if result == DRAGDROP_S_DROP {
+            let _ = completion.try_send(Ok(effect != DROPEFFECT_NONE));
             Ok(())
         } else {
             Err(format!("Explorer drag-and-drop failed: {result:?}"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows::Win32::{
+            System::Ole::ReleaseStgMedium,
+            UI::Shell::{DragQueryFileW, HDROP, IDataObjectAsyncCapability},
+        };
+        use windows::core::Interface;
+
+        #[test]
+        fn native_data_object_preserves_many_unicode_file_paths() {
+            let _com = ComApartment::initialize().unwrap();
+            let paths: Vec<_> = (0..512)
+                .map(|index| PathBuf::from(format!(r"C:\staging\선택한 폴더\file-{index}.txt")))
+                .collect();
+            let object: IDataObject = FileDropDataObject {
+                paths: paths.clone(),
+            }
+            .into();
+            // A target must use synchronous Drop semantics. It cannot begin an
+            // async transfer whose missing EndOperation strands the worker.
+            assert!(object.cast::<IDataObjectAsyncCapability>().is_err());
+            unsafe {
+                let mut medium = object.GetData(&file_format()).unwrap();
+                let drop = HDROP(medium.u.hGlobal.0);
+                assert_eq!(DragQueryFileW(drop, u32::MAX, None), paths.len() as u32);
+                for (index, expected) in paths.iter().enumerate() {
+                    let size = DragQueryFileW(drop, index as u32, None);
+                    let mut name = vec![0u16; size as usize + 1];
+                    assert_eq!(DragQueryFileW(drop, index as u32, Some(&mut name)), size);
+                    assert_eq!(
+                        String::from_utf16(&name[..size as usize]).unwrap(),
+                        expected.to_string_lossy()
+                    );
+                }
+                ReleaseStgMedium(&mut medium);
+            }
+        }
+
+        #[test]
+        fn accepted_drop_does_not_require_end_operation_or_object_retention() {
+            let _com = ComApartment::initialize().unwrap();
+            let object: IDataObject = FileDropDataObject {
+                paths: vec![PathBuf::from(r"C:\staging\selected.txt")],
+            }
+            .into();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            drop(object);
+            // Releasing the data object alone says nothing about the outcome.
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            finish_file_drag(DRAGDROP_S_DROP, DROPEFFECT_COPY, &sender).unwrap();
+            assert!(receiver.recv().unwrap().unwrap());
+        }
+
+        #[test]
+        fn native_cancel_rejected_drop_and_failures_remain_distinct() {
+            for (result, effect) in [
+                (DRAGDROP_S_CANCEL, DROPEFFECT_NONE),
+                (DRAGDROP_S_DROP, DROPEFFECT_NONE),
+            ] {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                finish_file_drag(result, effect, &sender).unwrap();
+                assert!(!receiver.recv().unwrap().unwrap());
+            }
+            let (sender, receiver) = mpsc::sync_channel(1);
+            assert!(finish_file_drag(E_NOTIMPL, DROPEFFECT_NONE, &sender).is_err());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
         }
     }
 }
 
 #[cfg(not(windows))]
 mod imp {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::mpsc};
 
-    pub fn start_file_drag(_paths: &[PathBuf]) -> Result<(), String> {
+    pub fn start_file_drag(
+        _paths: &[PathBuf],
+        _completion: mpsc::SyncSender<Result<bool, String>>,
+    ) -> Result<(), String> {
         Err("Explorer drag-and-drop is only available on Windows".to_owned())
     }
 }

@@ -385,7 +385,7 @@ fn normalize_hint_path(path: &Path) -> PathBuf {
 /// Starts an operation from the main UI but renders progress in the same
 /// standalone window used by Explorer verbs. The strong handle is retained on
 /// the UI thread; workers receive only weak handles and cancellation tokens.
-fn begin_progress_window_operation(
+pub(super) fn begin_progress_window_operation(
     ui: &AppWindow,
     state: &AppState,
     progress_window: &Rc<RefCell<Option<ProgressWindow>>>,

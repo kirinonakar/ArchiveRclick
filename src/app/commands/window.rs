@@ -122,8 +122,6 @@ pub(super) fn open_main_window(
     ui.window().on_close_requested(move || {
         if let Some(ui) = weak_for_close.upgrade() {
             prepare_main_window_close(&ui);
-        } else {
-            cleanup_drag_staging_directories();
         }
         slint::CloseRequestResponse::HideWindow
     });
@@ -190,10 +188,9 @@ fn should_save_window_geometry(window: &slint::Window) -> bool {
     !reject
 }
 
-/// Performs the same cleanup and geometry persistence for both the native
+/// Performs the same geometry persistence for both the native
 /// title-bar close request and the Escape shortcut.
 pub(super) fn prepare_main_window_close(ui: &AppWindow) {
-    cleanup_drag_staging_directories();
     if should_save_window_geometry(ui.window()) {
         let size = ui.window().size();
         let position = ui.window().position();

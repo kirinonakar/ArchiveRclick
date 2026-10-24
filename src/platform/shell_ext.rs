@@ -225,9 +225,13 @@ fn increment_live_objects() {
 /// QueryInterface is released without ever being counted, so its Drop must
 /// not take the counter below zero.
 fn decrement_live_objects() {
-    let _ = LIVE_OBJECTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-        count.checked_sub(1)
-    });
+    let mut count = LIVE_OBJECTS.load(Ordering::Relaxed);
+    while let Some(next) = count.checked_sub(1) {
+        match LIVE_OBJECTS.compare_exchange_weak(count, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(current) => count = current,
+        }
+    }
 }
 
 #[implement(IShellExtInit, IContextMenu)]

@@ -1,6 +1,11 @@
 use super::super::*;
 
-pub(super) fn wire(ui: &AppWindow, state: Rc<AppState>, engine: Engine) {
+pub(super) fn wire(
+    ui: &AppWindow,
+    state: Rc<AppState>,
+    engine: Engine,
+    operation_progress_window: Rc<RefCell<Option<ProgressWindow>>>,
+) {
     {
         let weak = ui.as_weak();
         ui.on_main_window_close_requested(move || {
@@ -112,7 +117,13 @@ pub(super) fn wire(ui: &AppWindow, state: Rc<AppState>, engine: Engine) {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            start_archive_drag(&ui, &state, &engine, row as usize);
+            start_archive_drag(
+                &ui,
+                &state,
+                &engine,
+                row as usize,
+                &operation_progress_window,
+            );
         });
     }
 
