@@ -1,4 +1,5 @@
 //! Console frontend for the same archive engines used by the desktop app.
+mod cli_password;
 use archive_rclick_core::{
     archive::{libarchive::LibArchiveEngine, *},
     tasks::{CancellationToken, ProgressSnapshot},
@@ -32,6 +33,9 @@ Switches:
   -aos               Skip existing extracted files
   -incompatible=skip|fail  Windows-incompatible names (default: skip + warning)
   -links=skip|fail    Links and special files (default: skip + warning)
+  -max-total={bytes} Maximum extracted bytes (default: 512 GiB)
+  -max-file={bytes}  Maximum bytes per file (default: 128 GiB)
+  -max-entries={N}   Maximum selected entries (default: 1000000)
   -r                 Search input wildcard patterns recursively
   -slt               Technical listing
   -bsp0 / -bd        Disable progress
@@ -137,6 +141,25 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
                 "-sccUTF-8" => {}
                 "-mhe=on" => args.create.encrypt_headers = true,
                 "-mhe=off" => args.create.encrypt_headers = false,
+                _ if arg.starts_with("-max-total=")
+                    || arg.starts_with("-max-file=")
+                    || arg.starts_with("-max-entries=") =>
+                {
+                    let (name, value) =
+                        arg.split_once('=').ok_or_else(|| usage("Missing limit"))?;
+                    let value = value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            usage("Extraction limits require a positive integer (sizes in bytes)")
+                        })?;
+                    match name {
+                        "-max-total" => args.extract.max_total_bytes = value,
+                        "-max-file" => args.extract.max_file_bytes = value,
+                        _ => args.extract.max_entries = value,
+                    }
+                }
                 _ if arg.starts_with("-zip-backend=") => {
                     args.create.zip_backend = match &arg[13..] {
                         "7z" => ZipBackend::SevenZip,
@@ -175,11 +198,7 @@ fn parse(raw: Vec<String>) -> Result<Args, (i32, String)> {
                         if !io::stdin().is_terminal() {
                             return Err(usage("Use -p{password} when stdin is redirected"));
                         }
-                        eprint!("Password (input visible): ");
-                        io::stderr().flush().map_err(failure)?;
-                        let mut text = String::new();
-                        io::stdin().read_line(&mut text).map_err(failure)?;
-                        text.trim_end_matches(['\r', '\n']).to_owned()
+                        cli_password::prompt().map_err(failure)?
                     } else {
                         arg[2..].to_owned()
                     };
@@ -551,6 +570,41 @@ fn main() {
 #[cfg(test)]
 mod zip_backend_tests {
     use super::*;
+
+    #[test]
+    fn extraction_limits_are_configurable_and_reject_invalid_values() {
+        let args = parse(vec![
+            "x".into(),
+            "test.zip".into(),
+            "-max-total=4096".into(),
+            "-max-file=1024".into(),
+            "-max-entries=7".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            (
+                args.extract.max_total_bytes,
+                args.extract.max_file_bytes,
+                args.extract.max_entries
+            ),
+            (4096, 1024, 7)
+        );
+        for value in ["0", "-1", "abc", "18446744073709551616"] {
+            for name in ["total", "file", "entries"] {
+                assert_eq!(
+                    parse(vec![
+                        "x".into(),
+                        "test.zip".into(),
+                        format!("-max-{name}={value}")
+                    ])
+                    .err()
+                    .unwrap()
+                    .0,
+                    7
+                );
+            }
+        }
+    }
 
     #[test]
     fn extraction_policy_switches_allow_strict_and_default_modes() {

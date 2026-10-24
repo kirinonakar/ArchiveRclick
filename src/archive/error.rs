@@ -35,6 +35,18 @@ pub enum ArchiveError {
     #[error("archive exceeds the configured safety limit: {0}")]
     LimitExceeded(String),
 
+    #[error(
+        "not enough disk space at {path}: archive declares {required} bytes, but only {available} bytes are available; no further files were extracted"
+    )]
+    InsufficientSpace {
+        path: PathBuf,
+        required: u64,
+        available: u64,
+    },
+
+    #[error("disk is full at {0}; completed files may remain")]
+    DiskFull(PathBuf),
+
     #[error("password required or incorrect")]
     PasswordRequired,
 
@@ -60,10 +72,13 @@ pub enum ArchiveError {
 
 impl ArchiveError {
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        Self::Io {
-            path: path.into(),
-            source,
+        let path = path.into();
+        if source.kind() == std::io::ErrorKind::StorageFull
+            || (cfg!(windows) && matches!(source.raw_os_error(), Some(39 | 112)))
+        {
+            return Self::DiskFull(path);
         }
+        Self::Io { path, source }
     }
 
     /// Returns true for failures that are commonly fixed by running the
@@ -110,6 +125,17 @@ pub type ArchiveResult<T> = Result<T, ArchiveError>;
 #[cfg(test)]
 mod tests {
     use super::ArchiveError;
+
+    #[test]
+    fn disk_full_has_a_specific_message_and_never_requests_elevation() {
+        let error = ArchiveError::io(
+            "output",
+            std::io::Error::new(std::io::ErrorKind::StorageFull, "full"),
+        );
+        assert!(matches!(error, ArchiveError::DiskFull(_)));
+        assert!(error.to_string().contains("disk is full"));
+        assert!(!error.requires_elevation());
+    }
 
     #[test]
     fn detects_windows_permission_errors() {

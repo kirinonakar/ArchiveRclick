@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod disk_space;
+#[cfg(windows)]
 pub mod encoding;
 mod engine;
 mod entry;

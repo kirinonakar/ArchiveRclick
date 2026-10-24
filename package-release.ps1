@@ -29,8 +29,10 @@ try {
     # The library target is named archive_rclick_core while the executable
     # keeps the package name archive-rclick, so their .pdb files (which Cargo
     # names after each crate) no longer collide on MSVC.
-    cargo build --release --locked
+    cargo build --release --locked --bins
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
+    cargo build --profile shell --lib --locked
+    if ($LASTEXITCODE -ne 0) { throw "cargo shell DLL build failed" }
 
     if (Test-Path -LiteralPath $output) {
         # A file from the previous package can be locked by a running app or
@@ -82,7 +84,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $output
     Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick-cli.exe") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "CLI.md") -Destination $output
-    Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick_core.dll") -Destination $output
+    Copy-Item -LiteralPath (Join-Path $repository "target\shell\archive_rclick_core.dll") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "runtime\THIRD-PARTY-NOTICES.md") -Destination $output
     Copy-Item -LiteralPath (Join-Path $repository "THIRD-PARTY-LICENSES.md") -Destination $output
     Copy-Item -LiteralPath $manifestPath -Destination $output

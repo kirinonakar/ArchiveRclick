@@ -168,7 +168,7 @@ fn list_iso_directory(
     let total_input = file_length(path)?;
     let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
     throttled.report(opening_snapshot(path, total_input), true);
-    let mut reader = Reader::open(api, path, password)?;
+    let mut reader = Reader::open(api, path, password, cancel)?;
     let scope = archive_path_components(directory);
     let mut entries = Vec::new();
     let mut indices = HashMap::<String, usize>::new();
@@ -325,7 +325,7 @@ impl ArchiveEngine for LibArchiveEngine {
         let pathname_codepage = effective_lha_codepage(path, pathname_codepage);
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
         throttled.report(opening_snapshot(path, total_input), true);
-        let mut reader = Reader::open(&self.api, path, password)?;
+        let mut reader = Reader::open(&self.api, path, password, cancel)?;
         let mut entries = Vec::new();
         let mut total_uncompressed_size = 0u64;
         let mut total_path_bytes = 0u64;
@@ -456,7 +456,8 @@ impl ArchiveEngine for LibArchiveEngine {
             // Strict mode preflights entry policy before touching the destination.
             // Streaming formats otherwise discover a late link after earlier files
             // have already been installed.
-            let mut preflight = Reader::open(&self.api, archive, options.password.as_deref())?;
+            let mut preflight =
+                Reader::open(&self.api, archive, options.password.as_deref(), cancel)?;
             let mut scan = ScanBudget::new(
                 MAX_EXTRACT_SCAN_ENTRIES,
                 MAX_EXTRACT_SCAN_DECODED_BYTES,
@@ -485,6 +486,12 @@ impl ArchiveEngine for LibArchiveEngine {
         let root =
             fs::canonicalize(destination).map_err(|error| ArchiveError::io(destination, error))?;
         verify_directory_handle(&root, &root)?;
+        let effective_options = crate::archive::disk_space::extraction_options(
+            &root,
+            options.total_bytes_hint,
+            options,
+        )?;
+        let options = &effective_options;
         let total_input = file_length(archive)?;
         let pathname_codepage = effective_lha_codepage(archive, options.pathname_codepage);
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
@@ -493,7 +500,7 @@ impl ArchiveEngine for LibArchiveEngine {
             archive,
             options.copy_zone_identifier,
         )?;
-        let mut reader = Reader::open(&self.api, archive, options.password.as_deref())?;
+        let mut reader = Reader::open(&self.api, archive, options.password.as_deref(), cancel)?;
         let mut summary = OperationSummary::default();
         let mut selected_entries = 0u64;
         let mut progress_entries = 0u64;
@@ -566,6 +573,9 @@ impl ArchiveEngine for LibArchiveEngine {
                 )));
             }
             if let Some(size) = entry.size {
+                if entry.kind == ArchiveEntryKind::File {
+                    crate::archive::disk_space::check_declared(&root, size)?;
+                }
                 if size > options.max_file_bytes {
                     return Err(ArchiveError::LimitExceeded(format!(
                         "{} is larger than the per-file limit",
@@ -888,7 +898,7 @@ impl ArchiveEngine for LibArchiveEngine {
         let total_input = file_length(archive)?;
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
         throttled.report(opening_snapshot(archive, total_input), true);
-        let mut reader = Reader::open(&self.api, archive, password)?;
+        let mut reader = Reader::open(&self.api, archive, password, cancel)?;
         let pathname_codepage = effective_lha_codepage(archive, 0);
         let mut summary = OperationSummary::default();
         let mut snapshot = ProgressSnapshot::new(ProgressPhase::Testing);

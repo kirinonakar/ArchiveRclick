@@ -16,8 +16,8 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr,
-    sync::{Mutex, OnceLock},
     sync::atomic::{AtomicUsize, Ordering},
+    sync::{Mutex, OnceLock},
 };
 
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -68,8 +68,8 @@ use windows::core::Result as WinResult;
 use crate::{
     app::commands::{cli_archive_destination, unique_path},
     archive::CreateFormat,
-    platform::{load_language_preference, resolve_language_preference},
     platform::windows::quote_windows_arg,
+    platform::{load_language_preference, resolve_language_preference},
 };
 
 const CLSID_SHELL_EXT: GUID = GUID {
@@ -130,8 +130,7 @@ const MODERN_SEVENZIP_DIRECTORY_MENU_KEY: &str =
 const MODERN_ZIP_EACH_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickZipEach";
 const MODERN_ZIP_EACH_DIRECTORY_MENU_KEY: &str =
     r"Software\Classes\Directory\shell\ArchiveRclickZipEach";
-const MODERN_SEVENZIP_EACH_MENU_KEY: &str =
-    r"Software\Classes\*\shell\ArchiveRclickSevenZipEach";
+const MODERN_SEVENZIP_EACH_MENU_KEY: &str = r"Software\Classes\*\shell\ArchiveRclickSevenZipEach";
 const MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY: &str =
     r"Software\Classes\Directory\shell\ArchiveRclickSevenZipEach";
 const LEGACY_CONTEXT_MENU_KEY: &str =
@@ -165,8 +164,7 @@ fn is_package_managed_process() -> bool {
     // SAFETY: the first call is the documented size probe and passes a valid
     // out-parameter with a null output buffer.
     unsafe {
-        GetCurrentPackageFullName(&mut length, ptr::null_mut())
-            == ERROR_INSUFFICIENT_BUFFER_CODE
+        GetCurrentPackageFullName(&mut length, ptr::null_mut()) == ERROR_INSUFFICIENT_BUFFER_CODE
     }
 }
 
@@ -175,11 +173,7 @@ fn is_package_managed_process() -> bool {
 /// Settings hide/show those commands without trying to remove package-owned
 /// registration data.
 fn is_context_menu_enabled() -> bool {
-    match read_registry_string(
-        HKEY_CURRENT_USER,
-        SETTINGS_KEY,
-        CONTEXT_MENU_ENABLED_VALUE,
-    ) {
+    match read_registry_string(HKEY_CURRENT_USER, SETTINGS_KEY, CONTEXT_MENU_ENABLED_VALUE) {
         Some(value) => value.to_string_lossy() != "0",
         None => true,
     }
@@ -227,7 +221,8 @@ fn increment_live_objects() {
 fn decrement_live_objects() {
     let mut count = LIVE_OBJECTS.load(Ordering::Relaxed);
     while let Some(next) = count.checked_sub(1) {
-        match LIVE_OBJECTS.compare_exchange_weak(count, next, Ordering::Relaxed, Ordering::Relaxed) {
+        match LIVE_OBJECTS.compare_exchange_weak(count, next, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => return,
             Err(current) => count = current,
         }
@@ -267,10 +262,7 @@ impl ArchiveContextMenu {
     }
 
     fn target_folder(&self) -> Option<PathBuf> {
-        self.target_folder
-            .lock()
-            .ok()
-            .and_then(|path| path.clone())
+        self.target_folder.lock().ok().and_then(|path| path.clone())
     }
 }
 
@@ -281,17 +273,22 @@ impl IShellExtInit_Impl for ArchiveContextMenu_Impl {
         data_obj: Ref<'_, IDataObject>,
         _hkey_prog_id: HKEY,
     ) -> WinResult<()> {
-        if let Ok(mut guard) = self.target_folder.lock() {
-            *guard = item_id_list_filesystem_path(pidl_folder).map(PathBuf::from);
-        }
-        let paths = data_obj
-            .as_ref()
-            .and_then(|data| read_hdrop_paths(data).ok())
-            .unwrap_or_default();
-        if let Ok(mut guard) = self.paths.lock() {
-            *guard = paths;
-        }
-        Ok(())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if let Ok(mut guard) = self.target_folder.lock() {
+                    *guard = item_id_list_filesystem_path(pidl_folder).map(PathBuf::from);
+                }
+                let paths = data_obj
+                    .as_ref()
+                    .and_then(|data| read_hdrop_paths(data).ok())
+                    .unwrap_or_default();
+                if let Ok(mut guard) = self.paths.lock() {
+                    *guard = paths;
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -304,124 +301,134 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         id_cmd_last: u32,
         u_flags: u32,
     ) -> windows::core::HRESULT {
-        if let Ok(mut guard) = self.active_verbs.lock() {
-            guard.clear();
-        }
-        if u_flags & CMF_DEFAULTONLY != 0 {
-            return S_OK;
-        }
-        if !is_context_menu_enabled() {
-            return S_OK;
-        }
-        let paths = self.selected_paths();
-        if paths.is_empty() {
-            return S_OK;
-        }
-        let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        let locale = current_menu_locale();
-        let verbs = if self.target_folder().is_some() {
-            right_drag_menu_verbs_for_locale(&paths_buf, locale)
-        } else {
-            menu_verbs_for_locale(&paths_buf, locale)
-        };
-
-        let mut next_id = id_cmd_first;
-        let mut inserted = Vec::new();
-        for (verb, label) in &verbs {
-            if next_id > id_cmd_last {
-                break;
-            }
-            if let Some(wide_label) = wide(label) {
-                // Explorer tells each context-menu handler where its first item
-                // belongs through index_menu.  Appending to the HMENU ignores
-                // that merge position and forces our commands to the very end.
-                let insert_at = index_menu.saturating_add(inserted.len() as u32);
-                // SAFETY: hmenu is valid for the duration of the menu and the
-                // label buffer stays alive for the call.
-                if unsafe {
-                    InsertMenuW(
-                        hmenu,
-                        insert_at,
-                        MF_BYPOSITION | MF_STRING,
-                        next_id as usize,
-                        PCWSTR(wide_label.as_ptr()),
-                    )
+        shell_boundary(
+            || E_FAIL,
+            || {
+                if let Ok(mut guard) = self.active_verbs.lock() {
+                    guard.clear();
                 }
-                .is_ok()
-                {
-                    inserted.push(*verb);
-                    next_id += 1;
+                if u_flags & CMF_DEFAULTONLY != 0 {
+                    return S_OK;
                 }
-            }
-        }
-        let count = inserted.len() as u32;
-        if let Ok(mut guard) = self.active_verbs.lock() {
-            *guard = inserted;
-        }
-        // Show the app icon in front of the classic-menu verbs. Use a standard
-        // 32bpp BI_RGB DIB containing premultiplied BGRA pixels; rendering an
-        // HICON inside the MSIX COM surrogate can make transparent pixels
-        // opaque black.
-        if let Some(bitmap) = load_menu_icon_bitmap() {
-            for offset in 0..count {
-                let item = index_menu.saturating_add(offset);
-                let mut menu_item = MENUITEMINFOW {
-                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-                    fMask: MIIM_BITMAP,
-                    hbmpItem: bitmap,
-                    ..Default::default()
+                if !is_context_menu_enabled() {
+                    return S_OK;
+                }
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    return S_OK;
+                }
+                let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+                let locale = current_menu_locale();
+                let verbs = if self.target_folder().is_some() {
+                    right_drag_menu_verbs_for_locale(&paths_buf, locale)
+                } else {
+                    menu_verbs_for_locale(&paths_buf, locale)
                 };
-                // SAFETY: hmenu is valid, `item` is a position we just
-                // inserted at, and the process-lifetime cache keeps the bitmap
-                // alive even if the MSIX COM host releases this handler early.
-                let _ = unsafe { SetMenuItemInfoW(hmenu, item, true, &mut menu_item) };
-            }
-        }
-        windows::core::HRESULT(count as i32)
+
+                let mut next_id = id_cmd_first;
+                let mut inserted = Vec::new();
+                for (verb, label) in &verbs {
+                    if next_id > id_cmd_last {
+                        break;
+                    }
+                    if let Some(wide_label) = wide(label) {
+                        // Explorer tells each context-menu handler where its first item
+                        // belongs through index_menu.  Appending to the HMENU ignores
+                        // that merge position and forces our commands to the very end.
+                        let insert_at = index_menu.saturating_add(inserted.len() as u32);
+                        // SAFETY: hmenu is valid for the duration of the menu and the
+                        // label buffer stays alive for the call.
+                        if unsafe {
+                            InsertMenuW(
+                                hmenu,
+                                insert_at,
+                                MF_BYPOSITION | MF_STRING,
+                                next_id as usize,
+                                PCWSTR(wide_label.as_ptr()),
+                            )
+                        }
+                        .is_ok()
+                        {
+                            inserted.push(*verb);
+                            next_id += 1;
+                        }
+                    }
+                }
+                let count = inserted.len() as u32;
+                if let Ok(mut guard) = self.active_verbs.lock() {
+                    *guard = inserted;
+                }
+                // Show the app icon in front of the classic-menu verbs. Use a standard
+                // 32bpp BI_RGB DIB containing premultiplied BGRA pixels; rendering an
+                // HICON inside the MSIX COM surrogate can make transparent pixels
+                // opaque black.
+                if let Some(bitmap) = load_menu_icon_bitmap() {
+                    for offset in 0..count {
+                        let item = index_menu.saturating_add(offset);
+                        let mut menu_item = MENUITEMINFOW {
+                            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                            fMask: MIIM_BITMAP,
+                            hbmpItem: bitmap,
+                            ..Default::default()
+                        };
+                        // SAFETY: hmenu is valid, `item` is a position we just
+                        // inserted at, and the process-lifetime cache keeps the bitmap
+                        // alive even if the MSIX COM host releases this handler early.
+                        let _ = unsafe { SetMenuItemInfoW(hmenu, item, true, &mut menu_item) };
+                    }
+                }
+                windows::core::HRESULT(count as i32)
+            },
+        )
     }
 
     fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> WinResult<()> {
-        if pici.is_null() {
-            return Err(E_POINTER.into());
-        }
-        if !is_context_menu_enabled() {
-            return Ok(());
-        }
-        // For a numeric verb, Explorer passes the zero-based command offset
-        // directly in the low word of lpVerb; it is NOT the absolute menu id.
-        let raw_verb = unsafe { (*pici).lpVerb.0 as usize };
-        if raw_verb >> 16 != 0 {
-            // A string verb belongs to some other handler: this extension only
-            // advertises numeric command offsets from QueryContextMenu.  Never
-            // return S_OK for an unknown verb, because doing so tells the Shell
-            // that the command was handled and can swallow unrelated commands
-            // (including commands invoked from shell-owned menus such as Win+X).
-            return Err(E_FAIL.into());
-        }
-        let offset = raw_verb & 0xFFFF;
-        let verb = self
-            .active_verbs
-            .lock()
-            .ok()
-            .and_then(|verbs| verbs.get(offset).copied());
-        let Some(verb) = verb else {
-            // The numeric offset is outside the range we inserted.  Do not
-            // claim success for a command that is not ours.
-            return Err(E_FAIL.into());
-        };
-        let paths = self.selected_paths();
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let Some(exe) = find_exe_path() else {
-            return Ok(());
-        };
-        let args = self
-            .target_folder()
-            .map(|destination| build_targeted_args(verb, &destination, &paths))
-            .unwrap_or_else(|| build_args(verb.subcommand(), &paths));
-        run_exe(&exe, &args);
-        Ok(())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if pici.is_null() {
+                    return Err(E_POINTER.into());
+                }
+                if !is_context_menu_enabled() {
+                    return Ok(());
+                }
+                // For a numeric verb, Explorer passes the zero-based command offset
+                // directly in the low word of lpVerb; it is NOT the absolute menu id.
+                let raw_verb = unsafe { (*pici).lpVerb.0 as usize };
+                if raw_verb >> 16 != 0 {
+                    // A string verb belongs to some other handler: this extension only
+                    // advertises numeric command offsets from QueryContextMenu.  Never
+                    // return S_OK for an unknown verb, because doing so tells the Shell
+                    // that the command was handled and can swallow unrelated commands
+                    // (including commands invoked from shell-owned menus such as Win+X).
+                    return Err(E_FAIL.into());
+                }
+                let offset = raw_verb & 0xFFFF;
+                let verb = self
+                    .active_verbs
+                    .lock()
+                    .ok()
+                    .and_then(|verbs| verbs.get(offset).copied());
+                let Some(verb) = verb else {
+                    // The numeric offset is outside the range we inserted.  Do not
+                    // claim success for a command that is not ours.
+                    return Err(E_FAIL.into());
+                };
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    return Ok(());
+                }
+                let Some(exe) = find_exe_path() else {
+                    return Ok(());
+                };
+                let args = self
+                    .target_folder()
+                    .map(|destination| build_targeted_args(verb, &destination, &paths))
+                    .unwrap_or_else(|| build_args(verb.subcommand(), &paths));
+                run_exe(&exe, &args);
+                Ok(())
+            },
+        )
     }
 
     fn GetCommandString(
@@ -432,35 +439,40 @@ impl IContextMenu_Impl for ArchiveContextMenu_Impl {
         commandstring: PSTR,
         cch: u32,
     ) -> WinResult<()> {
-        if uflags != GCS_VERBW && uflags != GCS_HELPTEXTW {
-            return Err(E_NOTIMPL.into());
-        }
-        let verb = self
-            .active_verbs
-            .lock()
-            .ok()
-            .and_then(|verbs| verbs.get(idcmd).copied())
-            .ok_or(E_FAIL)?;
-        let paths: Vec<PathBuf> = self.selected_paths().iter().map(PathBuf::from).collect();
-        let locale = current_menu_locale();
-        let labels = if self.target_folder().is_some() {
-            right_drag_menu_verbs_for_locale(&paths, locale)
-        } else {
-            menu_verbs_for_locale(&paths, locale)
-        };
-        let label = labels
-            .into_iter()
-            .find_map(|(candidate, label)| (candidate == verb).then_some(label))
-            .ok_or(E_FAIL)?;
-        let text = if uflags == GCS_VERBW {
-            // GCS_VERBW is the canonical invocation string, not the visible
-            // menu caption. Returning the caption here makes Explorer cache a
-            // broken verb and results in incorrect help/tooltips.
-            verb.subcommand().to_owned()
-        } else {
-            format!("ArchiveRclick: {label}")
-        };
-        write_wide_buffer(&text, commandstring, cch)
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if uflags != GCS_VERBW && uflags != GCS_HELPTEXTW {
+                    return Err(E_NOTIMPL.into());
+                }
+                let verb = self
+                    .active_verbs
+                    .lock()
+                    .ok()
+                    .and_then(|verbs| verbs.get(idcmd).copied())
+                    .ok_or(E_FAIL)?;
+                let paths: Vec<PathBuf> = self.selected_paths().iter().map(PathBuf::from).collect();
+                let locale = current_menu_locale();
+                let labels = if self.target_folder().is_some() {
+                    right_drag_menu_verbs_for_locale(&paths, locale)
+                } else {
+                    menu_verbs_for_locale(&paths, locale)
+                };
+                let label = labels
+                    .into_iter()
+                    .find_map(|(candidate, label)| (candidate == verb).then_some(label))
+                    .ok_or(E_FAIL)?;
+                let text = if uflags == GCS_VERBW {
+                    // GCS_VERBW is the canonical invocation string, not the visible
+                    // menu caption. Returning the caption here makes Explorer cache a
+                    // broken verb and results in incorrect help/tooltips.
+                    verb.subcommand().to_owned()
+                } else {
+                    format!("ArchiveRclick: {label}")
+                };
+                write_wide_buffer(&text, commandstring, cch)
+            },
+        )
     }
 }
 
@@ -581,10 +593,7 @@ fn menu_verbs_for_locale(paths: &[PathBuf], locale: MenuLocale) -> Vec<(Verb, St
 
 /// Adds the direct-to-destination extraction command only for Explorer's
 /// right-drag menu. Normal file context menus keep their existing commands.
-fn right_drag_menu_verbs_for_locale(
-    paths: &[PathBuf],
-    locale: MenuLocale,
-) -> Vec<(Verb, String)> {
+fn right_drag_menu_verbs_for_locale(paths: &[PathBuf], locale: MenuLocale) -> Vec<(Verb, String)> {
     let mut verbs = menu_verbs_for_locale(paths, locale);
     if !paths.is_empty() && paths.iter().all(|path| is_archive_path(path)) {
         let insert_at = usize::from(!verbs.is_empty());
@@ -732,47 +741,62 @@ impl Drop for ArchiveVerbCommand {
 
 impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
     fn GetTitle(&self, psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        if !is_context_menu_enabled() {
-            return Ok(PWSTR::null());
-        }
-        let paths = psiitemarray
-            .as_ref()
-            .map(item_array_paths)
-            .unwrap_or_default();
-        self.stash_paths(paths.clone());
-        let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        let Some(label) = self.label(&paths_buf) else {
-            return Ok(PWSTR::null());
-        };
-        wide_alloc(&label).ok_or_else(|| E_OUTOFMEMORY.into())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if !is_context_menu_enabled() {
+                    return Ok(PWSTR::null());
+                }
+                let paths = psiitemarray
+                    .as_ref()
+                    .map(item_array_paths)
+                    .unwrap_or_default();
+                self.stash_paths(paths.clone());
+                let paths_buf: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+                let Some(label) = self.label(&paths_buf) else {
+                    return Ok(PWSTR::null());
+                };
+                wide_alloc(&label).ok_or_else(|| E_OUTOFMEMORY.into())
+            },
+        )
     }
 
     fn GetIcon(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        let Some(icon_module) = find_icon_module_path() else {
-            return Err(E_NOTIMPL.into());
-        };
-        // Use a negative resource id, the standard IExplorerCommand icon
-        // format. The icon is embedded in the shell-extension DLL itself, so
-        // an MSIX package never falls back to a differently scaled package
-        // logo or a stale executable path.
-        wide_alloc(&format!("{},-1", icon_module.to_string_lossy()))
-            .ok_or_else(|| E_OUTOFMEMORY.into())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                let Some(icon_module) = find_icon_module_path() else {
+                    return Err(E_NOTIMPL.into());
+                };
+                // Use a negative resource id, the standard IExplorerCommand icon
+                // format. The icon is embedded in the shell-extension DLL itself, so
+                // an MSIX package never falls back to a differently scaled package
+                // logo or a stale executable path.
+                wide_alloc(&format!("{},-1", icon_module.to_string_lossy()))
+                    .ok_or_else(|| E_OUTOFMEMORY.into())
+            },
+        )
     }
 
     fn GetToolTip(&self, _psiitemarray: Ref<'_, IShellItemArray>) -> WinResult<PWSTR> {
-        let paths: Vec<PathBuf> = self
-            .paths
-            .lock()
-            .map(|paths| paths.iter().map(PathBuf::from).collect())
-            .unwrap_or_default();
-        let label = self
-            .label(&paths)
-            .unwrap_or_else(|| self.verb.tooltip(current_menu_locale()).to_owned());
-        wide_alloc(&format!("ArchiveRclick: {label}")).ok_or_else(|| E_OUTOFMEMORY.into())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                let paths: Vec<PathBuf> = self
+                    .paths
+                    .lock()
+                    .map(|paths| paths.iter().map(PathBuf::from).collect())
+                    .unwrap_or_default();
+                let label = self
+                    .label(&paths)
+                    .unwrap_or_else(|| self.verb.tooltip(current_menu_locale()).to_owned());
+                wide_alloc(&format!("ArchiveRclick: {label}")).ok_or_else(|| E_OUTOFMEMORY.into())
+            },
+        )
     }
 
     fn GetCanonicalName(&self) -> WinResult<GUID> {
-        Err(E_NOTIMPL.into())
+        shell_boundary(|| Err(E_FAIL.into()), || Err(E_NOTIMPL.into()))
     }
 
     fn GetState(
@@ -780,16 +804,22 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
         psiitemarray: Ref<'_, IShellItemArray>,
         _foktobeslow: BOOL,
     ) -> WinResult<u32> {
-        let visible = is_context_menu_enabled() && psiitemarray.as_ref().is_some_and(|array| {
-            let paths_buf: Vec<PathBuf> =
-                item_array_paths(array).iter().map(PathBuf::from).collect();
-            !paths_buf.is_empty() && self.label(&paths_buf).is_some()
-        });
-        Ok(if visible {
-            ECS_ENABLED.0 as u32
-        } else {
-            ECS_HIDDEN.0 as u32
-        })
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                let visible = is_context_menu_enabled()
+                    && psiitemarray.as_ref().is_some_and(|array| {
+                        let paths_buf: Vec<PathBuf> =
+                            item_array_paths(array).iter().map(PathBuf::from).collect();
+                        !paths_buf.is_empty() && self.label(&paths_buf).is_some()
+                    });
+                Ok(if visible {
+                    ECS_ENABLED.0 as u32
+                } else {
+                    ECS_HIDDEN.0 as u32
+                })
+            },
+        )
     }
 
     fn Invoke(
@@ -797,30 +827,62 @@ impl IExplorerCommand_Impl for ArchiveVerbCommand_Impl {
         psiitemarray: Ref<'_, IShellItemArray>,
         _pbc: Ref<'_, IBindCtx>,
     ) -> WinResult<()> {
-        if !is_context_menu_enabled() {
-            return Ok(());
-        }
-        let paths = psiitemarray
-            .as_ref()
-            .map(item_array_paths)
-            .unwrap_or_default();
-        self.stash_paths(paths.clone());
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let Some(exe) = find_exe_path() else {
-            return Ok(());
-        };
-        run_exe(&exe, &build_args(self.verb.subcommand(), &paths));
-        Ok(())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if !is_context_menu_enabled() {
+                    return Ok(());
+                }
+                let paths = psiitemarray
+                    .as_ref()
+                    .map(item_array_paths)
+                    .unwrap_or_default();
+                self.stash_paths(paths.clone());
+                if paths.is_empty() {
+                    return Ok(());
+                }
+                let Some(exe) = find_exe_path() else {
+                    return Ok(());
+                };
+                run_exe(&exe, &build_args(self.verb.subcommand(), &paths));
+                Ok(())
+            },
+        )
     }
 
     fn GetFlags(&self) -> WinResult<u32> {
-        Ok(0)
+        shell_boundary(|| Err(E_FAIL.into()), || Ok(0))
     }
 
     fn EnumSubCommands(&self) -> WinResult<IEnumExplorerCommand> {
-        Err(E_NOTIMPL.into())
+        shell_boundary(|| Err(E_FAIL.into()), || Err(E_NOTIMPL.into()))
+    }
+}
+
+// A failed extension stays loaded and refuses further work for this host
+// session. Do not reuse partially updated menu state after a panic.
+static SHELL_PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn shell_boundary<T>(fallback: impl FnOnce() -> T, action: impl FnOnce() -> T) -> T {
+    shell_boundary_with_state(&SHELL_PANICKED, fallback, action)
+}
+
+fn shell_boundary_with_state<T>(
+    failed: &std::sync::atomic::AtomicBool,
+    fallback: impl FnOnce() -> T,
+    action: impl FnOnce() -> T,
+) -> T {
+    if failed.load(Ordering::Acquire) {
+        return fallback();
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+        Ok(value) => value,
+        Err(payload) => {
+            failed.store(true, Ordering::Release);
+            // A user-supplied panic payload may itself panic when dropped.
+            std::mem::forget(payload);
+            fallback()
+        }
     }
 }
 
@@ -858,46 +920,59 @@ impl IClassFactory_Impl for ShellExtFactory_Impl {
         riid: *const GUID,
         ppvobj: *mut *mut c_void,
     ) -> WinResult<()> {
-        if !punkouter.is_null() {
-            return Err(E_NOINTERFACE.into());
-        }
-        if ppvobj.is_null() {
-            return Err(E_POINTER.into());
-        }
-        // Count the COM object from creation until its final Release/Drop.
-        // This keeps DllCanUnloadNow from unloading the DLL underneath it.
-        increment_live_objects();
-        match self.kind {
-            FactoryKind::Classic => {
-                let handler: IContextMenu = ArchiveContextMenu::new().into();
-                // SAFETY: riid/ppvobj are out-parameters provided by the caller and
-                // the object's vtable starts with the standard IUnknown methods.
-                unsafe {
-                    let object = handler.as_raw() as *mut c_void;
-                    let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-                    ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if !punkouter.is_null() {
+                    return Err(E_NOINTERFACE.into());
                 }
-            }
-            FactoryKind::ExplorerCommand(verb) => {
-                let handler: IExplorerCommand = ArchiveVerbCommand::new(verb).into();
-                // SAFETY: riid/ppvobj are out-parameters provided by the caller and
-                // the object's vtable starts with the standard IUnknown methods.
-                unsafe {
-                    let object = handler.as_raw() as *mut c_void;
-                    let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-                    ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+                if ppvobj.is_null() {
+                    return Err(E_POINTER.into());
                 }
-            }
-        }
+                unsafe {
+                    *ppvobj = ptr::null_mut();
+                }
+                // Count the COM object from creation until its final Release/Drop.
+                // This keeps DllCanUnloadNow from unloading the DLL underneath it.
+                increment_live_objects();
+                match self.kind {
+                    FactoryKind::Classic => {
+                        let handler: IContextMenu = ArchiveContextMenu::new().into();
+                        // SAFETY: riid/ppvobj are out-parameters provided by the caller and
+                        // the object's vtable starts with the standard IUnknown methods.
+                        unsafe {
+                            let object = handler.as_raw() as *mut c_void;
+                            let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
+                            ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+                        }
+                    }
+                    FactoryKind::ExplorerCommand(verb) => {
+                        let handler: IExplorerCommand = ArchiveVerbCommand::new(verb).into();
+                        // SAFETY: riid/ppvobj are out-parameters provided by the caller and
+                        // the object's vtable starts with the standard IUnknown methods.
+                        unsafe {
+                            let object = handler.as_raw() as *mut c_void;
+                            let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
+                            ((*vtbl).QueryInterface)(object, riid, ppvobj).ok()
+                        }
+                    }
+                }
+            },
+        )
     }
 
     fn LockServer(&self, flock: BOOL) -> WinResult<()> {
-        if flock.as_bool() {
-            increment_live_objects();
-        } else {
-            decrement_live_objects();
-        }
-        Ok(())
+        shell_boundary(
+            || Err(E_FAIL.into()),
+            || {
+                if flock.as_bool() {
+                    increment_live_objects();
+                } else {
+                    decrement_live_objects();
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -913,31 +988,49 @@ pub unsafe extern "system" fn DllGetClassObject(
     riid: *const GUID,
     ppv: *mut *mut c_void,
 ) -> windows::core::HRESULT {
-    if rclsid.is_null() || riid.is_null() || ppv.is_null() {
-        return E_POINTER;
+    // A plain release build also emits a cdylib. Refuse activation of that
+    // abort-enabled artifact if it is accidentally registered in Explorer.
+    if cfg!(panic = "abort") {
+        if !ppv.is_null() {
+            unsafe {
+                *ppv = ptr::null_mut();
+            }
+        }
+        return CLASS_E_CLASSNOTAVAILABLE;
     }
-    // SAFETY: rclsid was validated non-null above.
-    let kind = match unsafe { *rclsid } {
-        CLSID_SHELL_EXT => FactoryKind::Classic,
-        CLSID_EXTRACT_COMMAND => FactoryKind::ExplorerCommand(Verb::Extract),
-        CLSID_ZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::Zip),
-        CLSID_SEVENZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZip),
-        CLSID_ZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::ZipEach),
-        CLSID_SEVENZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZipEach),
-        _ => return CLASS_E_CLASSNOTAVAILABLE,
-    };
-    // The class factory itself is a live COM object too.  If it is omitted
-    // from the count, DllCanUnloadNow may return S_OK while Explorer still
-    // holds the factory and later call into an unloaded DLL.
-    increment_live_objects();
-    let factory: IClassFactory = ShellExtFactory::new(kind).into();
-    // SAFETY: riid/ppv are out-parameters provided by the caller and the
-    // object's vtable starts with the standard IUnknown methods.
-    unsafe {
-        let object = factory.as_raw() as *mut c_void;
-        let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
-        ((*vtbl).QueryInterface)(object, riid, ppv)
-    }
+    shell_boundary(
+        || E_FAIL,
+        || {
+            if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+                return E_POINTER;
+            }
+            unsafe {
+                *ppv = ptr::null_mut();
+            }
+            // SAFETY: rclsid was validated non-null above.
+            let kind = match unsafe { *rclsid } {
+                CLSID_SHELL_EXT => FactoryKind::Classic,
+                CLSID_EXTRACT_COMMAND => FactoryKind::ExplorerCommand(Verb::Extract),
+                CLSID_ZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::Zip),
+                CLSID_SEVENZIP_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZip),
+                CLSID_ZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::ZipEach),
+                CLSID_SEVENZIP_EACH_COMMAND => FactoryKind::ExplorerCommand(Verb::SevenZipEach),
+                _ => return CLASS_E_CLASSNOTAVAILABLE,
+            };
+            // The class factory itself is a live COM object too.  If it is omitted
+            // from the count, DllCanUnloadNow may return S_OK while Explorer still
+            // holds the factory and later call into an unloaded DLL.
+            increment_live_objects();
+            let factory: IClassFactory = ShellExtFactory::new(kind).into();
+            // SAFETY: riid/ppv are out-parameters provided by the caller and the
+            // object's vtable starts with the standard IUnknown methods.
+            unsafe {
+                let object = factory.as_raw() as *mut c_void;
+                let vtbl = *(object as *const *const windows::core::IUnknown_Vtbl);
+                ((*vtbl).QueryInterface)(object, riid, ppv)
+            }
+        },
+    )
 }
 
 /// # Safety
@@ -947,34 +1040,50 @@ pub unsafe extern "system" fn DllGetClassObject(
 /// Explorer would unload this DLL underneath them and crash on the next call.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllCanUnloadNow() -> windows::core::HRESULT {
-    if LIVE_OBJECTS.load(Ordering::Acquire) == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
+    shell_boundary(
+        || S_FALSE,
+        || {
+            if LIVE_OBJECTS.load(Ordering::Acquire) == 0 {
+                S_OK
+            } else {
+                S_FALSE
+            }
+        },
+    )
 }
 
 /// # Safety
 /// COM export: takes no arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
-    let Some(dll) = module_file_name() else {
+    if cfg!(panic = "abort") {
         return E_FAIL;
-    };
-    match register_context_menu(Path::new(&dll)) {
-        Ok(()) => S_OK,
-        Err(_) => E_FAIL,
     }
+    shell_boundary(
+        || E_FAIL,
+        || {
+            let Some(dll) = module_file_name() else {
+                return E_FAIL;
+            };
+            match register_context_menu(Path::new(&dll)) {
+                Ok(()) => S_OK,
+                Err(_) => E_FAIL,
+            }
+        },
+    )
 }
 
 /// # Safety
 /// COM export: takes no arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllUnregisterServer() -> windows::core::HRESULT {
-    match unregister_context_menu() {
-        Ok(()) => S_OK,
-        Err(_) => E_FAIL,
-    }
+    shell_boundary(
+        || E_FAIL,
+        || match unregister_context_menu() {
+            Ok(()) => S_OK,
+            Err(_) => E_FAIL,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,11 +1166,7 @@ fn build_targeted_args(verb: Verb, destination: &Path, paths: &[OsString]) -> St
     build_destination_args(subcommand, destination, paths)
 }
 
-fn build_destination_args(
-    subcommand: &str,
-    destination: &Path,
-    paths: &[OsString],
-) -> String {
+fn build_destination_args(subcommand: &str, destination: &Path, paths: &[OsString]) -> String {
     let mut args = quote_windows_arg(std::ffi::OsStr::new(subcommand));
     args.push(' ');
     args.push_str(&quote_windows_arg(destination.as_os_str()));
@@ -1156,17 +1261,50 @@ fn find_icon_module_path() -> Option<OsString> {
 }
 
 const MENU_ICON_IMAGES: &[(i32, &[u8])] = &[
-    (16, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-16.bgra"))),
-    (20, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-20.bgra"))),
-    (24, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-24.bgra"))),
-    (28, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-28.bgra"))),
-    (32, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-32.bgra"))),
-    (36, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-36.bgra"))),
-    (40, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-40.bgra"))),
-    (44, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-44.bgra"))),
-    (48, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-48.bgra"))),
-    (56, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-56.bgra"))),
-    (64, include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-64.bgra"))),
+    (
+        16,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-16.bgra")),
+    ),
+    (
+        20,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-20.bgra")),
+    ),
+    (
+        24,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-24.bgra")),
+    ),
+    (
+        28,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-28.bgra")),
+    ),
+    (
+        32,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-32.bgra")),
+    ),
+    (
+        36,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-36.bgra")),
+    ),
+    (
+        40,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-40.bgra")),
+    ),
+    (
+        44,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-44.bgra")),
+    ),
+    (
+        48,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-48.bgra")),
+    ),
+    (
+        56,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-56.bgra")),
+    ),
+    (
+        64,
+        include_bytes!(concat!(env!("OUT_DIR"), "/menu-icon-64.bgra")),
+    ),
 ];
 
 // Explorer can release the IContextMenu object before it has finished drawing
@@ -1408,7 +1546,10 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (CLSID_EXTRACT_COMMAND, "ArchiveRclick extract command"),
         (CLSID_ZIP_COMMAND, "ArchiveRclick ZIP command"),
         (CLSID_SEVENZIP_COMMAND, "ArchiveRclick 7z command"),
-        (CLSID_ZIP_EACH_COMMAND, "ArchiveRclick per-folder ZIP command"),
+        (
+            CLSID_ZIP_EACH_COMMAND,
+            "ArchiveRclick per-folder ZIP command",
+        ),
         (
             CLSID_SEVENZIP_EACH_COMMAND,
             "ArchiveRclick per-folder 7z command",
@@ -1437,10 +1578,7 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (MODERN_ZIP_MENU_KEY, CLSID_ZIP_COMMAND),
         (MODERN_SEVENZIP_MENU_KEY, CLSID_SEVENZIP_COMMAND),
         (MODERN_ZIP_EACH_MENU_KEY, CLSID_ZIP_EACH_COMMAND),
-        (
-            MODERN_SEVENZIP_EACH_MENU_KEY,
-            CLSID_SEVENZIP_EACH_COMMAND,
-        ),
+        (MODERN_SEVENZIP_EACH_MENU_KEY, CLSID_SEVENZIP_EACH_COMMAND),
     ] {
         let command_guid = guid_string_for(command_clsid);
         set_registry_string(
@@ -1456,10 +1594,7 @@ pub fn register_context_menu(dll_path: &Path) -> Result<(), String> {
         (MODERN_EXTRACT_DIRECTORY_MENU_KEY, CLSID_EXTRACT_COMMAND),
         (MODERN_ZIP_DIRECTORY_MENU_KEY, CLSID_ZIP_COMMAND),
         (MODERN_SEVENZIP_DIRECTORY_MENU_KEY, CLSID_SEVENZIP_COMMAND),
-        (
-            MODERN_ZIP_EACH_DIRECTORY_MENU_KEY,
-            CLSID_ZIP_EACH_COMMAND,
-        ),
+        (MODERN_ZIP_EACH_DIRECTORY_MENU_KEY, CLSID_ZIP_EACH_COMMAND),
         (
             MODERN_SEVENZIP_EACH_DIRECTORY_MENU_KEY,
             CLSID_SEVENZIP_EACH_COMMAND,
@@ -1497,11 +1632,7 @@ pub fn unregister_context_menu() -> Result<(), String> {
         return Ok(());
     }
     remove_portable_context_menu_entries()?;
-    delete_registry_value(
-        HKEY_CURRENT_USER,
-        SETTINGS_KEY,
-        CONTEXT_MENU_ENABLED_VALUE,
-    )?;
+    delete_registry_value(HKEY_CURRENT_USER, SETTINGS_KEY, CONTEXT_MENU_ENABLED_VALUE)?;
     notify_shell_change();
     Ok(())
 }
@@ -1875,11 +2006,27 @@ fn utf16_bytes(value: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn com_boundary_contains_panics_and_disables_later_calls() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let failed = AtomicBool::new(false);
+        assert_eq!(super::shell_boundary_with_state(&failed, || -1, || 42), 42);
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(
+            super::shell_boundary_with_state(&failed, || -1, || panic!("COM fault injection")),
+            -1
+        );
+        assert!(failed.load(Ordering::Acquire));
+        assert_eq!(
+            super::shell_boundary_with_state(&failed, || -1, || panic!("must not be called")),
+            -1
+        );
+    }
     use std::{ffi::OsString, path::Path};
 
     use super::{
-        MENU_ICON_IMAGES, MenuLocale, Verb, build_args, build_targeted_args,
-        load_menu_icon_bitmap, menu_verbs, menu_verbs_for_locale, right_drag_menu_verbs_for_locale,
+        MENU_ICON_IMAGES, MenuLocale, Verb, build_args, build_targeted_args, load_menu_icon_bitmap,
+        menu_verbs, menu_verbs_for_locale, right_drag_menu_verbs_for_locale,
         shorten_compression_name, shorten_menu_name,
     };
 
@@ -2024,7 +2171,10 @@ mod tests {
         std::fs::File::create(&split).expect("create split archive volume placeholder");
         let split_verbs = menu_verbs(std::slice::from_ref(&split));
         assert_eq!(
-            split_verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
+            split_verbs
+                .iter()
+                .map(|(verb, _)| *verb)
+                .collect::<Vec<_>>(),
             vec![Verb::Extract]
         );
 
@@ -2071,10 +2221,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Verb::Extract]
         );
-        let right_drag = right_drag_menu_verbs_for_locale(
-            std::slice::from_ref(&archive),
-            MenuLocale::Korean,
-        );
+        let right_drag =
+            right_drag_menu_verbs_for_locale(std::slice::from_ref(&archive), MenuLocale::Korean);
         assert_eq!(
             right_drag.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Extract, Verb::ExtractHere]
@@ -2086,18 +2234,17 @@ mod tests {
 
     #[test]
     fn multiple_folders_use_per_folder_compression_commands() {
-        let root =
-            std::env::temp_dir().join(format!("archive-rclick-shell-ext-folders-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "archive-rclick-shell-ext-folders-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let first = root.join("one");
         let second = root.join("two");
         std::fs::create_dir_all(&first).expect("create first folder");
         std::fs::create_dir_all(&second).expect("create second folder");
 
-        let verbs = menu_verbs_for_locale(
-            &[first.clone(), second.clone()],
-            MenuLocale::Korean,
-        );
+        let verbs = menu_verbs_for_locale(&[first.clone(), second.clone()], MenuLocale::Korean);
         assert_eq!(
             verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
             vec![Verb::Zip, Verb::SevenZip, Verb::ZipEach, Verb::SevenZipEach]
@@ -2131,18 +2278,12 @@ mod tests {
         let archive = root.join("sample.zip");
         std::fs::File::create(&archive).expect("create archive placeholder");
 
-        let korean = right_drag_menu_verbs_for_locale(
-            std::slice::from_ref(&archive),
-            MenuLocale::Korean,
-        );
-        let english = right_drag_menu_verbs_for_locale(
-            std::slice::from_ref(&archive),
-            MenuLocale::English,
-        );
-        let japanese = right_drag_menu_verbs_for_locale(
-            std::slice::from_ref(&archive),
-            MenuLocale::Japanese,
-        );
+        let korean =
+            right_drag_menu_verbs_for_locale(std::slice::from_ref(&archive), MenuLocale::Korean);
+        let english =
+            right_drag_menu_verbs_for_locale(std::slice::from_ref(&archive), MenuLocale::English);
+        let japanese =
+            right_drag_menu_verbs_for_locale(std::slice::from_ref(&archive), MenuLocale::Japanese);
 
         assert_eq!(korean[0].1, "sample\\ 에 풀기");
         assert_eq!(korean[1].1, "여기에 풀기");

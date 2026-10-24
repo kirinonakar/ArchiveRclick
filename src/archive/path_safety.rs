@@ -2,6 +2,30 @@ use std::path::{Path, PathBuf};
 
 use super::{ArchiveError, ArchiveResult};
 
+/// Conservative Windows case-insensitive collision check. Unicode uppercase
+/// also folds sigma variants; expansions may serialize extra paths, which is
+/// safe. Filesystem create/replace checks remain authoritative.
+pub(crate) fn has_output_path_conflict<'a>(
+    paths: impl IntoIterator<Item = (&'a Path, bool)>,
+) -> bool {
+    use std::collections::HashSet;
+    let key = |path: &Path| path.to_string_lossy().replace('\\', "/").to_uppercase();
+    let paths: Vec<_> = paths.into_iter().collect();
+    let files: HashSet<_> = paths
+        .iter()
+        .filter(|(_, dir)| !dir)
+        .map(|(p, _)| key(p))
+        .collect();
+    let mut seen = HashSet::new();
+    paths.iter().any(|(path, _)| {
+        !seen.insert(key(path))
+            || path
+                .ancestors()
+                .skip(1)
+                .any(|parent| files.contains(&key(parent)))
+    })
+}
+
 pub(crate) fn safe_relative_path(path: &Path) -> ArchiveResult<PathBuf> {
     let relative = traversal_checked_path(path)?;
     for component in relative.to_string_lossy().split(['/', '\\']) {
@@ -152,6 +176,27 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::safe_relative_path;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn parallel_paths_detect_unicode_duplicates_and_nonadjacent_parents() {
+        let conflict = |paths: &[(&str, bool)]| {
+            super::has_output_path_conflict(
+                paths
+                    .iter()
+                    .map(|(path, directory)| (Path::new(path), *directory)),
+            )
+        };
+        assert!(conflict(&[("Éa.txt", false), ("éa.txt", false)]));
+        assert!(conflict(&[("Σ.txt", false), ("ς.txt", false)]));
+        assert!(conflict(&[
+            ("É", false),
+            ("other", false),
+            ("é/child", false)
+        ]));
+        assert!(conflict(&[("a", false), ("a-", false), ("a/b", false)]));
+        assert!(!conflict(&[("É", true), ("é/child", false)]));
+        assert!(!conflict(&[("Éa.txt", false), ("éb.txt", false)]));
+    }
 
     #[test]
     fn accepts_normal_relative_paths() {

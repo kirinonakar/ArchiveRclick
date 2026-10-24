@@ -12,4 +12,6 @@ mod platform_impl;
 #[path = "sevenzip/unsupported.rs"]
 mod platform_impl;
 
+#[cfg(windows)]
+pub(crate) use platform_impl::ZipPathnames;
 pub use platform_impl::{CompositeEngine, SevenZipEngine};

@@ -601,6 +601,10 @@ impl ArchiveEngine for SevenZipEngine {
             }
         }
 
+        let effective_options =
+            crate::archive::disk_space::extraction_options(&root, Some(selected_bytes), options)?;
+        let options = &effective_options;
+
         // When the destination was just created, every selected target is
         // absent unless the archive contains duplicate paths. Detect
         // duplicates once so the hot callback path can skip one metadata
@@ -1377,32 +1381,12 @@ fn read_entries(
 }
 
 fn has_parallel_path_conflict(items: &[ExtractItem], selected: &HashSet<u32>) -> bool {
-    let mut paths = items
-        .iter()
-        .filter(|item| selected.contains(&item.index))
-        .map(|item| {
-            (
-                item.relative
-                    .to_string_lossy()
-                    .replace('\\', "/")
-                    .to_ascii_lowercase(),
-                item.is_dir,
-            )
-        })
-        .collect::<Vec<_>>();
-    paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    for window in paths.windows(2) {
-        let (previous, previous_is_dir) = &window[0];
-        let (current, _) = &window[1];
-        if previous == current
-            || (!previous_is_dir
-                && current.starts_with(previous)
-                && current.as_bytes().get(previous.len()) == Some(&b'/'))
-        {
-            return true;
-        }
-    }
-    false
+    crate::archive::path_safety::has_output_path_conflict(
+        items
+            .iter()
+            .filter(|item| selected.contains(&item.index))
+            .map(|item| (item.relative.as_path(), item.is_dir)),
+    )
 }
 
 fn apply_create_properties(

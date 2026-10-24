@@ -1,6 +1,6 @@
 [package]
 name = "archive-rclick"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2024"
 rust-version = "1.92"
 description = "A fast, lightweight Windows archive manager built with Rust, Slint, and libarchive"
@@ -43,6 +43,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com",
     "Win32_System_Com_Marshal",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
@@ -75,6 +76,9 @@ image = { version = "=0.25.10", default-features = false, features = ["png"] }
 codegen-units = 1
 lto = "thin"
 panic = "abort"
-# Applies to the shell cdylib too: panic recovery at COM boundaries requires
-# a separate unwind-enabled build. catch_unwind cannot contain release panics.
 strip = "symbols"
+
+# Package this DLL, never the abort-enabled target/release DLL, into Explorer.
+[profile.shell]
+inherits = "release"
+panic = "unwind"

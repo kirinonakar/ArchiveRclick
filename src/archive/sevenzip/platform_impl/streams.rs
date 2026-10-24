@@ -373,6 +373,7 @@ pub(super) struct OutputBudget {
     max_total: u64,
     total: Mutex<u64>,
     exceeded: AtomicBool,
+    io_error: Mutex<Option<std::io::Error>>,
 }
 
 impl OutputBudget {
@@ -382,15 +383,35 @@ impl OutputBudget {
             max_total,
             total: Mutex::new(0),
             exceeded: AtomicBool::new(false),
+            io_error: Mutex::new(None),
         }
     }
 
     pub(super) fn error(&self) -> Option<ArchiveError> {
+        if let Some(error) = self
+            .io_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let copy = error
+                .raw_os_error()
+                .map(std::io::Error::from_raw_os_error)
+                .unwrap_or_else(|| std::io::Error::new(error.kind(), error.to_string()));
+            return Some(ArchiveError::io("7z extraction output", copy));
+        }
         self.exceeded.load(Ordering::Acquire).then(|| {
             ArchiveError::LimitExceeded(
                 "7z actual output exceeds the extraction byte limit".to_owned(),
             )
         })
+    }
+
+    fn record_io_error(&self, error: std::io::Error) {
+        let mut first = self.io_error.lock().unwrap_or_else(|p| p.into_inner());
+        if first.is_none() {
+            *first = Some(error);
+        }
     }
 
     fn reserve(&self, stream: &OutStream, amount: u64, extent: Option<u64>) -> bool {
@@ -424,6 +445,15 @@ impl OutputBudget {
 #[cfg(test)]
 mod output_limit_tests {
     use super::*;
+
+    #[test]
+    fn native_write_error_survives_generic_backend_failure() {
+        let budget = OutputBudget::new(100, 100);
+        budget.record_io_error(std::io::Error::from_raw_os_error(112));
+        assert!(matches!(budget.error(), Some(ArchiveError::DiskFull(_))));
+        budget.record_io_error(std::io::Error::from_raw_os_error(5));
+        assert!(matches!(budget.error(), Some(ArchiveError::DiskFull(_))));
+    }
 
     fn stream(budget: Arc<OutputBudget>) -> OutStream {
         OutStream {
@@ -732,7 +762,10 @@ unsafe extern "system" fn out_stream_write(
             }
             S_OK
         }
-        Err(_) => {
+        Err(error) => {
+            if let Some(budget) = &stream.budget {
+                budget.record_io_error(error);
+            }
             // write_all may have advanced the file before failing.
             stream.position.store(u64::MAX, Ordering::Relaxed);
             E_FAIL
@@ -794,7 +827,12 @@ unsafe extern "system" fn out_stream_set_size(this: *mut c_void, size: u64) -> i
     }
     match file.set_len(size) {
         Ok(()) => S_OK,
-        Err(_) => E_FAIL,
+        Err(error) => {
+            if let Some(budget) = &stream.budget {
+                budget.record_io_error(error);
+            }
+            E_FAIL
+        }
     }
 }
 

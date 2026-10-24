@@ -37,6 +37,149 @@ impl ConflictResolver for Overwrite {
         ConflictChoice::OverwriteAll
     }
 }
+
+struct SkipAndCount(std::sync::atomic::AtomicUsize);
+impl ConflictResolver for SkipAndCount {
+    fn resolve(&self, _: &Path) -> ConflictChoice {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ConflictChoice::Skip
+    }
+}
+
+#[test]
+fn unicode_case_duplicates_use_normal_conflict_handling_in_new_destinations() {
+    for (engine, mut options) in backends() {
+        let work = tempfile::tempdir().unwrap();
+        let source = work.path().join("duplicate.zip");
+        fs::write(&source, zip(&["Éa.txt", "éa.txt"], false)).unwrap();
+        let target = work.path().join("out");
+        options.conflict_policy = InitialConflictPolicy::Ask;
+        let conflicts = SkipAndCount(std::sync::atomic::AtomicUsize::new(0));
+        let summary = engine
+            .extract(
+                &source,
+                &target,
+                &options,
+                &|_: ProgressSnapshot| {},
+                &conflicts,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            conflicts.0.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{:?}: {:?}; files={:?}",
+            options.zip_backend,
+            summary,
+            fs::read_dir(&target)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(summary.entries_skipped, 1);
+        assert_eq!(
+            fs::read(target.join("Éa.txt")).unwrap(),
+            "Éa.txt".as_bytes()
+        );
+    }
+}
+
+#[test]
+fn native_7z_unicode_duplicates_prompt_instead_of_aborting() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/x64/7z.dll");
+    let engine = SevenZipEngine::load_from_path(&runtime).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("duplicate.7z");
+    fs::write(
+        &source,
+        stored_7z(&[
+            ("Éa.txt", 0x81a48020, b"first"),
+            ("éa.txt", 0x81a48020, b"second"),
+        ]),
+    )
+    .unwrap();
+    let target = work.path().join("out");
+    let conflicts = SkipAndCount(std::sync::atomic::AtomicUsize::new(0));
+    let summary = engine
+        .extract(
+            &source,
+            &target,
+            &ExtractOptions::default(),
+            &|_: ProgressSnapshot| {},
+            &conflicts,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(conflicts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(summary.entries_skipped, 1);
+    assert_eq!(fs::read(target.join("Éa.txt")).unwrap(), b"first");
+}
+
+// A tiny ZIP64 with a deliberately false 256 TiB uncompressed size. No large
+// allocation or disk filling is needed to exercise real backend preflight.
+fn oversized_zip64() -> Vec<u8> {
+    let name = b"huge.bin";
+    let mut out = b"PK\x03\x04".to_vec();
+    for n in [45u16, 0, 0, 0, 0] {
+        out.extend(n.to_le_bytes());
+    }
+    for n in [0u32, 0, u32::MAX] {
+        out.extend(n.to_le_bytes());
+    }
+    for n in [8u16, 20] {
+        out.extend(n.to_le_bytes());
+    }
+    out.extend(name);
+    out.extend(1u16.to_le_bytes());
+    out.extend(16u16.to_le_bytes());
+    out.extend((1u64 << 48).to_le_bytes());
+    out.extend(0u64.to_le_bytes());
+    let central_start = out.len() as u32;
+    out.extend(b"PK\x01\x02");
+    for n in [45u16, 45, 0, 0, 0, 0] {
+        out.extend(n.to_le_bytes());
+    }
+    for n in [0u32, 0, u32::MAX] {
+        out.extend(n.to_le_bytes());
+    }
+    for n in [8u16, 12, 0, 0, 0] {
+        out.extend(n.to_le_bytes());
+    }
+    out.extend(0u32.to_le_bytes());
+    out.extend(0u32.to_le_bytes());
+    out.extend(name);
+    out.extend(1u16.to_le_bytes());
+    out.extend(8u16.to_le_bytes());
+    out.extend((1u64 << 48).to_le_bytes());
+    let central_size = out.len() as u32 - central_start;
+    out.extend(b"PK\x05\x06");
+    for n in [0u16, 0, 1, 1] {
+        out.extend(n.to_le_bytes());
+    }
+    out.extend(central_size.to_le_bytes());
+    out.extend(central_start.to_le_bytes());
+    out.extend(0u16.to_le_bytes());
+    out
+}
+
+#[test]
+fn oversized_declared_output_is_rejected_before_files_are_written() {
+    for (engine, mut options) in backends() {
+        let work = tempfile::tempdir().unwrap();
+        let source = work.path().join("oversized.zip");
+        fs::write(&source, oversized_zip64()).unwrap();
+        options.max_file_bytes = u64::MAX;
+        options.max_total_bytes = u64::MAX;
+        let target = work.path().join("out");
+        let error = extract(engine.as_ref(), &source, &target, &options).unwrap_err();
+        assert!(
+            matches!(error, ArchiveError::InsufficientSpace { .. }),
+            "{:?}: {error}",
+            options.zip_backend
+        );
+        assert!(!target.exists() || fs::read_dir(&target).unwrap().next().is_none());
+    }
+}
 fn extract(
     engine: &dyn ArchiveEngine,
     source: &Path,

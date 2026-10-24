@@ -88,17 +88,27 @@ pub(super) fn temporary_path(parent: &Path, target: &Path) -> PathBuf {
 
 /// Moves `temp` onto `target`, replacing an existing file when present.
 pub(super) fn install_temporary(root: &Path, temp: &Path, target: &Path) -> ArchiveResult<()> {
-    ensure_no_reparse_ancestors(root, target)?;
-    match fs::rename(temp, target) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AlreadyExists
-                || fs::symlink_metadata(target).is_ok() =>
-        {
-            fs::remove_file(target).map_err(|error| ArchiveError::io(target, error))?;
-            fs::rename(temp, target).map_err(|error| ArchiveError::io(target, error))
-        }
-        Err(error) => Err(ArchiveError::io(target, error)),
+    crate::archive::libarchive::output::install_temporary(root, temp, target)
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    #[test]
+    fn failed_install_preserves_existing_file_and_success_replaces_it() {
+        let work = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(work.path()).unwrap();
+        let target = root.join("existing.txt");
+        let temporary = root.join("temporary.txt");
+        fs::write(&target, b"original").unwrap();
+        // The original fallback deleted target even for a missing source.
+        assert!(install_temporary(&root, &temporary, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        fs::write(&temporary, b"replacement").unwrap();
+        install_temporary(&root, &temporary, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!temporary.exists());
     }
 }
 

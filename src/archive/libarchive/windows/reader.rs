@@ -8,6 +8,9 @@ pub(super) struct Reader<'a> {
     pub(super) standalone_payload_name: Option<PathBuf>,
     pub(super) prefer_source_payload_name: bool,
     pub(super) closed: bool,
+    source_path: PathBuf,
+    zip_paths: Option<crate::archive::sevenzip::ZipPathnames>,
+    cancel: CancellationToken,
 }
 
 pub(super) struct RawEntryInfo {
@@ -72,7 +75,12 @@ impl ScanBudget {
 }
 
 impl<'a> Reader<'a> {
-    pub(super) fn open(api: &'a Api, path: &Path, password: Option<&str>) -> ArchiveResult<Self> {
+    pub(super) fn open(
+        api: &'a Api,
+        path: &Path,
+        password: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> ArchiveResult<Self> {
         if file_length(path)? == 0 {
             return Err(ArchiveError::InvalidArchive(path.to_path_buf()));
         }
@@ -90,6 +98,9 @@ impl<'a> Reader<'a> {
                 .flatten(),
             prefer_source_payload_name: raw_only,
             closed: false,
+            source_path: path.to_owned(),
+            zip_paths: None,
+            cancel: cancel.clone(),
         };
 
         for support in &api.read_filters {
@@ -193,28 +204,51 @@ impl<'a> Reader<'a> {
     }
 
     pub(super) fn copy_entry(
-        &self,
+        &mut self,
         entry: *mut RawEntry,
         pathname_codepage: u32,
     ) -> ArchiveResult<RawEntryInfo> {
-        // SAFETY: entry is borrowed from the live reader until next_header.
-        // Prefer the raw pathname bytes.  libarchive keeps legacy
-        // (non-UTF-8) names as raw bytes, while the locale-based wide and
-        // UTF-8 getters would either fail or return mojibake for them
-        // under the default CRT locale.  Valid UTF-8 passes through
-        // unchanged; other encodings are recovered by the heuristic
-        // encoding detector (CP949 / Shift_JIS / GBK / Big5 / ...).
-        let raw = unsafe {
-            copy_c_string_bytes_bounded(
-                (self.api.entry_pathname)(entry),
-                MAX_ARCHIVE_PATH_UTF8_BYTES,
-                "archive raw pathname",
-            )?
+        let format = self.format_name().to_ascii_lowercase();
+        let mut unicode_path = None;
+        if format.starts_with("zip") {
+            if self.zip_paths.is_none() {
+                self.zip_paths = Some(crate::archive::sevenzip::ZipPathnames::open(
+                    &self.source_path,
+                    &self.cancel,
+                )?);
+            }
+            let offset = self.consumed_bytes();
+            unicode_path = self
+                .zip_paths
+                .as_mut()
+                .and_then(|names| names.path_at(offset, pathname_codepage));
+        } else if ["7-zip", "rar", "iso9660", "pax", "xar"]
+            .iter()
+            .any(|name| format.contains(name))
+        {
+            // These formats carry Unicode names. The narrow getter can instead
+            // synthesize lossy locale bytes even when it returns non-null.
+            // SAFETY: libarchive owns the entry until the next header.
+            unicode_path = unsafe { copy_wide_string((self.api.entry_pathname_w)(entry))? }
+                .filter(|name| !name.is_empty())
+                .map(PathBuf::from);
+        }
+        let path = match unicode_path {
+            Some(path) => Some(path),
+            None => {
+                // SAFETY: same borrowed entry; copy before any later getters.
+                let raw = unsafe {
+                    copy_c_string_bytes_bounded(
+                        (self.api.entry_pathname)(entry),
+                        MAX_ARCHIVE_PATH_UTF8_BYTES,
+                        "archive raw pathname",
+                    )?
+                };
+                raw.and_then(|raw| encoding::decode_name_with_codepage(&raw, pathname_codepage))
+                    .filter(|name| !name.is_empty())
+                    .map(PathBuf::from)
+            }
         };
-        let path = raw
-            .and_then(|raw| encoding::decode_name_with_codepage(&raw, pathname_codepage))
-            .filter(|name| !name.is_empty())
-            .map(PathBuf::from);
         let mut path = match path {
             Some(path) => path,
             None => {

@@ -378,9 +378,9 @@ component ArchiveTextCell inherits Rectangle {
 }
 
 component ArchiveTableHeader inherits Rectangle {
-    in property <float> initial-name-boundary: 0.28;
-    in property <float> initial-size-boundary: 0.40;
-    in property <float> initial-packed-boundary: 0.52;
+    in property <float> initial-name-boundary: 0.40;
+    in property <float> initial-size-boundary: 0.58;
+    in property <float> initial-packed-boundary: 0.76;
     in property <int> sort-column: 0;
     in property <bool> sort-ascending: true;
     callback sort(int);
@@ -747,9 +747,9 @@ export component AppWindow inherits Window {
     in-out property <bool> context-menu-managed-by-package;
     in-out property <int> sort-column: 0;
     in-out property <bool> sort-ascending: true;
-    in-out property <float> column-name-boundary: 0.28;
-    in-out property <float> column-size-boundary: 0.40;
-    in-out property <float> column-packed-boundary: 0.52;
+    in-out property <float> column-name-boundary: 0.40;
+    in-out property <float> column-size-boundary: 0.58;
+    in-out property <float> column-packed-boundary: 0.76;
 
     callback open-requested();
     callback close-archive-requested();

@@ -9,7 +9,7 @@ It works without installing `7z.exe`. Keep the DLL shipped with the executable i
 .\archive-rclick-cli.exe a fast.zip .\my-folder -zip-backend=zlib-ng -mmt=8
 .\archive-rclick-cli.exe a rust.zip .\my-folder -zip-backend=zlib-rs
 .\archive-rclick-cli.exe a original.zip .\my-folder -zip-backend=7z
-.\archive-rclick-cli.exe a secret.7z .\my-folder -pMyPassword -mhe=on
+.\archive-rclick-cli.exe a secret.7z .\my-folder -p -mhe=on
 .\archive-rclick-cli.exe a split.7z .\my-folder -v100m -mmt=8
 .\archive-rclick-cli.exe x backup.7z "-o.\output" -y
 .\archive-rclick-cli.exe e backup.zip "-o.\flat" -aos
@@ -31,6 +31,15 @@ It works without installing `7z.exe`. Keep the DLL shipped with the executable i
   `.tar.xz` and `.tar.zst` extract the inner files directly.
 - Creation formats: `-t7z`, `-tzip`, `-ttar`, `-ttar.gz`, `-ttar.xz`, `-ttar.zst`.
   Password, header encryption, and splitting are only possible in combinations supported by the corresponding engine and format.
+- `-p` prompts with console echo disabled and restores the console mode afterward.
+  `-p{password}` remains supported for compatibility, but puts the password in command history and process arguments.
+- Extraction limits can be set per invocation with `-max-total={bytes}`, `-max-file={bytes}`,
+  and `-max-entries={N}` (positive integers). Defaults remain 512 GiB, 128 GiB, and 1,000,000 entries.
+  ZIP/7z extraction checks the selected declared size against the destination volume's available
+  space before writing files. Streaming formats use a loaded size hint when available and check
+  each file before writing it. Actual output is also capped at the available space measured at start.
+  These checks cannot reserve disk space against other processes or filesystem overhead.
+  A disk-full error leaves completed files in place and removes incomplete output.
 - Supports `-mx=0`~`-mx=9`, `-mmt=on|off|<number>`, `-mhe=on|off`, `-v100m`, etc.
 - Supports `*`, `?`, and UTF-8 `@listfile`. When creating, use wildcards only in the last path element.
   Directory inputs include their sub-items, and `-r` expands the wildcard search scope.

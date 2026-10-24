@@ -50,6 +50,17 @@ target\release\archive-rclick.exe example.7z
 target\release\archive-rclick.exe --check-runtime
 ```
 
+The Explorer DLL must be built separately with panic unwinding enabled:
+
+```powershell
+cargo build --profile shell --lib --locked
+```
+
+Use `target\shell\archive_rclick_core.dll` for shell registration. Both packaging
+scripts build and include this DLL automatically; the applications retain the
+release abort strategy. Shell COM entry points contain unwinding panics, fail the
+call, and keep a failed extension loaded and disabled for that host session.
+
 The build copies the required native DLLs and runtime notices beside the
 executable. Keep them together when copying the application. To create a clean
 portable package with hashes and complete license files, run:

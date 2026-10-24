@@ -24,9 +24,9 @@ pub struct ColumnBoundaries {
 impl Default for ColumnBoundaries {
     fn default() -> Self {
         Self {
-            name: 0.28,
-            size: 0.40,
-            packed: 0.52,
+            name: 0.40,
+            size: 0.58,
+            packed: 0.76,
         }
     }
 }

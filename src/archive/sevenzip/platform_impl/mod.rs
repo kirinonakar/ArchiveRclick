@@ -93,6 +93,7 @@ mod engine;
 pub use engine::SevenZipEngine;
 
 mod zip_extract;
+pub(crate) use zip_extract::ZipPathnames;
 mod zip_flate;
 
 mod composite;

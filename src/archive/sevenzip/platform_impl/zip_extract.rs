@@ -102,6 +102,71 @@ fn zip_error(path: &Path, error: zip::result::ZipError) -> ArchiveError {
     }
 }
 
+/// Original ZIP names for libarchive. Its narrow getter can return a lossy
+/// locale conversion rather than the original header bytes. Match by payload
+/// offset, since libarchive may visit a different order from the central directory.
+pub(crate) struct ZipPathnames {
+    _archive: ZipArchive<ZipInput>, // keep source handles locked against mutation
+    records: Vec<format::ZipNameRecord>,
+    offsets: std::collections::HashMap<u64, usize>,
+    codepage: Option<(u32, u32)>,
+}
+
+impl ZipPathnames {
+    pub(crate) fn open(path: &Path, cancel: &CancellationToken) -> ArchiveResult<Self> {
+        let input = ZipInput::open(path, cancel)?;
+        let mut archive = ZipArchive::with_config(
+            zip::read::Config {
+                max_entries: Some(MAX_LIST_ENTRIES as usize),
+                max_metadata_bytes: Some(MAX_LIST_PATH_BYTES),
+                ..Default::default()
+            },
+            input,
+        )
+        .map_err(|error| zip_error(path, error))?;
+        let mut records = Vec::with_capacity(archive.len());
+        let mut offsets = std::collections::HashMap::with_capacity(archive.len());
+        for index in 0..archive.len() {
+            check_cancel(cancel)?;
+            // Raw access reads the local header without decrypting/decoding data.
+            let entry = archive
+                .by_index_raw(index)
+                .map_err(|error| zip_error(path, error))?;
+            let offset = entry
+                .data_start()
+                .ok_or_else(|| ArchiveError::InvalidArchive(path.to_owned()))?;
+            if offsets.insert(offset, index).is_some() {
+                return Err(ArchiveError::InvalidArchive(path.to_owned()));
+            }
+            records.push(format::ZipNameRecord {
+                raw_name: entry.name_raw().to_vec(),
+                flags: if entry.has_unicode_name() { 0x800 } else { 0 },
+                unicode_name: entry.has_unicode_name().then(|| entry.name().to_owned()),
+            });
+        }
+        Ok(Self {
+            _archive: archive,
+            records,
+            offsets,
+            codepage: None,
+        })
+    }
+
+    pub(crate) fn path_at(&mut self, offset: u64, requested: u32) -> Option<PathBuf> {
+        let &index = self.offsets.get(&offset)?;
+        let codepage = match self.codepage {
+            Some((previous, effective)) if previous == requested => effective,
+            _ => {
+                let effective =
+                    effective_zip_codepage(ReadFormat::Zip, requested, Some(&self.records));
+                self.codepage = Some((requested, effective));
+                effective
+            }
+        };
+        format::decode_zip_name(&self.records[index], codepage).map(PathBuf::from)
+    }
+}
+
 #[derive(Clone)]
 struct Job {
     index: usize,
@@ -360,6 +425,9 @@ pub(super) fn extract(
     fs::create_dir_all(destination).map_err(|e| ArchiveError::io(destination, e))?;
     let root = fs::canonicalize(destination).map_err(|e| ArchiveError::io(destination, e))?;
     output::verified_root_final_path(&root)?;
+    let effective_options =
+        crate::archive::disk_space::extraction_options(&root, Some(total), options)?;
+    let options = &effective_options;
     let mut snapshot = ProgressSnapshot::new(ProgressPhase::Extracting);
     snapshot.total_bytes = Some(total);
     snapshot.total_entries = Some(jobs.len() as u64);
@@ -370,21 +438,10 @@ pub(super) fn extract(
         stop: AtomicBool::new(false),
     };
     // Flattened duplicate names and file/parent collisions must retain archive order.
-    let mut targets = HashSet::new();
-    let mut unique = true;
-    let file_targets: HashSet<_> = jobs
-        .iter()
-        .filter(|j| !j.directory)
-        .map(|j| j.relative.to_string_lossy().to_lowercase())
-        .collect();
-    for job in &jobs {
-        unique &= targets.insert(job.relative.to_string_lossy().to_lowercase());
-        unique &= !job
-            .relative
-            .ancestors()
-            .skip(1)
-            .any(|p| file_targets.contains(&p.to_string_lossy().to_lowercase()));
-    }
+    let unique = !crate::archive::path_safety::has_output_path_conflict(
+        jobs.iter()
+            .map(|job| (job.relative.as_path(), job.directory)),
+    );
     let workers = if unique && total >= 256 * 1024 {
         (options.threads.sevenzip_threads().unwrap_or(1) as usize)
             .clamp(1, 32)

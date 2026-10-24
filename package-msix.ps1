@@ -162,10 +162,12 @@ $Version = "$($Matches.major).$($Matches.minor).$($Matches.patch).0"
 if (-not $SkipBuild) {
     Push-Location $repository
     try {
-        cargo build --release --locked
+        cargo build --release --locked --bins
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build --release failed"
         }
+        cargo build --profile shell --lib --locked
+        if ($LASTEXITCODE -ne 0) { throw "cargo shell DLL build failed" }
     }
     finally {
         Pop-Location
@@ -175,7 +177,7 @@ if (-not $SkipBuild) {
 $requiredBinaries = @(
     (Join-Path $releaseDirectory "archive-rclick.exe"),
     (Join-Path $releaseDirectory "archive-rclick-cli.exe"),
-    (Join-Path $releaseDirectory "archive_rclick_core.dll")
+    (Join-Path $repository "target\shell\archive_rclick_core.dll")
 )
 foreach ($binary in $requiredBinaries) {
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
@@ -213,7 +215,7 @@ New-Item -ItemType Directory -Force -Path $assetsRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick.exe") -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive-rclick-cli.exe") -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $repository "CLI.md") -Destination $packageRoot
-Copy-Item -LiteralPath (Join-Path $releaseDirectory "archive_rclick_core.dll") -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $repository "target\shell\archive_rclick_core.dll") -Destination $packageRoot
 foreach ($entry in $expected.GetEnumerator()) {
     Copy-Item -LiteralPath (Join-Path $runtimeDirectory $entry.Key) -Destination $packageRoot
 }
