@@ -67,7 +67,7 @@ pub(super) fn wire(
                         &ui,
                         Rc::clone(&state),
                         Arc::clone(&engine),
-                        listing.archive_path,
+                        listing.archive_path.clone(),
                         destination,
                         options,
                         Rc::clone(&progress_window),

@@ -31,7 +31,7 @@ pub(crate) struct DisplayEntry {
 const ARCHIVE_ORDER: usize = usize::MAX;
 
 pub(crate) struct ArchiveRowModel {
-    listing: Rc<RefCell<Option<ArchiveListing>>>,
+    listing: Rc<RefCell<Option<Arc<ArchiveListing>>>>,
     display: Rc<RefCell<Vec<DisplayEntry>>>,
     selected: Rc<RefCell<HashSet<PathBuf>>>,
     selection_anchor: Rc<RefCell<Option<PathBuf>>>,
@@ -43,7 +43,7 @@ pub(crate) struct ArchiveRowModel {
 
 impl ArchiveRowModel {
     pub(crate) fn new(
-        listing: Rc<RefCell<Option<ArchiveListing>>>,
+        listing: Rc<RefCell<Option<Arc<ArchiveListing>>>>,
         display: Rc<RefCell<Vec<DisplayEntry>>>,
         selected: Rc<RefCell<HashSet<PathBuf>>>,
         selection_anchor: Rc<RefCell<Option<PathBuf>>>,
@@ -167,7 +167,7 @@ impl ArchiveRowModel {
         display: Vec<DisplayEntry>,
         current_folder: PathBuf,
     ) {
-        *self.listing.borrow_mut() = Some(listing);
+        *self.listing.borrow_mut() = Some(Arc::new(listing));
         *self.display.borrow_mut() = display;
         *self.current_folder.borrow_mut() = current_folder;
         self.selected.borrow_mut().clear();
@@ -254,7 +254,9 @@ impl Model for ArchiveRowModel {
 }
 
 pub(crate) struct AppState {
-    pub(crate) listing: Rc<RefCell<Option<ArchiveListing>>>,
+    // Workers take immutable snapshots without copying the entire file list
+    // while a mouse gesture is being handled on the UI thread.
+    pub(crate) listing: Rc<RefCell<Option<Arc<ArchiveListing>>>>,
     pub(crate) display: Rc<RefCell<Vec<DisplayEntry>>>,
     pub(crate) selected: Rc<RefCell<HashSet<PathBuf>>>,
     pub(crate) current_folder: Rc<RefCell<PathBuf>>,
@@ -326,7 +328,7 @@ impl AppState {
 }
 
 fn rebuild_display(
-    listing: &RefCell<Option<ArchiveListing>>,
+    listing: &RefCell<Option<Arc<ArchiveListing>>>,
     display: &RefCell<Vec<DisplayEntry>>,
     current_folder: &RefCell<PathBuf>,
     column: usize,

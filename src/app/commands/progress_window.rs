@@ -24,6 +24,12 @@ pub(super) const PROGRESS_WINDOW_LOGICAL_HEIGHT: f32 = 280.0;
 /// Builds and shows the small progress window; its Cancel button cancels the
 /// running operation.
 pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindowState>), String> {
+    create_progress_window(true)
+}
+
+pub(super) fn create_progress_window(
+    show_initially: bool,
+) -> Result<(ProgressWindow, Rc<ProgressWindowState>), String> {
     let ui = ProgressWindow::new().map_err(|error| format!("Could not create the UI: {error}"))?;
     let theme_selection = theme_selection_index(&platform::load_theme_preference());
     ui.set_theme_selection(theme_selection);
@@ -150,7 +156,7 @@ pub(super) fn open_progress_window() -> Result<(ProgressWindow, Rc<ProgressWindo
         ));
         platform::center_window(ui.window());
         platform::apply_window_theme(ui.window(), theme_selection);
-        if let Err(error) = ui.show() {
+        if show_initially && let Err(error) = ui.show() {
             let message = format!("Could not show the progress window: {error}");
             match initial_show_error.lock() {
                 Ok(mut slot) => *slot = Some(message),

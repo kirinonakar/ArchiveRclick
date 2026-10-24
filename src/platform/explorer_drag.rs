@@ -1,439 +1,55 @@
-//! Native Windows file-drag source used to hand extracted archive entries to
-//! Explorer.
+//! Virtual-file dragging: hover transfers metadata, while file contents are
+//! rendered only after the user releases the mouse over an accepting target.
+#[cfg(not(windows))]
+use crate::tasks::CancellationToken;
+use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::sync::mpsc;
+
+#[derive(Clone, Debug)]
+pub struct DragFile {
+    pub archive_path: PathBuf,
+    pub name: PathBuf,
+    pub size: Option<u64>,
+    pub directory: bool,
+    pub modified_unix_seconds: Option<i64>,
+}
+pub type PrepareFiles = Box<dyn FnOnce() -> Result<tempfile::TempDir, String> + Send>;
+mod staging;
+pub use staging::{STAGING_PREFIX, cleanup_staging, cleanup_stale_staging};
 
 #[cfg(windows)]
-mod imp {
-    use std::{
-        cell::Cell,
-        mem::{ManuallyDrop, size_of},
-        os::windows::ffi::OsStrExt,
-        path::PathBuf,
-        ptr,
-        sync::mpsc,
-    };
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    is_drag_button_down, prepare_descriptors, source_zone_metadata, start_file_drag,
+};
 
-    use windows::{
-        Win32::{
-            Foundation::{
-                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
-                DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC, E_NOTIMPL, E_POINTER, GlobalFree,
-                HGLOBAL, POINT,
-            },
-            System::{
-                Com::{
-                    DATADIR_GET, DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject,
-                    IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, IEnumSTATDATA,
-                    STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
-                },
-                Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock},
-                Ole::{
-                    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
-                    IDropSource_Impl, OleInitialize, OleUninitialize,
-                },
-                SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
-            },
-        },
-        core::{BOOL, Error, HRESULT, Ref, implement},
-    };
-
-    const CF_HDROP: u16 = 15;
-    const S_OK: HRESULT = HRESULT(0);
-    const S_FALSE: HRESULT = HRESULT(1);
-
-    #[repr(C)]
-    struct DropFilesHeader {
-        p_files: u32,
-        point: POINT,
-        non_client: i32,
-        wide: i32,
-    }
-
-    #[implement(IEnumFORMATETC)]
-    struct FileFormatEnumerator {
-        formats: Vec<FORMATETC>,
-        index: Cell<usize>,
-    }
-
-    impl FileFormatEnumerator {
-        fn new(index: usize) -> Self {
-            Self {
-                formats: vec![file_format()],
-                index: Cell::new(index),
-            }
-        }
-    }
-
-    impl IEnumFORMATETC_Impl for FileFormatEnumerator_Impl {
-        fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> HRESULT {
-            if rgelt.is_null() || (celt != 1 && pceltfetched.is_null()) {
-                return E_POINTER;
-            }
-
-            let start = self.index.get();
-            let available = self.formats.len().saturating_sub(start);
-            let count = available.min(celt as usize);
-            if count > 0 {
-                // SAFETY: the caller supplied storage for celt FORMATETC values;
-                // count is no larger than celt and the source slice is valid.
-                unsafe {
-                    ptr::copy_nonoverlapping(self.formats.as_ptr().add(start), rgelt, count);
-                }
-                self.index.set(start + count);
-            }
-            if !pceltfetched.is_null() {
-                // SAFETY: the pointer was checked above when required and is an
-                // optional output for the one-element form of Next.
-                unsafe { pceltfetched.write(count as u32) };
-            }
-            if count == celt as usize {
-                S_OK
-            } else {
-                S_FALSE
-            }
-        }
-
-        fn Skip(&self, celt: u32) -> windows::core::Result<()> {
-            self.index
-                .set(self.index.get().saturating_add(celt as usize));
-            Ok(())
-        }
-
-        fn Reset(&self) -> windows::core::Result<()> {
-            self.index.set(0);
-            Ok(())
-        }
-
-        fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
-            Ok(FileFormatEnumerator::new(self.index.get()).into())
-        }
-    }
-
-    // Staged files have a finite lifetime. Offer only synchronous transfers:
-    // Explorer must finish consuming the payload before DoDragDrop returns.
-    // Advertising IDataObjectAsyncCapability here allowed targets to release
-    // this object without EndOperation, leaving no safe cleanup signal.
-    #[implement(IDataObject)]
-    struct FileDropDataObject {
-        paths: Vec<PathBuf>,
-    }
-
-    impl IDataObject_Impl for FileDropDataObject_Impl {
-        fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
-            let Some(format) = (unsafe { pformatetcin.as_ref() }) else {
-                return Err(E_POINTER.into());
-            };
-            if query_file_format(format) != S_OK {
-                return Err(DV_E_FORMATETC.into());
-            }
-
-            let hglobal = make_hdrop(&self.paths)?;
-            Ok(STGMEDIUM {
-                tymed: TYMED_HGLOBAL.0 as u32,
-                // SAFETY: hglobal is a valid movable global allocation whose
-                // ownership is transferred to the receiving IDataObject caller.
-                u: STGMEDIUM_0 { hGlobal: hglobal },
-                pUnkForRelease: ManuallyDrop::new(None),
-            })
-        }
-
-        fn GetDataHere(
-            &self,
-            _pformatetc: *const FORMATETC,
-            _pmedium: *mut STGMEDIUM,
-        ) -> windows::core::Result<()> {
-            Err(E_NOTIMPL.into())
-        }
-
-        fn QueryGetData(&self, pformatetc: *const FORMATETC) -> HRESULT {
-            let Some(format) = (unsafe { pformatetc.as_ref() }) else {
-                return E_POINTER;
-            };
-            query_file_format(format)
-        }
-
-        fn GetCanonicalFormatEtc(
-            &self,
-            pformatectin: *const FORMATETC,
-            pformatetcout: *mut FORMATETC,
-        ) -> HRESULT {
-            if pformatectin.is_null() || pformatetcout.is_null() {
-                return E_POINTER;
-            }
-            // SAFETY: both pointers are validated above and are COM-owned
-            // FORMATETC structures supplied by the caller.
-            unsafe { pformatetcout.write(*pformatectin) };
-            DATA_S_SAMEFORMATETC
-        }
-
-        fn SetData(
-            &self,
-            _pformatetc: *const FORMATETC,
-            _pmedium: *const STGMEDIUM,
-            _frelease: BOOL,
-        ) -> windows::core::Result<()> {
-            Err(E_NOTIMPL.into())
-        }
-
-        fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
-            if dwdirection != DATADIR_GET.0 as u32 {
-                return Err(E_NOTIMPL.into());
-            }
-            Ok(FileFormatEnumerator::new(0).into())
-        }
-
-        fn DAdvise(
-            &self,
-            _pformatetc: *const FORMATETC,
-            _advf: u32,
-            _padvsink: Ref<'_, IAdviseSink>,
-        ) -> windows::core::Result<u32> {
-            Err(E_NOTIMPL.into())
-        }
-
-        fn DUnadvise(&self, _dwconnection: u32) -> windows::core::Result<()> {
-            Err(E_NOTIMPL.into())
-        }
-
-        fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
-            Err(E_NOTIMPL.into())
-        }
-    }
-
-    #[implement(IDropSource)]
-    struct FileDropSource;
-
-    impl IDropSource_Impl for FileDropSource_Impl {
-        fn QueryContinueDrag(
-            &self,
-            fescapepressed: BOOL,
-            grfkeystate: MODIFIERKEYS_FLAGS,
-        ) -> HRESULT {
-            if fescapepressed.as_bool() {
-                DRAGDROP_S_CANCEL
-            } else if !grfkeystate.contains(MK_LBUTTON) {
-                DRAGDROP_S_DROP
-            } else {
-                S_OK
-            }
-        }
-
-        fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
-            DRAGDROP_S_USEDEFAULTCURSORS
-        }
-    }
-
-    struct ComApartment;
-
-    impl ComApartment {
-        fn initialize() -> Result<Self, String> {
-            let result = unsafe { OleInitialize(None) };
-            if let Err(error) = result {
-                Err(format!("Could not initialize OLE drag-and-drop: {error}"))
-            } else {
-                Ok(Self)
-            }
-        }
-    }
-
-    impl Drop for ComApartment {
-        fn drop(&mut self) {
-            unsafe { OleUninitialize() };
-        }
-    }
-
-    fn file_format() -> FORMATETC {
-        FORMATETC {
-            cfFormat: CF_HDROP,
-            ptd: ptr::null_mut(),
-            dwAspect: DVASPECT_CONTENT.0,
-            lindex: -1,
-            tymed: TYMED_HGLOBAL.0 as u32,
-        }
-    }
-
-    fn query_file_format(format: &FORMATETC) -> HRESULT {
-        if format.cfFormat == CF_HDROP
-            && format.dwAspect == DVASPECT_CONTENT.0
-            && format.tymed & TYMED_HGLOBAL.0 as u32 != 0
-        {
-            S_OK
-        } else {
-            DV_E_FORMATETC
-        }
-    }
-
-    fn make_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
-        let mut names = Vec::<u16>::new();
-        for path in paths {
-            let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-            if wide.contains(&0) {
-                return Err(E_POINTER.into());
-            }
-            names.extend(wide);
-            names.push(0);
-        }
-        names.push(0);
-
-        let header_size = size_of::<DropFilesHeader>();
-        let names_size = names
-            .len()
-            .checked_mul(size_of::<u16>())
-            .ok_or_else(|| Error::from(E_POINTER))?;
-        let allocation_size = header_size
-            .checked_add(names_size)
-            .ok_or_else(|| Error::from(E_POINTER))?;
-        let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, allocation_size) }?;
-        let locked = unsafe { GlobalLock(hglobal) };
-        if locked.is_null() {
-            let _ = unsafe { GlobalFree(Some(hglobal)) };
-            return Err(Error::from_thread());
-        }
-
-        let header = DropFilesHeader {
-            p_files: header_size as u32,
-            point: POINT { x: 0, y: 0 },
-            non_client: 0,
-            wide: 1,
-        };
-        // SAFETY: the allocation is at least the header plus the UTF-16 list,
-        // and GlobalAlloc provides suitable alignment for both structures.
-        unsafe {
-            ptr::write(locked.cast::<DropFilesHeader>(), header);
-            ptr::copy_nonoverlapping(
-                names.as_ptr(),
-                locked.cast::<u16>().add(header_size / size_of::<u16>()),
-                names.len(),
-            );
-            let _ = GlobalUnlock(hglobal);
-        }
-        Ok(hglobal)
-    }
-
-    /// Enter OLE on the UI STA, then notify the staging worker after the
-    /// synchronous drop has returned. Archive extraction and staging cleanup
-    /// stay on the worker; no optional EndOperation notification is required.
-    pub fn start_file_drag(
-        paths: &[PathBuf],
-        completion: mpsc::SyncSender<Result<bool, String>>,
-    ) -> Result<(), String> {
-        if paths.is_empty() {
-            return Err("There are no files to drag".to_owned());
-        }
-        let _com = ComApartment::initialize()?;
-        let data_object: IDataObject = FileDropDataObject {
-            paths: paths.to_vec(),
-        }
-        .into();
-        let drop_source: IDropSource = FileDropSource.into();
-        let mut effect = DROPEFFECT_NONE;
-        let result =
-            unsafe { DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect) };
-        finish_file_drag(result, effect, &completion)
-    }
-
-    fn finish_file_drag(
-        result: HRESULT,
-        effect: DROPEFFECT,
-        completion: &mpsc::SyncSender<Result<bool, String>>,
-    ) -> Result<(), String> {
-        if result == DRAGDROP_S_CANCEL {
-            let _ = completion.try_send(Ok(false));
-            Ok(())
-        } else if result == DRAGDROP_S_DROP {
-            let _ = completion.try_send(Ok(effect != DROPEFFECT_NONE));
-            Ok(())
-        } else {
-            Err(format!("Explorer drag-and-drop failed: {result:?}"))
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use windows::Win32::{
-            System::Ole::ReleaseStgMedium,
-            UI::Shell::{DragQueryFileW, HDROP, IDataObjectAsyncCapability},
-        };
-        use windows::core::Interface;
-
-        #[test]
-        fn native_data_object_preserves_many_unicode_file_paths() {
-            let _com = ComApartment::initialize().unwrap();
-            let paths: Vec<_> = (0..512)
-                .map(|index| PathBuf::from(format!(r"C:\staging\선택한 폴더\file-{index}.txt")))
-                .collect();
-            let object: IDataObject = FileDropDataObject {
-                paths: paths.clone(),
-            }
-            .into();
-            // A target must use synchronous Drop semantics. It cannot begin an
-            // async transfer whose missing EndOperation strands the worker.
-            assert!(object.cast::<IDataObjectAsyncCapability>().is_err());
-            unsafe {
-                let mut medium = object.GetData(&file_format()).unwrap();
-                let drop = HDROP(medium.u.hGlobal.0);
-                assert_eq!(DragQueryFileW(drop, u32::MAX, None), paths.len() as u32);
-                for (index, expected) in paths.iter().enumerate() {
-                    let size = DragQueryFileW(drop, index as u32, None);
-                    let mut name = vec![0u16; size as usize + 1];
-                    assert_eq!(DragQueryFileW(drop, index as u32, Some(&mut name)), size);
-                    assert_eq!(
-                        String::from_utf16(&name[..size as usize]).unwrap(),
-                        expected.to_string_lossy()
-                    );
-                }
-                ReleaseStgMedium(&mut medium);
-            }
-        }
-
-        #[test]
-        fn accepted_drop_does_not_require_end_operation_or_object_retention() {
-            let _com = ComApartment::initialize().unwrap();
-            let object: IDataObject = FileDropDataObject {
-                paths: vec![PathBuf::from(r"C:\staging\selected.txt")],
-            }
-            .into();
-            let (sender, receiver) = mpsc::sync_channel(1);
-            drop(object);
-            // Releasing the data object alone says nothing about the outcome.
-            assert!(matches!(
-                receiver.try_recv(),
-                Err(mpsc::TryRecvError::Empty)
-            ));
-            finish_file_drag(DRAGDROP_S_DROP, DROPEFFECT_COPY, &sender).unwrap();
-            assert!(receiver.recv().unwrap().unwrap());
-        }
-
-        #[test]
-        fn native_cancel_rejected_drop_and_failures_remain_distinct() {
-            for (result, effect) in [
-                (DRAGDROP_S_CANCEL, DROPEFFECT_NONE),
-                (DRAGDROP_S_DROP, DROPEFFECT_NONE),
-            ] {
-                let (sender, receiver) = mpsc::sync_channel(1);
-                finish_file_drag(result, effect, &sender).unwrap();
-                assert!(!receiver.recv().unwrap().unwrap());
-            }
-            let (sender, receiver) = mpsc::sync_channel(1);
-            assert!(finish_file_drag(E_NOTIMPL, DROPEFFECT_NONE, &sender).is_err());
-            assert!(matches!(
-                receiver.try_recv(),
-                Err(mpsc::TryRecvError::Empty)
-            ));
-        }
-    }
+#[cfg(not(windows))]
+pub fn prepare_descriptors(
+    _files: &[DragFile],
+    _cancel: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    Err("Explorer drag-and-drop is only available on Windows".to_owned())
+}
+#[cfg(not(windows))]
+pub fn is_drag_button_down() -> bool {
+    false
 }
 
 #[cfg(not(windows))]
-mod imp {
-    use std::{path::PathBuf, sync::mpsc};
-
-    pub fn start_file_drag(
-        _paths: &[PathBuf],
-        _completion: mpsc::SyncSender<Result<bool, String>>,
-    ) -> Result<(), String> {
-        Err("Explorer drag-and-drop is only available on Windows".to_owned())
-    }
+pub fn source_zone_metadata(_archive: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    Ok(None)
 }
 
-pub use imp::start_file_drag;
+#[cfg(not(windows))]
+pub fn start_file_drag(
+    _files: Vec<DragFile>,
+    _descriptors: Vec<u8>,
+    _origin: Option<Vec<u8>>,
+    _prepare: PrepareFiles,
+    _cancel: CancellationToken,
+    _completion: mpsc::SyncSender<Result<bool, String>>,
+) -> Result<(), String> {
+    Err("Explorer drag-and-drop is only available on Windows".to_owned())
+}

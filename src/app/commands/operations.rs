@@ -137,7 +137,7 @@ pub(super) fn start_extract(
 ) {
     let mut options = options;
     let (hint_entries, hint_bytes) =
-        extraction_progress_hints(state.listing.borrow().as_ref(), &options.selection);
+        extraction_progress_hints(state.listing.borrow().as_deref(), &options.selection);
     options.total_entries_hint = hint_entries;
     options.total_bytes_hint = hint_bytes;
     let progress_title = progress_title_with_filename("Extracting archive", &archive);
@@ -392,7 +392,25 @@ pub(super) fn begin_progress_window_operation(
     title: &str,
     current_file: &str,
 ) -> Result<(CancellationToken, slint::Weak<ProgressWindow>), String> {
-    let (progress_ui, progress_state) = open_progress_window()?;
+    begin_progress_window_operation_with_visibility(
+        ui,
+        state,
+        progress_window,
+        title,
+        current_file,
+        true,
+    )
+}
+
+pub(super) fn begin_progress_window_operation_with_visibility(
+    ui: &AppWindow,
+    state: &AppState,
+    progress_window: &Rc<RefCell<Option<ProgressWindow>>>,
+    title: &str,
+    current_file: &str,
+    show_initially: bool,
+) -> Result<(CancellationToken, slint::Weak<ProgressWindow>), String> {
+    let (progress_ui, progress_state) = progress_window::create_progress_window(show_initially)?;
     let cancel = CancellationToken::new();
     *state
         .cancellation

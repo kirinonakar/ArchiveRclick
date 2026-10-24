@@ -7,7 +7,7 @@
 use std::{
     cell::RefCell,
     ffi::{OsStr, OsString},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Condvar, Mutex, mpsc},
     time::Duration,
@@ -103,6 +103,7 @@ pub fn run() -> Result<(), String> {
 }
 
 fn run_with_startup_argument(startup_argument: Option<std::ffi::OsString>) -> Result<(), String> {
+    platform::explorer_drag::cleanup_stale_staging();
     if let Some(command) = startup_argument.as_deref().and_then(|value| value.to_str()) {
         match command {
             "--register" => {
