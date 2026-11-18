@@ -7,10 +7,8 @@ pub(super) const ARCHIVE_OK: c_int = 0;
 pub(super) const ARCHIVE_RETRY: c_int = -10;
 pub(super) const ARCHIVE_WARN: c_int = -20;
 
-// 3.8.9 is a security release and includes the malformed-archive
-// hardening accumulated in 3.8.8.  Older parsers are only available via
-// an explicit development escape hatch; archive files are untrusted input.
-pub(super) const MIN_LIBARCHIVE_VERSION: c_int = 3_008_009;
+// Require the 3.8.11 security release when reading untrusted archives.
+pub(super) const MIN_LIBARCHIVE_VERSION: c_int = 3_008_011;
 // The 4.0 development ABI changes public mode/time types.  Bindings in
 // this module intentionally target the stable libarchive 3.x ABI only.
 pub(super) const MAX_SUPPORTED_LIBARCHIVE_VERSION: c_int = 3_999_000;
@@ -260,7 +258,7 @@ impl Api {
         if version_number < MIN_LIBARCHIVE_VERSION && !allow_unsupported {
             return Err(ArchiveError::LibraryUnavailable(format!(
                 "libarchive {version_number} is below the required security baseline \
-                 {MIN_LIBARCHIVE_VERSION}; install libarchive 3.8.9 or newer (the \
+                 {MIN_LIBARCHIVE_VERSION}; install libarchive 3.8.11 or newer (the \
                  ARCHIVERCLICK_ALLOW_UNSUPPORTED_LIBARCHIVE=1 override is for development only)"
             )));
         }

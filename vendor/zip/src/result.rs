@@ -30,6 +30,21 @@ pub enum ZipError {
 
     /// Compression method not supported
     CompressionMethodNotSupported(u16),
+
+    /// Declared uncompressed size is above the limit passed to
+    /// [`ExtractOptions::size_limit`](crate::read::ExtractOptions::with_size_limit).
+    DecompressedSizeLimitExceeded {
+        /// Sum reported by [`ZipArchive::decompressed_size`](crate::ZipArchive::decompressed_size).
+        size: u128,
+        /// Limit passed by the caller.
+        limit: u64,
+    },
+
+    /// A size limit was requested, but
+    /// [`ZipArchive::decompressed_size`](crate::ZipArchive::decompressed_size) is `None`.
+    /// That happens when an entry uses a data descriptor, or when the sum of the
+    /// declared sizes overflows.
+    DecompressedSizeUnknown,
 }
 
 impl ZipError {
@@ -47,6 +62,29 @@ impl ZipError {
     pub const PASSWORD_REQUIRED: &'static str = "Password required to decrypt file";
 }
 
+// Can't be derived because std::io::Error doesn't implement Clone
+impl Clone for ZipError {
+    fn clone(&self) -> Self {
+        match self {
+            ZipError::Io(io_err) => ZipError::Io(io::Error::new(io_err.kind(), io_err.to_string())),
+            ZipError::InvalidArchive(msg) => ZipError::InvalidArchive(msg.clone()),
+            ZipError::UnsupportedArchive(msg) => ZipError::UnsupportedArchive(msg),
+            ZipError::FileNotFound => ZipError::FileNotFound,
+            ZipError::InvalidPassword => ZipError::InvalidPassword,
+            ZipError::CompressionMethodNotSupported(id) => {
+                ZipError::CompressionMethodNotSupported(*id)
+            }
+            ZipError::DecompressedSizeLimitExceeded { size, limit } => {
+                ZipError::DecompressedSizeLimitExceeded {
+                    size: *size,
+                    limit: *limit,
+                }
+            }
+            ZipError::DecompressedSizeUnknown => ZipError::DecompressedSizeUnknown,
+        }
+    }
+}
+
 impl Display for ZipError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -57,6 +95,12 @@ impl Display for ZipError {
             Self::InvalidPassword => f.write_str("provided password is incorrect"),
             Self::CompressionMethodNotSupported(id) => {
                 write!(f, "compression method not supported: {id}")
+            }
+            Self::DecompressedSizeLimitExceeded { size, limit } => {
+                write!(f, "decompressed size {size} exceeds limit {limit}")
+            }
+            Self::DecompressedSizeUnknown => {
+                f.write_str("decompressed size is unknown, so a size limit cannot be checked")
             }
         }
     }
@@ -70,7 +114,9 @@ impl Error for ZipError {
             | Self::UnsupportedArchive(_)
             | Self::FileNotFound
             | Self::InvalidPassword
-            | Self::CompressionMethodNotSupported(_) => None,
+            | Self::CompressionMethodNotSupported(_)
+            | Self::DecompressedSizeLimitExceeded { .. }
+            | Self::DecompressedSizeUnknown => None,
         }
     }
 }
@@ -84,7 +130,9 @@ impl From<ZipError> for io::Error {
                 io::ErrorKind::Unsupported
             }
             ZipError::FileNotFound => io::ErrorKind::NotFound,
-            ZipError::InvalidPassword => io::ErrorKind::InvalidInput,
+            ZipError::InvalidPassword
+            | ZipError::DecompressedSizeLimitExceeded { .. }
+            | ZipError::DecompressedSizeUnknown => io::ErrorKind::InvalidInput,
         };
 
         io::Error::new(kind, err)

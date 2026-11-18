@@ -170,10 +170,10 @@ fn cancelled_zip_extraction_removes_temporary_file() {
 }
 
 #[test]
-fn bundled_runtime_is_supported_libarchive_3_8_9() {
+fn bundled_runtime_is_supported_libarchive_3_8_11() {
     let engine = load_runtime();
     let version = engine.version();
-    assert_eq!(version, "libarchive 3.8.9");
+    assert_eq!(version, "libarchive 3.8.11");
 }
 
 #[test]

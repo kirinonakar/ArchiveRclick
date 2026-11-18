@@ -138,11 +138,7 @@ impl ZipPathnames {
             if offsets.insert(offset, index).is_some() {
                 return Err(ArchiveError::InvalidArchive(path.to_owned()));
             }
-            records.push(format::ZipNameRecord {
-                raw_name: entry.name_raw().to_vec(),
-                flags: if entry.has_unicode_name() { 0x800 } else { 0 },
-                unicode_name: entry.has_unicode_name().then(|| entry.name().to_owned()),
-            });
+            records.push(zip_name_record(entry.name_raw(), entry.has_unicode_name()));
         }
         Ok(Self {
             _archive: archive,
@@ -164,6 +160,14 @@ impl ZipPathnames {
             }
         };
         format::decode_zip_name(&self.records[index], codepage).map(PathBuf::from)
+    }
+}
+
+fn zip_name_record(raw_name: &[u8], has_unicode_name: bool) -> format::ZipNameRecord {
+    format::ZipNameRecord {
+        raw_name: raw_name.to_vec(),
+        flags: if has_unicode_name { 0x800 } else { 0 },
+        unicode_name: has_unicode_name.then(|| String::from_utf8_lossy(raw_name).into_owned()),
     }
 }
 
@@ -348,13 +352,9 @@ pub(super) fn extract(
     for index in 0..archive.len() {
         check_cancel(cancel)?;
         let entry = archive
-            .by_index_metadata(index)
+            .by_index_data(index)
             .map_err(|e| zip_error(path, e))?;
-        records.push(format::ZipNameRecord {
-            raw_name: entry.name_raw().to_vec(),
-            flags: if entry.has_unicode_name() { 0x800 } else { 0 },
-            unicode_name: entry.has_unicode_name().then(|| entry.name().to_owned()),
-        });
+        records.push(zip_name_record(entry.name_raw(), entry.has_unicode_name()));
     }
     let codepage =
         effective_zip_codepage(ReadFormat::Zip, options.pathname_codepage, Some(&records));
@@ -364,10 +364,12 @@ pub(super) fn extract(
     for (index, record) in records.iter().enumerate() {
         check_cancel(cancel)?;
         let entry = archive
-            .by_index_metadata(index)
+            .by_index_data(index)
             .map_err(|e| zip_error(path, e))?;
-        let name =
-            format::decode_zip_name(record, codepage).unwrap_or_else(|| entry.name().to_owned());
+        let name = match format::decode_zip_name(record, codepage) {
+            Some(name) => name,
+            None => entry.name().map_err(|e| zip_error(path, e))?.into_owned(),
+        };
         let kind = if entry.is_symlink()
             || entry
                 .unix_mode()

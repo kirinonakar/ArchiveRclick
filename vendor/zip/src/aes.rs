@@ -4,10 +4,9 @@
 //! Note that using CRC with AES depends on the used encryption specification, AE-1 or AE-2.
 //! If the file is marked as encrypted with AE-2 the CRC field is ignored, even if it isn't set to 0.
 
-use crate::CompressionMethod;
 use crate::aes_ctr::AesCipher;
-use crate::result::ZipResult;
-use crate::types::{AesMode, AesVendorVersion};
+use crate::format::aes::AesMode;
+use crate::result::{ZipResult, invalid};
 use crate::{aes_ctr, result::ZipError};
 use constant_time_eq::constant_time_eq;
 use hmac::{KeyInit, Mac, SimpleHmacReset};
@@ -35,43 +34,9 @@ pub struct AesInfo {
     /// The AES encryption mode
     pub aes_mode: AesMode,
     /// The verification key
-    pub verification_value: [u8; crate::aes::PWD_VERIFY_LENGTH],
+    pub verification_value: [u8; PWD_VERIFY_LENGTH],
     /// The salt
     pub salt: Vec<u8>,
-}
-
-#[non_exhaustive]
-#[derive(Clone, Debug, Copy, Eq, PartialEq)]
-pub(crate) struct AesModeOptions {
-    pub(crate) mode: AesMode,
-    pub(crate) vendor_version: AesVendorVersion,
-    pub(crate) actual_compression_method: CompressionMethod,
-    pub(crate) custom_salt: Option<AesSalt>,
-}
-
-impl AesModeOptions {
-    pub(crate) fn new(
-        mode: AesMode,
-        vendor_version: AesVendorVersion,
-        actual_compression_method: CompressionMethod,
-        custom_salt: Option<AesSalt>,
-    ) -> Self {
-        Self {
-            mode,
-            vendor_version,
-            actual_compression_method,
-            custom_salt,
-        }
-    }
-
-    /// Used to create a the `aes_mode` of `ZipFileData`
-    pub(crate) fn to_tuple(self) -> (AesMode, AesVendorVersion, CompressionMethod) {
-        (
-            self.mode,
-            self.vendor_version,
-            self.actual_compression_method,
-        )
-    }
 }
 
 /// A custom salt that can be used instead of a randomly generated one when encrypting files with AES.
@@ -114,8 +79,9 @@ impl AesSalt {
         )
     }
 
-    /// Creates a new `CustomSalt` with the given `mode` and `salt`.
-    /// The length of `salt` must be at least the required salt length for the given `mode`, otherwise an error is returned.
+    /// Creates a new `AesSalt` with the given `mode` and `salt`.
+    /// The length of `salt` must be exactly one-half the key length for the given `mode`, otherwise
+    /// an error is returned.
     ///
     /// # Errors
     /// Returns an error if the length of `salt` is too short for the given `mode`.
@@ -174,15 +140,18 @@ pub struct AesReader<R> {
 }
 
 impl<R: Read> AesReader<R> {
-    pub const fn new(reader: R, aes_mode: AesMode, compressed_size: u64) -> AesReader<R> {
-        let data_length = compressed_size
-            - (PWD_VERIFY_LENGTH + AUTH_CODE_LENGTH + aes_mode.salt_length()) as u64;
-
-        Self {
+    pub fn new(reader: R, aes_mode: AesMode, compressed_size: u64) -> ZipResult<AesReader<R>> {
+        let metadata_len = (PWD_VERIFY_LENGTH + AUTH_CODE_LENGTH + aes_mode.salt_length()) as u64;
+        // we accept 0 size data
+        if compressed_size < metadata_len {
+            return Err(invalid!("Compressed size of AES data is invalid"));
+        }
+        let data_length = compressed_size - metadata_len;
+        Ok(Self {
             reader,
             aes_mode,
             data_length,
-        }
+        })
     }
 
     /// Read the AES header bytes and validate the password.
@@ -205,7 +174,7 @@ impl<R: Read> AesReader<R> {
         // derive a key from the password and salt
         // the length depends on the aes key length
         let derived_key_len = 2 * key_length + PWD_VERIFY_LENGTH;
-        let mut derived_key: Box<[u8]> = vec![0; derived_key_len].into_boxed_slice();
+        let mut derived_key: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0; derived_key_len]);
 
         // use PBKDF2 with HMAC-Sha1 to derive the key
         pbkdf2::pbkdf2::<SimpleHmacReset<Sha1>>(password, &salt, ITERATION_COUNT, &mut derived_key)
@@ -214,18 +183,15 @@ impl<R: Read> AesReader<R> {
         let hmac_key = &derived_key[key_length..key_length * 2];
         let pwd_verify = &derived_key[derived_key_len - 2..];
 
-        // the last 2 bytes should equal the password verification value
-        if pwd_verification_value != pwd_verify {
+        // the last 2 bytes should equal the password verification value (constant-time to mitigate timing attacks)
+        if !constant_time_eq(&pwd_verification_value, pwd_verify) {
             // wrong password
             return Err(ZipError::InvalidPassword);
         }
 
         let cipher = Cipher::from_mode(self.aes_mode, decrypt_key)?;
-        let hmac = SimpleHmacReset::<Sha1>::new_from_slice(hmac_key).map_err(|e| {
-            ZipError::Io(std::io::Error::other(format!(
-                "Cannot create hmac with key: {e}"
-            )))
-        })?;
+        let hmac = SimpleHmacReset::<Sha1>::new_from_slice(hmac_key)
+            .map_err(|_e| ZipError::Io(std::io::Error::other("Failed to initialize HMAC")))?;
 
         Ok(AesReaderValid {
             reader: self.reader,
@@ -233,6 +199,7 @@ impl<R: Read> AesReader<R> {
             cipher,
             hmac,
             finalized: false,
+            authenticated: false,
         })
     }
 
@@ -268,6 +235,15 @@ pub struct AesReaderValid<R: Read> {
     cipher: Cipher,
     hmac: SimpleHmacReset<Sha1>,
     finalized: bool,
+    /// Set once the authentication code has been checked and matched.
+    authenticated: bool,
+}
+
+fn auth_error() -> Error {
+    Error::new(
+        ErrorKind::InvalidData,
+        "Invalid authentication code, this could be due to an invalid password or errors in the data",
+    )
 }
 
 impl<R: Read> Read for AesReaderValid<R> {
@@ -282,7 +258,15 @@ impl<R: Read> Read for AesReaderValid<R> {
     /// practically unusable, since its position after the error is not known.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.data_remaining == 0 {
-            return Ok(0);
+            if !self.finalized {
+                // handle case where payload is empty
+                self.verify_hmac()?;
+            } else if !self.authenticated {
+                // keep failing after an authentication error instead of reporting a clean EOF
+                return Err(auth_error());
+            } else {
+                return Ok(0);
+            }
         }
 
         // get the number of bytes to read, compare as u64 to make sure we can read more than
@@ -298,26 +282,13 @@ impl<R: Read> Read for AesReaderValid<R> {
         self.cipher.crypt_in_place(&mut buf[0..read]);
 
         // if there is no data left to read, check the integrity of the data
-        if self.data_remaining == 0 {
-            assert!(
-                !self.finalized,
-                "Tried to use an already finalized HMAC. This is a bug!"
-            );
-            self.finalized = true;
-
-            // Zip uses HMAC-Sha1-80, which only uses the first half of the hash
-            // see https://www.winzip.com/win/en/aes_info.html#auth-faq
-            let mut read_auth_code = [0; AUTH_CODE_LENGTH];
-            self.reader.read_exact(&mut read_auth_code)?;
-            let computed_auth_code = &self.hmac.finalize_reset().into_bytes()[0..AUTH_CODE_LENGTH];
-
-            // use constant time comparison to mitigate timing attacks
-            if !constant_time_eq(computed_auth_code, &read_auth_code) {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid authentication code, this could be due to an invalid password or errors in the data",
-                ));
-            }
+        if self.data_remaining == 0 && !self.finalized {
+            self.verify_hmac()?;
+        } else if read == 0 && self.data_remaining > 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "Read 0 bytes of AES data but still contains remaining data",
+            ));
         }
 
         Ok(read)
@@ -325,6 +296,92 @@ impl<R: Read> Read for AesReaderValid<R> {
 }
 
 impl<R: Read> AesReaderValid<R> {
+    pub fn inner(&self) -> &R {
+        &self.reader
+    }
+    fn verify_hmac(&mut self) -> io::Result<()> {
+        debug_assert!(
+            !self.finalized,
+            "Tried to use an already finalized HMAC. This is a bug!"
+        );
+        if self.finalized {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Tried to use an already finalized HMAC",
+            ));
+        }
+        self.finalized = true;
+
+        // Zip uses HMAC-Sha1-80, which only uses the first half of the hash
+        // see https://www.winzip.com/win/en/aes_info.html#auth-faq
+        let mut read_auth_code = [0; AUTH_CODE_LENGTH];
+        self.reader.read_exact(&mut read_auth_code)?;
+        let computed_auth_code = &self.hmac.finalize_reset().into_bytes()[0..AUTH_CODE_LENGTH];
+
+        // use constant time comparison to mitigate timing attacks
+        if !constant_time_eq(computed_auth_code, &read_auth_code) {
+            return Err(auth_error());
+        }
+        self.authenticated = true;
+        Ok(())
+    }
+
+    /// Authenticate the entry once the consumer has reached the end of the
+    /// decompressed data.
+    ///
+    /// A decompressor (e.g. Deflate) can report end-of-stream before it has
+    /// pulled all of the ciphertext through this reader, so `data_remaining`
+    /// never reaches 0 and the HMAC would never be checked. This reads (and
+    /// MACs) whatever ciphertext is left, bounded by the entry's compressed
+    /// size, and then verifies the authentication code.
+    pub(crate) fn finish(&mut self) -> io::Result<()> {
+        // `read` only returns `Ok(0)` once the HMAC has been verified successfully.
+        io::copy(self, &mut io::sink())?;
+        debug_assert!(self.finalized && self.authenticated);
+        Ok(())
+    }
+
+    /// Read all remaining authenticated data into `buf`.
+    ///
+    /// Buffers the ciphertext and verifies HMAC before exposing plaintext to the caller.
+    /// If verification fails, `buf` remains unmodified and an authentication error is returned.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn read_to_end_authenticated(
+        &mut self,
+        buf: &mut Vec<u8>,
+        rollback_on_error: bool,
+    ) -> io::Result<usize> {
+        let initial_len = buf.len();
+        let initial_capacity = buf.capacity();
+        let needed = usize::try_from(self.data_remaining)
+            .map_err(|e| io::Error::new(io::ErrorKind::OutOfMemory, e))?;
+
+        if needed > 0 {
+            buf.try_reserve_exact(needed)
+                .map_err(|e| io::Error::new(io::ErrorKind::OutOfMemory, e))?;
+        }
+        let read_result = self.read_to_end(buf);
+        match read_result {
+            Ok(bytes_read) => {
+                if !self.authenticated {
+                    if rollback_on_error {
+                        buf.truncate(initial_len);
+                        buf.shrink_to(initial_capacity);
+                    }
+                    return Err(auth_error());
+                }
+                Ok(bytes_read)
+            }
+            Err(e) => {
+                if rollback_on_error {
+                    buf.truncate(initial_len);
+                    buf.shrink_to(initial_capacity);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> R {
         self.reader
@@ -378,7 +435,7 @@ impl<W: Write> AesWriter<W> {
 
         let cipher = Cipher::from_mode(aes_mode, encryption_key)?;
         let hmac = SimpleHmacReset::<Sha1>::new_from_slice(hmac_key)
-            .map_err(|e| std::io::Error::other(format!("Cannot create hmac with key: {e}")))?;
+            .map_err(|_| std::io::Error::other("Failed to initialize HMAC"))?;
 
         Ok(Self {
             writer,
@@ -462,8 +519,8 @@ mod tests {
 
     use crate::{
         aes::{AesReader, AesWriter},
+        format::aes::AesMode,
         result::ZipError,
-        types::AesMode,
     };
 
     /// Checks whether `AesReader` can successfully decrypt what `AesWriter` produces.
@@ -483,7 +540,7 @@ mod tests {
         {
             let compressed_length = buf.get_ref().len() as u64;
             let mut reader =
-                AesReader::new(&mut buf, aes_mode, compressed_length).validate(password)?;
+                AesReader::new(&mut buf, aes_mode, compressed_length)?.validate(password)?;
             reader.read_to_end(&mut read_buffer)?;
         }
 
@@ -557,5 +614,112 @@ mod tests {
         assert!(
             roundtrip(AesMode::Aes256, password, plaintext).expect("could encrypt and decrypt")
         );
+    }
+
+    #[test]
+    fn test_aes_password_verification_constant_time() {
+        let plaintext = b"constant-time verification test payload";
+        let correct_password = b"correct_master_key_123!";
+        let wrong_password_diff_byte0 = b"xorrect_master_key_123!";
+        let wrong_password_diff_byte1 = b"corvect_master_key_123!";
+
+        let mut buf = io::Cursor::new(vec![]);
+        {
+            let mut writer =
+                AesWriter::new_with_options(&mut buf, AesMode::Aes256, correct_password, None)
+                    .unwrap();
+            writer.write_all(plaintext).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let compressed_length = buf.get_ref().len() as u64;
+
+        // Byte 0 mismatch must be rejected cleanly
+        buf.set_position(0);
+        let reader1 = AesReader::new(&mut buf, AesMode::Aes256, compressed_length).unwrap();
+        assert!(matches!(
+            reader1.validate(wrong_password_diff_byte0),
+            Err(ZipError::InvalidPassword)
+        ));
+
+        // Byte 1 mismatch must be rejected cleanly
+        buf.set_position(0);
+        let reader2 = AesReader::new(&mut buf, AesMode::Aes256, compressed_length).unwrap();
+        assert!(matches!(
+            reader2.validate(wrong_password_diff_byte1),
+            Err(ZipError::InvalidPassword)
+        ));
+
+        // Correct password succeeds
+        buf.set_position(0);
+        let mut reader3 = AesReader::new(&mut buf, AesMode::Aes256, compressed_length)
+            .unwrap()
+            .validate(correct_password)
+            .unwrap();
+        let mut decrypted = Vec::new();
+        reader3.read_to_end(&mut decrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_read_to_end_authenticated_success_and_tampered_rollback() {
+        let plaintext = vec![0x42u8; 128 * 1024]; // 128 KiB to test multi-chunk reads
+        let password = b"authenticated_password_999";
+
+        let mut buf = io::Cursor::new(vec![]);
+        {
+            let mut writer =
+                AesWriter::new_with_options(&mut buf, AesMode::Aes256, password, None).unwrap();
+            writer.write_all(&plaintext).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let encrypted_bytes = buf.into_inner();
+        let compressed_length = encrypted_bytes.len() as u64;
+
+        // 1. Success case
+        let mut cur = io::Cursor::new(encrypted_bytes.clone());
+        let mut reader = AesReader::new(&mut cur, AesMode::Aes256, compressed_length)
+            .unwrap()
+            .validate(password)
+            .unwrap();
+        let mut out = Vec::new();
+        let bytes_read = reader.read_to_end_authenticated(&mut out, true).unwrap();
+        assert_eq!(bytes_read, plaintext.len());
+        assert_eq!(out, plaintext);
+
+        // 2. Tampered ciphertext with rollback_on_error = true
+        let mut tampered_bytes = encrypted_bytes.clone();
+        // Tamper a byte at the end of the ciphertext payload
+        let payload_last_byte = tampered_bytes.len() - super::AUTH_CODE_LENGTH - 1;
+        tampered_bytes[payload_last_byte] ^= 0xFF;
+        let mut cur_tampered = io::Cursor::new(tampered_bytes.clone());
+        let mut reader_tampered =
+            AesReader::new(&mut cur_tampered, AesMode::Aes256, compressed_length)
+                .unwrap()
+                .validate(password)
+                .unwrap();
+        let mut out_rolled_back = b"initial_prefix_".to_vec();
+        let initial_len = out_rolled_back.len();
+        let err = reader_tampered
+            .read_to_end_authenticated(&mut out_rolled_back, true)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(out_rolled_back.len(), initial_len);
+        assert_eq!(out_rolled_back, b"initial_prefix_");
+
+        // 3. Tampered ciphertext with rollback_on_error = false
+        let mut cur_tampered2 = io::Cursor::new(tampered_bytes);
+        let mut reader_tampered2 =
+            AesReader::new(&mut cur_tampered2, AesMode::Aes256, compressed_length)
+                .unwrap()
+                .validate(password)
+                .unwrap();
+        let mut out_retained = b"initial_prefix_".to_vec();
+        let err2 = reader_tampered2
+            .read_to_end_authenticated(&mut out_retained, false)
+            .unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+        assert!(out_retained.len() > initial_len);
     }
 }

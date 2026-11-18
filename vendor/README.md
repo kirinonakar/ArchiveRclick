@@ -3,8 +3,8 @@
 - `flate2-zlib-ng`: upstream flate2 **1.1.10** from crates.io. Sources are unchanged;
   package/library names are changed to isolate Cargo features. Only source,
   license, README and manifest files are included; example/test targets are removed.
-- `zip`: upstream zip **8.6.0** from crates.io. `src/write.rs` adds the
-  `NgDeflater` writer variant and `start_file_zlib_ng` method, keeping upstream
+- `zip`: upstream zip **9.6.1** from crates.io. `src/write.rs` adds
+  `start_file_zlib_ng` to select the isolated encoder explicitly, keeping upstream
   encryption, CRC, ZIP64, metadata and finalization logic. The added dependency
   points to the isolated flate2 package. The normal flate2 dependency uses zlib-rs.
 
@@ -25,11 +25,13 @@ Additional ZIP changes:
 - `pooled_deflate.rs`: thread-local allocation caches (one context per backend),
   reset between independent members. Uses flate2's public `Compress` APIs;
   backend choice is explicit for every writer, never a global selector.
-- `read.rs`, `read/readers.rs`, `read/zip_archive.rs`, `compression.rs`: per-entry `ZipReadOptions::zlib_ng` selects the
-  isolated decoder; `by_index_metadata` avoids payload seeks and decoder creation;
-  `has_unicode_name` preserves legacy-codepage decisions.
-- `read/config.rs`: optional metadata entry/byte limits bound allocations before
-  extraction. Defaults retain upstream behavior.
+- `read/mod.rs`, `types.rs`, `read/readers.rs`, `compression.rs`: per-entry
+  `ZipReadOptions::zlib_ng` selects the isolated decoder within the upstream
+  CRC, size and AES authentication path.
+- `read/zipfile.rs`: `has_unicode_name` preserves legacy-codepage decisions.
+  The app uses upstream `by_index_data` for metadata-only access.
+- `read/config.rs`, `read/zip_archive.rs`: optional metadata entry and byte
+  limits bound allocations for `ZipArchive` before extraction.
 
 Run `tests/zip_backends.rs` as well as `tests/sevenzip_roundtrip.rs` after upgrades.
 
@@ -38,6 +40,13 @@ A slot is refilled only after its spool is merged; at most 32 spools (8 MiB
 each before disk spill) exist across running, queued, and merging groups.
 Single-file chunk-parallel DEFLATE is not enabled: the existing continuous
 stream preserves compression ratio and ZIP64/AES behavior.
+
+## ZIP source provenance
+
+- [zip 9.6.1](https://crates.io/crates/zip/9.6.1) source archive SHA-256:
+  `953a376f4930ed5af88e1e65948385f76866b45e7f75b21ac275327d0eeb9b46`.
+- [flate2 1.1.10](https://crates.io/crates/flate2/1.1.10) supplies the isolated
+  flate2 source. Use `runtime/README.md` for the native DLL versions.
 
 ## Upgrade review (2026-09-08)
 

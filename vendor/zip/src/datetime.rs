@@ -184,7 +184,11 @@ impl DateTime {
     #[cfg(feature = "time")]
     #[must_use]
     pub fn default_for_write() -> Self {
+        #[cfg(not(miri))]
         let now = time::OffsetDateTime::now_utc();
+        #[cfg(miri)]
+        let now = time::OffsetDateTime::from_unix_timestamp(1791941812).unwrap();
+
         time::PrimitiveDateTime::new(now.date(), now.time())
             .try_into()
             .unwrap_or_else(|_| DateTime::default())
@@ -379,15 +383,6 @@ impl DateTime {
     }
 }
 
-#[cfg(all(feature = "time", feature = "deprecated-time"))]
-impl TryFrom<time::OffsetDateTime> for DateTime {
-    type Error = DateTimeRangeError;
-
-    fn try_from(dt: time::OffsetDateTime) -> Result<Self, Self::Error> {
-        Self::try_from(time::PrimitiveDateTime::new(dt.date(), dt.time()))
-    }
-}
-
 #[cfg(feature = "time")]
 impl TryFrom<time::PrimitiveDateTime> for DateTime {
     type Error = DateTimeRangeError;
@@ -401,15 +396,6 @@ impl TryFrom<time::PrimitiveDateTime> for DateTime {
             dt.minute(),
             dt.second(),
         )
-    }
-}
-
-#[cfg(all(feature = "time", feature = "deprecated-time"))]
-impl TryFrom<DateTime> for time::OffsetDateTime {
-    type Error = time::error::ComponentRange;
-
-    fn try_from(dt: DateTime) -> Result<Self, Self::Error> {
-        time::PrimitiveDateTime::try_from(dt).map(time::PrimitiveDateTime::assume_utc)
     }
 }
 
@@ -460,7 +446,7 @@ mod tests {
 
     #[test]
     fn datetime_order() {
-        use std::cmp::Ordering;
+        use core::cmp::Ordering;
 
         use super::DateTime;
 
@@ -559,23 +545,6 @@ mod tests {
         assert!(DateTime::from_date_and_time(2100, 2, 29, 0, 0, 0).is_err());
     }
 
-    #[cfg(all(feature = "time", feature = "deprecated-time"))]
-    #[test]
-    fn datetime_try_from_offset_datetime() {
-        use time::macros::datetime;
-
-        use super::DateTime;
-
-        // 2018-11-17 10:38:30
-        let dt = DateTime::try_from(datetime!(2018-11-17 10:38:30 UTC)).unwrap();
-        assert_eq!(dt.year(), 2018);
-        assert_eq!(dt.month(), 11);
-        assert_eq!(dt.day(), 17);
-        assert_eq!(dt.hour(), 10);
-        assert_eq!(dt.minute(), 38);
-        assert_eq!(dt.second(), 30);
-    }
-
     #[cfg(feature = "time")]
     #[test]
     fn datetime_try_from_primitive_datetime() {
@@ -612,20 +581,6 @@ mod tests {
         assert!(DateTime::try_from(datetime!(2108-01-01 00:00:00)).is_err());
     }
 
-    #[cfg(all(feature = "time", feature = "deprecated-time"))]
-    #[test]
-    fn offset_datetime_try_from_datetime() {
-        use time::OffsetDateTime;
-        use time::macros::datetime;
-
-        use super::DateTime;
-
-        // 2018-11-17 10:38:30 UTC
-        let dt =
-            OffsetDateTime::try_from(DateTime::try_from_msdos(0x4D71, 0x54CF).unwrap()).unwrap();
-        assert_eq!(dt, datetime!(2018-11-17 10:38:30 UTC));
-    }
-
     #[cfg(feature = "time")]
     #[test]
     fn primitive_datetime_try_from_datetime() {
@@ -638,25 +593,6 @@ mod tests {
         let dt =
             PrimitiveDateTime::try_from(DateTime::try_from_msdos(0x4D71, 0x54CF).unwrap()).unwrap();
         assert_eq!(dt, datetime!(2018-11-17 10:38:30));
-    }
-
-    #[cfg(all(feature = "time", feature = "deprecated-time"))]
-    #[test]
-    fn offset_datetime_try_from_bounds() {
-        use super::DateTime;
-        use time::OffsetDateTime;
-
-        // 1980-00-00 00:00:00
-        assert!(
-            OffsetDateTime::try_from(unsafe { DateTime::from_msdos_unchecked(0x0000, 0x0000) })
-                .is_err()
-        );
-
-        // 2107-15-31 31:63:62
-        assert!(
-            OffsetDateTime::try_from(unsafe { DateTime::from_msdos_unchecked(0xFFFF, 0xFFFF) })
-                .is_err()
-        );
     }
 
     #[cfg(feature = "time")]

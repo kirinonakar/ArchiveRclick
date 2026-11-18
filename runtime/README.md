@@ -8,22 +8,22 @@ Windows x64 build; `build.rs` copies them beside every Windows Cargo binary.
 
 | File | Component | Version |
 | --- | --- | --- |
-| `archive.dll` | libarchive | 3.8.9 |
-| `z.dll` | zlib | 1.3.2 |
+| `archive.dll` | libarchive | 3.8.11 |
+| `libz.dll` | zlib | 1.4 |
 | `bz2.dll` | bzip2 | 1.0.8 |
-| `liblzma.dll` | XZ Utils / liblzma | 5.8.3 |
-| `lz4.dll` | LZ4 | 1.10.0 |
+| `liblzma.dll` | XZ Utils / liblzma | 5.8.4 |
+| `lz4.dll` | LZ4 | 1.11.1 |
 | `zstd.dll` | Zstandard | 1.5.7 |
-| `7z.dll` | 7-Zip | 26.03 |
+| `7z.dll` | 7-Zip | 26.06 |
 | `vcruntime140.dll` | Microsoft Visual C++ Runtime | 14.51.36247.0 |
 
 The open-source libraries were built for `x64-windows` using Microsoft vcpkg
-commit `aae277acf4e7de287ddb5e208b5316614de6aad7` and the overlay port in
+commit `de36db04550a8625e3154b1a758c60035901f244` and the overlay port in
 `packaging/vcpkg-overlay/libarchive`. The libarchive source is pinned to the
-GitHub `v3.8.9` tag snapshot with the SHA-512 recorded in the portfile. The VC
+GitHub `v3.8.11` tag snapshot with the SHA-512 recorded in the portfile. The VC
 runtime is copied unmodified from Visual Studio's redistributable directory.
 
-`7z.dll` is the unmodified 7-Zip 26.03 runtime from the official 7-Zip
+`7z.dll` is the unmodified 7-Zip 26.06 runtime from the official 7-Zip
 distribution (<https://www.7-zip.org/>).
 
 `SHA256SUMS` is the release allowlist. Do not add OpenSSL DLLs: this libarchive

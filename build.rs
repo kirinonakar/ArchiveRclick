@@ -7,9 +7,9 @@ const RUNTIME_FILES: &[&str] = &[
     "archive.dll",
     "bz2.dll",
     "liblzma.dll",
+    "libz.dll",
     "lz4.dll",
     "vcruntime140.dll",
-    "z.dll",
     "zstd.dll",
 ];
 const LICENSE_FILES: &[&str] = &[

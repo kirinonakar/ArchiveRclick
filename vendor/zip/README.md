@@ -1,4 +1,4 @@
-# zip [![crates.io version](https://img.shields.io/crates/v/zip)](https://crates.io/crates/zip) ![crates.io downloads](https://img.shields.io/crates/d/zip) [![docs.rs](https://img.shields.io/docsrs/zip)](https://docs.rs/zip) [![Build Status](https://github.com/zip-rs/zip2/actions/workflows/ci.yaml/badge.svg)](https://github.com/zip-rs/zip2/actions?query=branch%3Amaster+workflow%3ACI) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11847/badge)](https://www.bestpractices.dev/projects/11847)
+# zip [![crates.io version](https://img.shields.io/crates/v/zip)](https://crates.io/crates/zip) ![crates.io downloads](https://img.shields.io/crates/d/zip) [![docs.rs](https://img.shields.io/docsrs/zip)](https://docs.rs/zip) [![Build Status](https://github.com/zip-rs/zip2/actions/workflows/ci.yml/badge.svg?event=merge_group)](https://github.com/zip-rs/zip2/actions/workflows/ci.yml?query=event%3Amerge_group) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11847/badge)](https://www.bestpractices.dev/projects/11847)
 
 A zip library for rust which supports reading and writing of simple ZIP files. Currently hosted at
 <https://github.com/zip-rs/zip2>.
@@ -53,11 +53,14 @@ By default `aes-crypto`, `bzip2`, `deflate`, `deflate64`, `lzma`, `ppmd`, `time`
 ## Library usage
 
 Reading:
-- [`ZipArchive::new()`](https://docs.rs/zip/latest/zip/read/struct.ZipArchive.html)
-- [`read_zipfile_from_stream_*`](https://docs.rs/zip/latest/zip/read/)
+- [`ZipArchive::new()`](https://docs.rs/zip/latest/zip/read/struct.ZipArchive.html#method.new): this struct contains all the files internally (expect duplicates). It needs `Read` and `Seek` traits
+- [`ZipIterable`](https://docs.rs/zip/latest/zip/unstable/read/struct.ZipIterable.html): files available through an iterable `files()` method. Files are not owned internally
+- [`read_zipfile_from_stream_*`](https://docs.rs/zip/latest/zip/read/): method to read a zip from the local header
+- [`ZipStreamReader`](https://docs.rs/zip/latest/zip/unstable/stream/struct.ZipStreamReader.html): method to read a zip with a `Read` trait
 
 Writing:
-- [`ZipWriter::new()`](https://docs.rs/zip/latest/zip/write/struct.ZipWriter.html) - to create a new archive
+- [`ZipWriter::new()`](https://docs.rs/zip/latest/zip/write/struct.ZipWriter.html#method.new) - to create a new archive
+- [`ZipWriter::new_append()`](https://docs.rs/zip/latest/zip/write/struct.ZipWriter.html#method.new_append) - to read and append to an existing zip file
 - [`ZipWriter::new_stream()`](https://docs.rs/zip/latest/zip/write/struct.ZipWriter.html#method.new_stream) - to write in stream mode
 
 ## Examples
@@ -66,10 +69,20 @@ See the [examples directory](https://github.com/zip-rs/zip2/tree/master/examples
 
 - How to [write a file to a zip](https://github.com/zip-rs/zip2/tree/master/examples/write_sample.rs).
 - How to [write a directory of files to a zip](https://github.com/zip-rs/zip2/tree/master/examples/write_dir.rs) (using [walkdir](https://github.com/BurntSushi/walkdir)).
-- How to [extract a zip file](https://github.com/zip-rs/zip2/tree/master/examples/extract.rs).
+- How to [extract manually a zip file](https://github.com/zip-rs/zip2/tree/master/examples/extract.rs).
 - How to [extract a single file from a zip](https://github.com/zip-rs/zip2/tree/master/examples/extract_lorem.rs).
 - How to [read a zip from the standard input](https://github.com/zip-rs/zip2/tree/master/examples/stdin_info.rs).
 - How to [append a directory to an existing archive](https://github.com/zip-rs/zip2/tree/master/examples/append.rs)
+- How to [stream ZIP output to an async runtime](https://github.com/zip-rs/zip2/tree/master/examples/async_bridge.rs) through a bounded channel.
+
+## Using zip2 in async runtimes
+
+zip2 is synchronous. In an async application there are two ways to use it without blocking the executor:
+
+- For a seekable archive, move the file handle and the zip work into `tokio::task::spawn_blocking` (or the equivalent in your runtime).
+- For streaming output, run `ZipWriter::new_stream` on a dedicated thread and connect it to the async writer through a bounded channel. The channel bound applies backpressure, so the archive payload is not buffered in memory as a whole. See [`examples/async_bridge.rs`](https://github.com/zip-rs/zip2/tree/master/examples/async_bridge.rs).
+
+Native async I/O isn't yet implemented. You can try [`async_zip`](https://crates.io/crates/async_zip) for reading and writing, or [`async-deflate-zip`](https://crates.io/crates/async-deflate-zip) for a streaming writer, but note that they're still in beta and may not be as secure or support as many compression methods.
 
 ## Wasm
 
@@ -79,8 +92,8 @@ This library can work in a Wasm environment but you may need to disable certain 
 # change to latest version
 zip = { version = "latest", default-features = false, features = [
     # "aes-crypto",
-    # "bzip2",
     # "xz",
+    "bzip2",
     "deflate64",
     "deflate",
     "lzma",
@@ -154,7 +167,7 @@ The zip creation fuzzer will try to print out a description of the kind of input
 # This input was translated into one or more test cases:
 <fuzz/write/in/id-000000,time-0,execs-0,orig-0011743621118ab6c5278ffbb8fd14bddd8369ee.min \
   cargo run --manifest-path=fuzz/Cargo.toml --quiet -p fuzz_write
-writer.start_file_from_path("", FileOptions { compression_method: Stored, compression_level: None, last_modified_time: DateTime::from_date_and_time(2048, 1, 1, 0, 0, 0)?, permissions: None, large_file: false, encrypt_with: None, extended_options: ExtendedFileOptions {extra_data: vec![].into(), central_extra_data: vec![].into()}, alignment: 0 })?;
+writer.start_file_from_path("", FileOptions { compression_method: Stored, compression_level: None, last_modified_time: DateTime::from_date_and_time(2048, 1, 1, 0, 0, 0)?, permissions: None, large_file: false, encrypt_with: None, extended_options: ExtendedFileOptions {extra_fields: vec![].into()}, alignment: 0 })?;
 writer.write_all(&[])?;
 writer
 let _ = writer.finish_into_readable()?;

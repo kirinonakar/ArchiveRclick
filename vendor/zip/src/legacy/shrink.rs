@@ -26,7 +26,10 @@ struct CodeQueue {
 impl CodeQueue {
     fn new() -> Self {
         let mut codes = [None; FREE_CODE_QUEUE_SIZE];
-        for (i, code) in ((CONTROL_CODE as u16 + 1)..=(MAX_CODE as u16 - 1)).enumerate() {
+        // All free codes, CONTROL_CODE + 1 ..= MAX_CODE (8191 included), as in hwzip's
+        // code_queue_init and PKZIP's encoder. Leaving MAX_CODE out made every code the
+        // encoder assigns after it one off from the decoder's table.
+        for (i, code) in ((CONTROL_CODE as u16 + 1)..=(MAX_CODE as u16)).enumerate() {
             codes[i] = Some(code);
         }
         Self { next_idx: 0, codes }
@@ -88,59 +91,68 @@ fn unshrink_partial_clear(codetab: &mut [Codetab], queue: &mut CodeQueue) {
 
     // Clear "non-prefix" codes in the table; populate the code queue.
     let mut code_queue_size = 0;
-    for i in (CONTROL_CODE + 1)..MAX_CODE {
+    for i in (CONTROL_CODE + 1)..=MAX_CODE {
         if !is_prefix[i] {
             codetab[i].prefix_code = None;
             queue.codes[code_queue_size] = Some(i as u16);
             code_queue_size += 1;
         }
     }
-    queue.codes[code_queue_size] = None; // End-of-queue marker.
+    // End-of-queue marker, unless every free code went back into the queue (it is then full).
+    if let Some(end) = queue.codes.get_mut(code_queue_size) {
+        *end = None;
+    }
     queue.next_idx = 0;
 }
 
 /// Read the next code from the input stream and return it in next_code. Returns
 /// `Ok(None)` if the end of the stream is reached. If the stream contains invalid
-/// data, returns `Err`.
+/// data or excessive consecutive control codes, returns `Err`.
 fn read_code<T: Read, E: Endianness>(
     is: &mut BitReader<T, E>,
     code_size: &mut u8,
     codetab: &mut [Codetab],
     queue: &mut CodeQueue,
 ) -> io::Result<Option<u16>> {
-    // assert(sizeof(code) * CHAR_BIT >= *code_size);
-    let code = is.read_var::<u16>(u32::from(*code_size))?;
+    const MAX_CONSECUTIVE_CONTROL_CODES: usize = 256;
+    for _ in 0..MAX_CONSECUTIVE_CONTROL_CODES {
+        let code = is.read_var::<u16>(u32::from(*code_size))?;
 
-    // Handle regular codes (the common case).
-    if code != CONTROL_CODE as u16 {
-        return Ok(Some(code));
-    }
+        // Handle regular codes (the common case).
+        if code != CONTROL_CODE as u16 {
+            return Ok(Some(code));
+        }
 
-    // Handle control codes.
-    if let Ok(control_code) = is.read_var::<u16>(u32::from(*code_size)) {
-        match control_code {
-            INC_CODE_SIZE => {
-                if *code_size >= MAX_CODE_SIZE {
+        // Handle control codes.
+        if let Ok(control_code) = is.read_var::<u16>(u32::from(*code_size)) {
+            match control_code {
+                INC_CODE_SIZE => {
+                    if *code_size >= MAX_CODE_SIZE {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "tried to increase code size when already at maximum",
+                        ));
+                    }
+                    *code_size += 1;
+                }
+                PARTIAL_CLEAR => {
+                    unshrink_partial_clear(codetab, queue);
+                }
+                _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "tried to increase code size when already at maximum",
+                        format!("Invalid control code {}", control_code),
                     ));
                 }
-                *code_size += 1;
             }
-            PARTIAL_CLEAR => {
-                unshrink_partial_clear(codetab, queue);
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Invalid control code {}", control_code),
-                ));
-            }
+        } else {
+            return Ok(None);
         }
-        return read_code(is, code_size, codetab, queue);
     }
-    Ok(None)
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "excessive consecutive LZW control codes",
+    ))
 }
 
 /// Output the string represented by a code into dst at dst_pos.
@@ -218,6 +230,12 @@ fn output_code(
     let last_dst_pos = dst.len();
     let start = ct.last_dst_pos;
     let len = ct.len as usize;
+    if start >= dst.len() || start.checked_add(len).is_none_or(|end| end > dst.len()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "corrupted shrink dictionary back-reference offset",
+        ));
+    }
     let first = dst[start];
     dst.extend_from_within(start..start + len);
     dst.push(codetab[code as usize].ext_byte);
@@ -230,94 +248,164 @@ fn output_code(
     Ok(first)
 }
 
-fn hwunshrink(src: &[u8], uncompressed_size: usize, dst: &mut Vec<u8>) -> io::Result<()> {
-    dst.reserve(uncompressed_size);
-    let mut codetab = Codetab::create_new();
-    let mut queue = CodeQueue::new();
-    let mut is = BitReader::endian(src, LittleEndian);
-    let mut code_size = MIN_CODE_SIZE;
+struct ShrinkState<T> {
+    codetab: Box<[Codetab; MAX_CODE + 1]>,
+    queue: Box<CodeQueue>,
+    bit_reader: BitReader<T, LittleEndian>,
+    code_size: u8,
+    first_byte: u8,
+    prev_code: u16,
+    started: bool,
+    uncompressed_size: usize,
+}
 
-    // Handle the first code separately since there is no previous code.
-    let Some(curr_code) = read_code(&mut is, &mut code_size, &mut codetab, &mut queue)? else {
-        return Ok(());
-    };
-
-    debug_assert!(curr_code != CONTROL_CODE as u16);
-    if curr_code > u16::from(u8::MAX) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the first code must be a literal",
-        ));
+impl<T> std::fmt::Debug for ShrinkState<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShrinkState")
+            .field("code_size", &self.code_size)
+            .field("started", &self.started)
+            .field("uncompressed_size", &self.uncompressed_size)
+            .finish_non_exhaustive()
     }
-    let mut first_byte = curr_code as u8; // make mutable
-    codetab[curr_code as usize].last_dst_pos = dst.len();
-    dst.push(first_byte);
-    let mut prev_code = curr_code;
-    while dst.len() < uncompressed_size {
-        let curr_opt = match read_code(&mut is, &mut code_size, &mut codetab, &mut queue) {
-            Ok(c) => c,
-            Err(_) => break, // treat read error as end-of-stream for now; validated after loop
-        };
+}
 
-        let Some(curr_code) = curr_opt else {
-            return Err(Error::new(io::ErrorKind::InvalidData, "invalid code"));
-        };
+impl<T: Read> ShrinkState<T> {
+    fn new(src: T, uncompressed_size: usize) -> Self {
+        Self {
+            codetab: Box::new(Codetab::create_new()),
+            queue: Box::new(CodeQueue::new()),
+            bit_reader: BitReader::endian(src, LittleEndian),
+            code_size: MIN_CODE_SIZE,
+            first_byte: 0,
+            prev_code: 0,
+            started: false,
+            uncompressed_size,
+        }
+    }
 
-        let dst_pos = dst.len();
-        // Handle KwKwK: next code used before being added.
-        if Some(curr_code) == queue.next() {
-            if codetab[prev_code as usize].prefix_code.is_none() {
-                return Err(Error::new(
+    fn unshrink_until(&mut self, target_len: usize, dst: &mut Vec<u8>) -> io::Result<()> {
+        let target_len = target_len.min(self.uncompressed_size);
+        if dst.len() < target_len {
+            dst.try_reserve(
+                target_len
+                    .saturating_sub(dst.len())
+                    .min(crate::legacy::MAX_PREALLOC),
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::OutOfMemory, e))?;
+        }
+
+        if !self.started {
+            self.started = true;
+            // Handle the first code separately since there is no previous code.
+            let Some(curr_code) = read_code(
+                &mut self.bit_reader,
+                &mut self.code_size,
+                &mut *self.codetab,
+                &mut self.queue,
+            )?
+            else {
+                return Ok(());
+            };
+
+            debug_assert!(curr_code != CONTROL_CODE as u16);
+            if curr_code > u16::from(u8::MAX) {
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "previous code no longer valid",
+                    "the first code must be a literal",
                 ));
             }
-            // Extend the previous code with its first byte.
-            debug_assert!(curr_code != prev_code);
-            codetab[curr_code as usize] = Codetab {
-                prefix_code: Some(prev_code),
-                ext_byte: first_byte,
-                len: codetab[prev_code as usize].len + 1,
-                last_dst_pos: codetab[prev_code as usize].last_dst_pos,
-            };
+            self.first_byte = curr_code as u8;
+            self.codetab[curr_code as usize].last_dst_pos = dst.len();
+            dst.push(self.first_byte);
+            self.prev_code = curr_code;
         }
-        // Output the string represented by the current code.
-        first_byte = output_code(dst, curr_code, prev_code, &mut codetab, &queue, first_byte)?;
-        if let Some(new_code) = queue.remove_next() {
-            let prev_entry = codetab[prev_code as usize];
-            codetab[new_code as usize] = Codetab {
-                prefix_code: Some(prev_code),
-                ext_byte: first_byte,
-                last_dst_pos: prev_entry.last_dst_pos,
-                len: if prev_entry.prefix_code.is_none() {
-                    // prev_code was invalidated in a partial
-                    // clearing. Until that code is re-used, the
-                    // string represented by new_code is
-                    // indeterminate.
-                    UNKNOWN_LEN
-                } else {
-                    prev_entry.len + 1
-                },
+
+        while dst.len() < target_len {
+            let curr_opt = match read_code(
+                &mut self.bit_reader,
+                &mut self.code_size,
+                &mut *self.codetab,
+                &mut self.queue,
+            ) {
+                Ok(c) => c,
+                Err(_) => break, // treat read error as end-of-stream for now; validated after loop
             };
+
+            let Some(curr_code) = curr_opt else {
+                return Err(Error::new(io::ErrorKind::InvalidData, "invalid code"));
+            };
+
+            let dst_pos = dst.len();
+            // Handle KwKwK: next code used before being added.
+            if Some(curr_code) == self.queue.next() {
+                if self.codetab[self.prev_code as usize].prefix_code.is_none() {
+                    return Err(Error::new(
+                        io::ErrorKind::InvalidData,
+                        "previous code no longer valid",
+                    ));
+                }
+                // Extend the previous code with its first byte.
+                debug_assert!(curr_code != self.prev_code);
+                self.codetab[curr_code as usize] = Codetab {
+                    prefix_code: Some(self.prev_code),
+                    ext_byte: self.first_byte,
+                    len: self.codetab[self.prev_code as usize].len + 1,
+                    last_dst_pos: self.codetab[self.prev_code as usize].last_dst_pos,
+                };
+            }
+            // Output the string represented by the current code.
+            self.first_byte = output_code(
+                dst,
+                curr_code,
+                self.prev_code,
+                &mut *self.codetab,
+                &self.queue,
+                self.first_byte,
+            )?;
+            if let Some(new_code) = self.queue.remove_next() {
+                let prev_entry = self.codetab[self.prev_code as usize];
+                self.codetab[new_code as usize] = Codetab {
+                    prefix_code: Some(self.prev_code),
+                    ext_byte: self.first_byte,
+                    last_dst_pos: prev_entry.last_dst_pos,
+                    len: if prev_entry.prefix_code.is_none() {
+                        // prev_code was invalidated in a partial
+                        // clearing. Until that code is re-used, the
+                        // string represented by new_code is
+                        // indeterminate.
+                        UNKNOWN_LEN
+                    } else {
+                        prev_entry.len + 1
+                    },
+                };
+            }
+            self.codetab[curr_code as usize].last_dst_pos = dst_pos;
+            self.prev_code = curr_code;
         }
-        codetab[curr_code as usize].last_dst_pos = dst_pos;
-        prev_code = curr_code;
-    }
 
-    if dst.len() != uncompressed_size {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unexpected end of compressed stream",
-        ));
-    }
+        if dst.len() < target_len
+            || (target_len == self.uncompressed_size && dst.len() != self.uncompressed_size)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected end of compressed stream",
+            ));
+        }
 
-    Ok(())
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn hwunshrink(src: &[u8], uncompressed_size: usize, dst: &mut Vec<u8>) -> io::Result<()> {
+    let mut state = ShrinkState::new(src, uncompressed_size);
+    state.unshrink_until(uncompressed_size, dst)
 }
 
 #[derive(Debug)]
 pub struct ShrinkDecoder<R> {
     compressed_reader: R,
-    stream_read: bool,
+    state: Option<ShrinkState<io::Cursor<Box<[u8]>>>>,
     uncompressed_size: u64,
     stream: Vec<u8>,
     read_pos: usize,
@@ -328,7 +416,7 @@ impl<R: Read> ShrinkDecoder<R> {
         Self {
             compressed_reader: inner,
             uncompressed_size,
-            stream_read: false,
+            state: None,
             stream: Vec::new(),
             read_pos: 0,
         }
@@ -336,21 +424,40 @@ impl<R: Read> ShrinkDecoder<R> {
     pub fn into_inner(self) -> R {
         self.compressed_reader
     }
+
+    pub fn inner(&self) -> &R {
+        &self.compressed_reader
+    }
 }
 
 impl<R: Read> Read for ShrinkDecoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if !self.stream_read {
-            self.stream_read = true;
-            let mut compressed_bytes = Vec::new();
-            self.compressed_reader.read_to_end(&mut compressed_bytes)?;
-            self.stream.reserve(self.uncompressed_size as usize);
-            hwunshrink(
-                &compressed_bytes,
-                self.uncompressed_size as usize,
-                &mut self.stream,
-            )?;
+        let state = match &mut self.state {
+            Some(state) => state,
+            None => {
+                let uncompressed_size = usize::try_from(self.uncompressed_size).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "uncompressed size exceeds usize::MAX",
+                    )
+                })?;
+                let mut compressed_bytes = Vec::new();
+                self.compressed_reader.read_to_end(&mut compressed_bytes)?;
+                self.state.insert(ShrinkState::new(
+                    io::Cursor::new(compressed_bytes.into_boxed_slice()),
+                    uncompressed_size,
+                ))
+            }
+        };
+
+        let target_len = self
+            .read_pos
+            .saturating_add(buf.len())
+            .min(state.uncompressed_size);
+        if self.stream.len() < target_len {
+            state.unshrink_until(target_len, &mut self.stream)?;
         }
+
         let available = self.stream.len().saturating_sub(self.read_pos);
         if available == 0 {
             return Ok(0);
@@ -376,5 +483,43 @@ mod tests {
         let mut dst = Vec::with_capacity(LZW_FIG5.len());
         hwunshrink(&LZW_FIG5_SHRUNK, LZW_FIG5.len(), &mut dst).unwrap();
         assert_eq!(dst.as_slice(), LZW_FIG5);
+    }
+
+    #[test]
+    fn test_shrink_decoder_incremental_take() {
+        use super::ShrinkDecoder;
+        use std::io::Read;
+
+        let decoder = ShrinkDecoder::new(LZW_FIG5_SHRUNK.as_slice(), LZW_FIG5.len() as u64);
+        let mut limited = decoder.take(6);
+        let mut out = Vec::new();
+        limited.read_to_end(&mut out).unwrap();
+        assert_eq!(out, &LZW_FIG5[..6]);
+        assert!(limited.get_ref().stream.len() <= 8);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn test_shrink_uncontrolled_recursion_prevention() {
+        use bitstream_io::{BitWrite, BitWriter, LittleEndian};
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = BitWriter::endian(&mut buf, LittleEndian);
+            // Write 500 consecutive (CONTROL_CODE=256, PARTIAL_CLEAR=2) pairs
+            for _ in 0..500 {
+                writer.write::<9, _>(256u32).unwrap();
+                writer.write::<9, _>(2u32).unwrap();
+            }
+            writer.write::<9, _>(65u32).unwrap();
+            writer.byte_align().unwrap();
+        }
+
+        let mut dst = Vec::new();
+        let res = hwunshrink(&buf, 1, &mut dst);
+        assert!(
+            res.is_err(),
+            "Should return error on excessive consecutive control codes"
+        );
     }
 }

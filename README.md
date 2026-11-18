@@ -39,7 +39,7 @@ Download the portable ZIP from the [Releases page](https://github.com/kirinonaka
 - 64-bit Windows 10 or 11.
 - Rust 1.92 or newer with the MSVC Windows target for building.
 
-The supported libarchive 3.8.9 runtime and its codec dependencies are bundled;
+The supported libarchive 3.8.11 runtime and its codec dependencies are bundled;
 no separate archive-runtime installation is required.
 
 ## Build and use
@@ -135,13 +135,13 @@ their own terms:
 
 | Component | Version | License summary |
 | --- | --- | --- |
-| libarchive | 3.8.9 | Mixed per-file notices, mainly BSD-style |
-| zlib | 1.3.2 | zlib license |
+| libarchive | 3.8.11 | Mixed per-file notices, mainly BSD-style |
+| zlib | 1.4 | zlib license |
 | bzip2 | 1.0.8 | bzip2 license |
-| XZ Utils / liblzma | 5.8.3 | 0BSD for liblzma; see package notice |
-| LZ4 | 1.10.0 | BSD 2-Clause |
+| XZ Utils / liblzma | 5.8.4 | 0BSD for liblzma; see package notice |
+| LZ4 | 1.11.1 | BSD 2-Clause |
 | Zstandard | 1.5.7 | BSD or GPLv2 |
-| 7-Zip (`7z.dll`) | 26.03 | LGPL with the 7-Zip unRAR restriction and BSD portions |
+| 7-Zip (`7z.dll`) | 26.06 | LGPL with the 7-Zip unRAR restriction and BSD portions |
 | Microsoft VC runtime | 14.51.36247.0 | Microsoft Visual Studio REDIST terms |
 
 The complete notices and license texts are included in

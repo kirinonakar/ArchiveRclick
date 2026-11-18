@@ -1,8 +1,8 @@
 # ArchiveRclick third-party notices
 
-ArchiveRclick includes unmodified Windows x64 runtime binaries for libarchive
-3.8.9, zlib 1.3.2, bzip2 1.0.8, XZ Utils/liblzma 5.8.3, LZ4 1.10.0,
-Zstandard 1.5.7, and 7-Zip 26.03 (7z.dll). Their complete license texts are
+ArchiveRclick includes Windows x64 runtime binaries for libarchive 3.8.11,
+zlib 1.4, bzip2 1.0.8, XZ Utils/liblzma 5.8.4, LZ4 1.11.1,
+Zstandard 1.5.7, and 7-Zip 26.06 (7z.dll). Their complete license texts are
 in the adjacent `licenses` directory in the source distribution.
 
 The portable package also includes Microsoft's unmodified
@@ -12,7 +12,7 @@ license and its REDIST list: <https://aka.ms/vs/18/redistribution>.
 
 Source and project information:
 
-- libarchive: <https://github.com/libarchive/libarchive/tree/v3.8.9>
+- libarchive: <https://github.com/libarchive/libarchive/tree/v3.8.11>
 - zlib: <https://zlib.net/>
 - bzip2: <https://sourceware.org/bzip2/>
 - XZ Utils: <https://tukaani.org/xz/>
@@ -22,8 +22,8 @@ Source and project information:
 
 ## Statically linked ZIP backends
 
-ZIP creation additionally uses zip 8.6.0, flate2 1.1.10, libz-ng-sys 1.1.29
-(with zlib-ng), and zlib-rs 0.6.7. License texts are in `licenses/zip.txt`,
+ZIP creation additionally uses zip 9.6.1, flate2 1.1.10, libz-ng-sys 1.1.29
+(with zlib-ng), and zlib-rs 0.6.8. License texts are in `licenses/zip.txt`,
 `licenses/flate2-mit.txt`, `licenses/flate2-apache.txt`, `licenses/zlib-ng.txt`,
 and `licenses/zlib-rs.txt`. See the main THIRD-PARTY-LICENSES.md for supporting
 Rust dependencies and vendor/README.md in source distributions for local changes.

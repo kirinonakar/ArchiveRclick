@@ -5,7 +5,7 @@ use archive_rclick_core::{
 };
 use std::{
     fs,
-    io::{Cursor, Write},
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -121,9 +121,13 @@ fn decoder_choice_selects_the_requested_implementation() {
     for ng in [false, true] {
         let mut reader =
             zip::ZipArchive::new(Cursor::new(archive(&[("a", b"payload")], None, false))).unwrap();
-        let entry = reader
+        let mut entry = reader
             .by_index_with_options(0, zip::read::ZipReadOptions::new().zlib_ng(ng))
             .unwrap();
+        // zip 9 constructs the selected decoder on the first payload read.
+        let mut first_byte = [0u8; 1];
+        entry.read_exact(&mut first_byte).unwrap();
+        assert_eq!(first_byte, *b"p");
         let debug = format!("{entry:?}");
         assert!(
             debug.contains(if ng {

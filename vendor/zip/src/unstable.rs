@@ -1,32 +1,57 @@
-#![allow(missing_docs)]
+#![doc = "Unstable APIs\n\
+\
+All APIs accessible by importing this module are unstable; They may be changed in patch \
+releases. You MUST use an exact version specifier in `Cargo.toml`, to indicate the version of this \
+API you're using:\n\
+\
+```toml\n
+[dependencies]\n
+zip = \"="]
+#![doc=env!("CARGO_PKG_VERSION")]
+#![doc = "\"\n\
+```"]
 
 use std::borrow::Cow;
 use std::io;
-use std::io::{Read, Write};
-use std::path::{Component, MAIN_SEPARATOR, Path};
+use std::io::Read;
+use std::path::{Component, Path};
 
 /// Provides high level API for reading from a stream.
 pub mod stream {
-    pub use crate::read::stream::{ZipStreamFileMetadata, ZipStreamReader, ZipStreamVisitor};
+    pub use crate::read::stream::{ZipStreamReader, ZipStreamVisitor};
 }
+
+/// Zip format
+pub mod format {
+    pub use crate::format::*;
+}
+
+/// Iterable ZIP reading that does not build an in-memory index of every entry.
+pub mod read {
+    pub use crate::read::zip_iterable::{ZipIterable, ZipIterableFiles};
+}
+
 /// Types for creating ZIP archives.
 pub mod write {
     use crate::result::{ZipError, ZipResult};
     use crate::write::{FileOptionExtension, FileOptions};
     /// Unstable methods for [`FileOptions`].
-    pub trait FileOptionsExt {
+    pub trait FileOptionsExt<'k> {
         /// Write the file with the given password using the deprecated `ZipCrypto` algorithm.
         ///
         /// <div class="warning">This is not recommended for new archives, as `ZipCrypto` is not
         /// secure (it can be cracked given 12 bytes of known plaintext after compression). It is
         /// provided only for backward compatibility with older software that doesn't support
         /// AES-encrypted archives.</div>
-        fn with_deprecated_encryption(self, password: &[u8]) -> ZipResult<Self>
+        fn with_deprecated_encryption(self, password: &'k [u8]) -> ZipResult<Self>
         where
             Self: Sized;
     }
-    impl<T: FileOptionExtension> FileOptionsExt for FileOptions<'_, T> {
-        fn with_deprecated_encryption(self, password: &[u8]) -> ZipResult<FileOptions<'static, T>> {
+    impl<'k, 'n, T: FileOptionExtension> FileOptionsExt<'k> for FileOptions<'k, 'n, T> {
+        fn with_deprecated_encryption(
+            self,
+            password: &'k [u8],
+        ) -> ZipResult<FileOptions<'k, 'n, T>> {
             if password.is_empty() {
                 // Forbid empty passwords to avoid deriving a predictable key from a
                 // fixed, public value. Callers must ensure passwords are non-empty.
@@ -40,41 +65,23 @@ pub mod write {
     }
 }
 
-/// Helper methods for writing unsigned integers in little-endian form.
-pub trait LittleEndianWriteExt: Write {
-    fn write_u16_le(&mut self, input: u16) -> io::Result<()> {
-        self.write_all(&input.to_le_bytes())
-    }
-
-    fn write_u32_le(&mut self, input: u32) -> io::Result<()> {
-        self.write_all(&input.to_le_bytes())
-    }
-
-    fn write_u64_le(&mut self, input: u64) -> io::Result<()> {
-        self.write_all(&input.to_le_bytes())
-    }
-
-    fn write_u128_le(&mut self, input: u128) -> io::Result<()> {
-        self.write_all(&input.to_le_bytes())
-    }
-}
-
-impl<W: Write + ?Sized> LittleEndianWriteExt for W {}
-
 /// Helper methods for reading unsigned integers in little-endian form.
 pub trait LittleEndianReadExt: Read {
+    /// Read a u16 as little endian
     fn read_u16_le(&mut self) -> io::Result<u16> {
         let mut out = [0u8; 2];
         self.read_exact(&mut out)?;
         Ok(u16::from_le_bytes(out))
     }
 
+    /// Read a u32 as little endian
     fn read_u32_le(&mut self) -> io::Result<u32> {
         let mut out = [0u8; 4];
         self.read_exact(&mut out)?;
         Ok(u32::from_le_bytes(out))
     }
 
+    /// Read a u64 as little endian
     fn read_u64_le(&mut self) -> io::Result<u64> {
         let mut out = [0u8; 8];
         self.read_exact(&mut out)?;
@@ -91,18 +98,20 @@ pub fn path_to_string<T: AsRef<Path>>(path: T) -> Result<Box<str>, std::io::Erro
         if original.is_empty() || original == "." || original == ".." {
             return Ok(String::new().into_boxed_str());
         }
-        if original.starts_with(MAIN_SEPARATOR) {
-            if original.len() == 1 {
-                return Ok(MAIN_SEPARATOR.to_string().into_boxed_str());
-            } else if (MAIN_SEPARATOR == '/' || !original[1..].contains(MAIN_SEPARATOR))
-                && !original.ends_with('.')
-                && !original.contains([MAIN_SEPARATOR, MAIN_SEPARATOR])
-                && !original.contains([MAIN_SEPARATOR, '.', MAIN_SEPARATOR])
-                && !original.contains([MAIN_SEPARATOR, '.', '.', MAIN_SEPARATOR])
+        if original == "/" || original == "\\" {
+            return Ok("/".to_string().into_boxed_str());
+        }
+        if original.starts_with('/') || original.starts_with('\\') {
+            let rest = &original[1..];
+            if !rest.contains('/')
+                && !rest.contains('\\')
+                && !rest.ends_with('.')
+                && rest != "."
+                && rest != ".."
             {
-                maybe_original = Some(&original[1..]);
+                maybe_original = Some(rest);
             }
-        } else if !original.contains(MAIN_SEPARATOR) {
+        } else if !original.contains('/') && !original.contains('\\') {
             return Ok(original.into());
         }
     }
