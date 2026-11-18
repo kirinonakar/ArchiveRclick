@@ -753,6 +753,7 @@ export component SettingsOverlay inherits Rectangle {
 
                     VerticalLayout {
                         spacing: 2px;
+                        horizontal-stretch: 1;
                         vertical-stretch: 1;
 
                         Text {
@@ -767,6 +768,16 @@ export component SettingsOverlay inherits Rectangle {
                             color: Palette.foreground;
                             opacity: 0.78;
                         }
+                    }
+
+                    Image {
+                        source: Palette.color-scheme == ColorScheme.dark
+                            ? @image-url("MadeWithSlint-logo-dark.svg")
+                            : @image-url("MadeWithSlint-logo-light.svg");
+                        width: 106px;
+                        height: 100%;
+                        image-fit: contain;
+                        accessible-label: "Made with Slint";
                     }
                 }
 

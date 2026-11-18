@@ -18,6 +18,7 @@ const LICENSE_FILES: &[&str] = &[
     "libarchive.txt",
     "liblzma.txt",
     "lz4.txt",
+    "LicenseRef-Slint-Royalty-free-2.0.md",
     "zlib.txt",
     "zstd.txt",
 ];

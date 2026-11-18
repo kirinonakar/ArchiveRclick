@@ -20,6 +20,13 @@ Source and project information:
 - Zstandard: <https://github.com/facebook/zstd>
 - 7-Zip: <https://www.7-zip.org/>
 
+## Slint
+
+ArchiveRclick uses Slint 1.17.1 for its user interface under the Slint
+Royalty-free Desktop, Mobile, and Web Applications License, version 2.0.
+The [license text](licenses/LicenseRef-Slint-Royalty-free-2.0.md) is bundled
+with the app. Slint also provides the [official license PDF](https://slint.dev/agreements/slint-royalty-free-license.pdf).
+
 ## Statically linked ZIP backends
 
 ZIP creation additionally uses zip 9.6.1, flate2 1.1.10, libz-ng-sys 1.1.29
