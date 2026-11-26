@@ -16,9 +16,10 @@ pub(super) fn is_archive_drop_path(path: &Path) -> bool {
         .extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| {
-            ARCHIVE_DROP_EXTENSIONS
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            crate::archive::spanned_zip_volume_number(extension).is_some()
+                || ARCHIVE_DROP_EXTENSIONS
+                    .iter()
+                    .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         });
     extension_matches || split_archive_volume_base_name(&name).is_some()
 }

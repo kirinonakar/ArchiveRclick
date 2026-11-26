@@ -23,3 +23,14 @@ pub use options::{
 };
 pub(crate) use path_safety::{ensure_no_reparse_ancestors, safe_relative_path};
 pub use sevenzip::{CompositeEngine, SevenZipEngine};
+
+pub(crate) fn spanned_zip_volume_number(extension: &str) -> Option<u32> {
+    let digits = extension.strip_prefix(['z', 'Z'])?;
+    if digits.len() < 2
+        || (digits.len() > 2 && digits.starts_with('0'))
+        || !digits.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok().filter(|&number| number > 0)
+}

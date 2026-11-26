@@ -59,6 +59,7 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 mod format;
+pub(crate) use format::spanned_zip_selection_path;
 use format::{
     ReadFormat, apply_zip_name_records, archive_format, effective_zip_codepage,
     read_zip_name_records, split_volume_paths, volume_part_path,

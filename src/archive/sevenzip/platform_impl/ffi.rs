@@ -834,7 +834,9 @@ impl Api {
                     "the loaded 7z.dll does not provide an NSIS reader".to_owned(),
                 )
             })?,
-            ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
+            ReadFormat::SevenZipVolume | ReadFormat::ZipVolume | ReadFormat::SpannedZip => {
+                unreachable!()
+            }
         };
         let mut raw: *mut c_void = ptr::null_mut();
         // SAFETY: the function pointer came from the 7z.dll export table.
@@ -884,7 +886,9 @@ impl Api {
             ReadFormat::Rar5 => self.rar5_clsid.is_some(),
             ReadFormat::Iso => self.iso_clsid.is_some(),
             ReadFormat::Nsis => self.nsis_clsid.is_some(),
-            ReadFormat::SevenZipVolume | ReadFormat::ZipVolume => unreachable!(),
+            ReadFormat::SevenZipVolume | ReadFormat::ZipVolume | ReadFormat::SpannedZip => {
+                unreachable!()
+            }
         }
     }
 }

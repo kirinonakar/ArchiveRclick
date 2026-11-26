@@ -18,6 +18,22 @@ impl CompositeEngine {
             sevenzip,
         }
     }
+
+    fn read_engine(&self, format: Option<ReadFormat>) -> ArchiveResult<&dyn ArchiveEngine> {
+        if let Some(format) = format {
+            if let Some(sevenzip) = &self.sevenzip
+                && sevenzip.can_read_format(format)
+            {
+                return Ok(sevenzip);
+            }
+            if format == ReadFormat::SpannedZip {
+                return Err(ArchiveError::SevenZip(
+                    "split ZIP archives require the bundled 7z.dll ZIP reader".to_owned(),
+                ));
+            }
+        }
+        Ok(&self.libarchive)
+    }
 }
 
 impl ArchiveEngine for CompositeEngine {
@@ -48,13 +64,13 @@ impl ArchiveEngine for CompositeEngine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
     ) -> ArchiveResult<ArchiveListing> {
-        if let Some(sevenzip) = &self.sevenzip {
-            if archive_format(path).is_some_and(|format| sevenzip.can_read_format(format)) {
-                return sevenzip.list(path, password, pathname_codepage, progress, cancel);
-            }
-        }
-        self.libarchive
-            .list(path, password, pathname_codepage, progress, cancel)
+        self.read_engine(archive_format(path))?.list(
+            path,
+            password,
+            pathname_codepage,
+            progress,
+            cancel,
+        )
     }
 
     fn list_directory(
@@ -66,19 +82,7 @@ impl ArchiveEngine for CompositeEngine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
     ) -> ArchiveResult<ArchiveListing> {
-        if let Some(sevenzip) = &self.sevenzip {
-            if archive_format(path).is_some_and(|format| sevenzip.can_read_format(format)) {
-                return sevenzip.list_directory(
-                    path,
-                    directory,
-                    password,
-                    pathname_codepage,
-                    progress,
-                    cancel,
-                );
-            }
-        }
-        self.libarchive.list_directory(
+        self.read_engine(archive_format(path))?.list_directory(
             path,
             directory,
             password,
@@ -97,26 +101,28 @@ impl ArchiveEngine for CompositeEngine {
         conflicts: &dyn ConflictResolver,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
+        let format = archive_format(archive);
         if options.zip_backend != crate::archive::ZipBackend::SevenZip
-            && archive_format(archive).is_some_and(|format| format.is_zip())
-            && let Some(summary) = super::zip_extract::extract(archive, destination, options, progress, conflicts, cancel)?
+            && matches!(format, Some(ReadFormat::Zip | ReadFormat::ZipVolume))
+            && let Some(summary) = super::zip_extract::extract(
+                archive,
+                destination,
+                options,
+                progress,
+                conflicts,
+                cancel,
+            )?
         {
             return Ok(summary);
         }
-        if let Some(sevenzip) = &self.sevenzip {
-            if archive_format(archive).is_some_and(|format| sevenzip.can_read_format(format)) {
-                return sevenzip.extract(
-                    archive,
-                    destination,
-                    options,
-                    progress,
-                    conflicts,
-                    cancel,
-                );
-            }
-        }
-        self.libarchive
-            .extract(archive, destination, options, progress, conflicts, cancel)
+        self.read_engine(format)?.extract(
+            archive,
+            destination,
+            options,
+            progress,
+            conflicts,
+            cancel,
+        )
     }
 
     fn create(
@@ -156,12 +162,8 @@ impl ArchiveEngine for CompositeEngine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
-        if let Some(sevenzip) = &self.sevenzip {
-            if archive_format(archive).is_some_and(|format| sevenzip.can_read_format(format)) {
-                return sevenzip.test(archive, password, progress, cancel);
-            }
-        }
-        self.libarchive.test(archive, password, progress, cancel)
+        self.read_engine(archive_format(archive))?
+            .test(archive, password, progress, cancel)
     }
 }
 

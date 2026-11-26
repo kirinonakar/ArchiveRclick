@@ -261,6 +261,8 @@ mod tests {
         assert!(!is_archive_drop_path(Path::new("movie.mkv")));
         assert!(is_archive_drop_path(Path::new("backup.ZIP")));
         assert!(is_archive_drop_path(Path::new("backup.7z.001")));
+        assert!(is_archive_drop_path(Path::new("backup.Z02")));
+        assert!(!is_archive_drop_path(Path::new("backup.z00")));
         assert!(is_archive_drop_path(Path::new("installer.ISO")));
         assert!(is_archive_drop_path(Path::new("installer.IMG")));
         assert!(!is_archive_drop_path(Path::new("movie.mkv.001")));

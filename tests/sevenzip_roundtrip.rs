@@ -12,7 +12,7 @@ use archive_rclick_core::archive::ThreadCount;
 use archive_rclick_core::{
     archive::{
         ArchiveEngine, ArchiveError, CompositeEngine, ConflictChoice, ConflictResolver,
-        CreateFormat, CreateOptions, ExtractOptions, ProgressSink, SevenZipEngine,
+        CreateFormat, CreateOptions, ExtractOptions, ProgressSink, SevenZipEngine, ZipBackend,
         libarchive::LibArchiveEngine,
     },
     tasks::{CancellationToken, ProgressPhase, ProgressSnapshot},
@@ -718,6 +718,98 @@ fn split_zip_and_7z_round_trip_through_volume_files() {
             .test(&first, None, &quiet, &cancel)
             .unwrap_or_else(|error| panic!("test split {extension} archive: {error}"));
     }
+}
+
+#[test]
+fn spanned_zip_opens_from_any_volume_and_extracts_encrypted_data() {
+    use zip::unstable::write::FileOptionsExt;
+
+    let work = Work::new();
+    let payload = vec![b'X'; 3072];
+    let password = "split-secret";
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_deprecated_encryption(password.as_bytes())
+        .unwrap();
+    writer.start_file("folder/한글.bin", options).unwrap();
+    writer.write_all(&payload).unwrap();
+    let mut zip = writer.finish().unwrap().into_inner();
+
+    // Convert the single-file fixture to per-disk offsets and put the
+    // central directory on the last disk. The encrypted payload spans all three.
+    let volume_size = 1024;
+    let final_start = 2 * volume_size - 4;
+    let end = zip.len() - 22;
+    let central = u32::from_le_bytes(zip[end + 16..end + 20].try_into().unwrap()) as usize;
+    assert!(central > final_start);
+    zip[central + 42..central + 46].copy_from_slice(&4u32.to_le_bytes());
+    zip[end + 4..end + 8].copy_from_slice(&[2, 0, 2, 0]);
+    zip[end + 16..end + 20].copy_from_slice(&((central - final_start) as u32).to_le_bytes());
+    let first = work.0.join("multi.Z01");
+    let second = work.0.join("multi.z02");
+    let final_path = work.0.join("multi.zip");
+    let mut first_bytes = b"PK\x07\x08".to_vec();
+    first_bytes.extend_from_slice(&zip[..volume_size - 4]);
+    fs::write(&first, first_bytes).unwrap();
+    fs::write(&second, &zip[volume_size - 4..final_start]).unwrap();
+    fs::write(&final_path, &zip[final_start..]).unwrap();
+
+    let engine = load_composite();
+    let cancel = CancellationToken::new();
+    for path in [&first, &second, &final_path] {
+        let listing = engine.list(path, None, 0, &quiet, &cancel).unwrap();
+        assert_eq!(listing.archive_path, final_path);
+        assert_eq!(listing.format_name, "ZIP split volume");
+        assert_eq!(listing.entries.len(), 1);
+        assert!(listing.entries[0].encrypted);
+        assert_eq!(listing.entries[0].display_path, "folder/한글.bin");
+    }
+    assert!(matches!(
+        engine.test(&final_path, None, &quiet, &cancel),
+        Err(ArchiveError::PasswordRequired)
+    ));
+    engine
+        .test(&first, Some(password), &quiet, &cancel)
+        .unwrap();
+
+    let folder_listing = engine
+        .list_directory(&second, Path::new("folder"), None, 0, &quiet, &cancel)
+        .unwrap();
+    assert_eq!(folder_listing.entries.len(), 1);
+    assert_eq!(folder_listing.entries[0].display_path, "folder/한글.bin");
+
+    for backend in [ZipBackend::SevenZip, ZipBackend::ZlibNg, ZipBackend::ZlibRs] {
+        let output = work.0.join(format!("out-{backend:?}"));
+        engine
+            .extract(
+                &second,
+                &output,
+                &ExtractOptions {
+                    password: Some(password.to_owned()),
+                    zip_backend: backend,
+                    ..ExtractOptions::default()
+                },
+                &quiet,
+                &Overwrite,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(fs::read(output.join("folder/한글.bin")).unwrap(), payload);
+    }
+
+    fs::remove_file(&second).unwrap();
+    assert!(matches!(
+        engine.list(&final_path, None, 0, &quiet, &cancel),
+        Err(ArchiveError::Io { path, source })
+            if path == second && source.kind() == std::io::ErrorKind::NotFound
+    ));
+    fs::remove_file(&final_path).unwrap();
+    assert!(matches!(
+        engine.list(&first, None, 0, &quiet, &cancel),
+        Err(ArchiveError::Io { path, source })
+            if path == final_path && source.kind() == std::io::ErrorKind::NotFound
+    ));
 }
 
 #[test]

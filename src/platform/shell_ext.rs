@@ -67,7 +67,7 @@ use windows::core::Result as WinResult;
 
 use crate::{
     app::commands::{cli_archive_destination, unique_path},
-    archive::CreateFormat,
+    archive::{CreateFormat, spanned_zip_volume_number},
     platform::windows::quote_windows_arg,
     platform::{load_language_preference, resolve_language_preference},
 };
@@ -1100,6 +1100,9 @@ fn is_archive_path(path: &Path) -> bool {
         .unwrap_or_default();
     ARCHIVE_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
         || split_volume_base_name(&name).is_some()
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| spanned_zip_volume_number(extension).is_some())
 }
 
 fn split_volume_base_name(name: &str) -> Option<&str> {

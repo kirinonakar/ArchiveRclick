@@ -13,5 +13,5 @@ mod platform_impl;
 mod platform_impl;
 
 #[cfg(windows)]
-pub(crate) use platform_impl::ZipPathnames;
+pub(crate) use platform_impl::{ZipPathnames, spanned_zip_selection_path};
 pub use platform_impl::{CompositeEngine, SevenZipEngine};

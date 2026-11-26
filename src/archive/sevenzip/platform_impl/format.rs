@@ -1,6 +1,7 @@
 //! Archive signature detection and ZIP pathname metadata decoding.
 
 use super::*;
+use crate::archive::spanned_zip_volume_number;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReadFormat {
@@ -13,6 +14,7 @@ pub(super) enum ReadFormat {
     Nsis,
     SevenZipVolume,
     ZipVolume,
+    SpannedZip,
 }
 
 impl ReadFormat {
@@ -25,23 +27,23 @@ impl ReadFormat {
             Self::Iso => "ISO 9660",
             Self::Nsis => "NSIS",
             Self::SevenZipVolume => "7z split volume",
-            Self::ZipVolume => "ZIP split volume",
+            Self::ZipVolume | Self::SpannedZip => "ZIP split volume",
         }
     }
 
     pub(super) fn base(self) -> Self {
         match self {
             Self::SevenZipVolume => Self::SevenZip,
-            Self::ZipVolume => Self::Zip,
+            Self::ZipVolume | Self::SpannedZip => Self::Zip,
             other => other,
         }
     }
 
     pub(super) fn is_zip(self) -> bool {
-        matches!(self, Self::Zip | Self::ZipVolume)
+        self.base() == Self::Zip
     }
 
-    pub(super) fn is_volume(self) -> bool {
+    pub(super) fn is_numbered_stream(self) -> bool {
         matches!(self, Self::SevenZipVolume | Self::ZipVolume)
     }
 }
@@ -158,6 +160,10 @@ pub(super) fn archive_format(path: &Path) -> Option<ReadFormat> {
     if let Some(format) = split_archive_format(path) {
         return Some(format);
     }
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if extension.and_then(spanned_zip_volume_number).is_some() {
+        return Some(ReadFormat::SpannedZip);
+    }
     if path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -179,6 +185,11 @@ pub(super) fn archive_format(path: &Path) -> Option<ReadFormat> {
     let Ok(amount) = file.read(&mut signature) else {
         return None;
     };
+    if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        && spanned_zip_last_disk(&mut file).ok().flatten().is_some()
+    {
+        return Some(ReadFormat::SpannedZip);
+    }
     if amount >= SEVENZIP_SIGNATURE.len()
         && signature[..SEVENZIP_SIGNATURE.len()] == SEVENZIP_SIGNATURE
     {
@@ -245,7 +256,90 @@ const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4B50;
 const ZIP64_LOCATOR_SIGNATURE: u32 = 0x0706_4B50;
 const ZIP_CENTRAL_SIGNATURE: u32 = 0x0201_4B50;
 const ZIP_EOCD_SIZE: usize = 22;
+const ZIP64_LOCATOR_SIZE: usize = 20;
 const ZIP_MAX_COMMENT_SIZE: u64 = 65_535;
+
+fn read_zip_tail(file: &mut File, file_length: u64) -> std::io::Result<Vec<u8>> {
+    let tail_length =
+        file_length.min((ZIP_EOCD_SIZE + ZIP64_LOCATOR_SIZE) as u64 + ZIP_MAX_COMMENT_SIZE);
+    file.seek(SeekFrom::Start(file_length - tail_length))?;
+    let mut tail = vec![0; tail_length as usize];
+    file.read_exact(&mut tail)?;
+    Ok(tail)
+}
+
+fn spanned_zip_last_disk(file: &mut File) -> std::io::Result<Option<u32>> {
+    let file_length = file.metadata()?.len();
+    let mut suffix = [0; ZIP_EOCD_SIZE + ZIP64_LOCATOR_SIZE];
+    let suffix_length = file_length.min(suffix.len() as u64) as usize;
+    file.seek(SeekFrom::Start(file_length - suffix_length as u64))?;
+    file.read_exact(&mut suffix[..suffix_length])?;
+    let last_disk = match zip_last_disk(&suffix[..suffix_length]) {
+        Some(disk) => Some(disk),
+        None => zip_last_disk(&read_zip_tail(file, file_length)?),
+    };
+    Ok(last_disk.filter(|&disk| disk > 0))
+}
+
+fn zip_last_disk(tail: &[u8]) -> Option<u32> {
+    let end = find_zip_eocd(tail)?;
+    let disk = u32::from(read_u16(tail, end + 4)?);
+    if disk != 0 && disk < u32::from(u16::MAX) {
+        return Some(disk);
+    }
+    let zip64_last_disk = end.checked_sub(ZIP64_LOCATOR_SIZE).and_then(|locator| {
+        if read_u32(tail, locator) != Some(ZIP64_LOCATOR_SIGNATURE) {
+            return None;
+        }
+        let last_disk = read_u32(tail, locator + 16)?.checked_sub(1)?;
+        (read_u32(tail, locator + 4)? <= last_disk).then_some(last_disk)
+    });
+    zip64_last_disk.or_else(|| (disk == 0).then_some(disk))
+}
+
+fn spanned_zip_layout(path: &Path) -> ArchiveResult<(PathBuf, u32)> {
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    let member_number = spanned_zip_volume_number(extension);
+    if member_number.is_none() && !extension.eq_ignore_ascii_case("zip") {
+        return Err(ArchiveError::InvalidArchive(path.to_path_buf()));
+    }
+    let final_path = if member_number.is_some() {
+        path.with_extension("zip")
+    } else {
+        path.to_path_buf()
+    };
+    let mut file = File::open(&final_path).map_err(|error| ArchiveError::io(&final_path, error))?;
+    let last_disk = spanned_zip_last_disk(&mut file)
+        .map_err(|error| ArchiveError::io(&final_path, error))?
+        .filter(|&disk| member_number.is_none_or(|number| number <= disk))
+        .ok_or_else(|| ArchiveError::InvalidArchive(path.to_path_buf()))?;
+    Ok((final_path, last_disk))
+}
+
+pub(crate) fn spanned_zip_selection_path(path: &Path) -> Option<PathBuf> {
+    let (final_path, _) = spanned_zip_layout(path).ok()?;
+    fs::canonicalize(final_path).ok()
+}
+
+/// PKZIP-style disk offsets are local to each file. Hand the final disk to
+/// 7-Zip with its real filename so its volume callback can open the others.
+pub(super) fn spanned_zip_path(path: &Path, cancel: &CancellationToken) -> ArchiveResult<PathBuf> {
+    let (final_path, last_disk) = spanned_zip_layout(path)?;
+    if last_disk > u32::from(u16::MAX) {
+        return Err(ArchiveError::LimitExceeded(
+            "split ZIP volume count".to_owned(),
+        ));
+    }
+    for index in 1..=last_disk {
+        check_cancel(cancel)?;
+        let volume = final_path.with_extension(format!("z{index:02}"));
+        let metadata = fs::metadata(&volume).map_err(|error| ArchiveError::io(&volume, error))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(ArchiveError::InvalidArchive(volume));
+        }
+    }
+    Ok(final_path)
+}
 
 pub(super) struct ZipNameRecord {
     pub(super) raw_name: Vec<u8>,
@@ -315,16 +409,12 @@ pub(super) fn read_zip_name_records(path: &Path) -> ArchiveResult<Option<Vec<Zip
         return Ok(None);
     }
 
-    let tail_length = file_length.min(ZIP_EOCD_SIZE as u64 + ZIP_MAX_COMMENT_SIZE);
-    file.seek(SeekFrom::Start(file_length - tail_length))
-        .map_err(|error| ArchiveError::io(path, error))?;
-    let mut tail = Vec::with_capacity(tail_length as usize);
-    file.read_to_end(&mut tail)
-        .map_err(|error| ArchiveError::io(path, error))?;
+    let tail =
+        read_zip_tail(&mut file, file_length).map_err(|error| ArchiveError::io(path, error))?;
     let Some(eocd_index) = find_zip_eocd(&tail) else {
         return Ok(None);
     };
-    let eocd_offset = file_length - tail_length + eocd_index as u64;
+    let eocd_offset = file_length - tail.len() as u64 + eocd_index as u64;
     let Some(layout) =
         zip_directory_layout(&mut file, file_length, eocd_offset, &tail[eocd_index..])?
     else {
@@ -465,6 +555,9 @@ fn zip_directory_layout(
         || size == u64::from(u32::MAX)
         || offset == u64::from(u32::MAX);
     if !needs_zip64 {
+        if central_disk != disk {
+            return Ok(None);
+        }
         return Ok(Some(ZipDirectoryLayout {
             entries: u64::from(entries),
             offset,
@@ -480,7 +573,11 @@ fn zip_directory_layout(
         .map_err(|error| ArchiveError::io("ZIP64 locator", error))?;
     file.read_exact(&mut locator)
         .map_err(|error| ArchiveError::io("ZIP64 locator", error))?;
-    if read_u32(&locator, 0) != Some(ZIP64_LOCATOR_SIGNATURE) || read_u32(&locator, 4) != Some(0) {
+    if read_u32(&locator, 0) != Some(ZIP64_LOCATOR_SIGNATURE)
+        || read_u32(&locator, 4)
+            .zip(read_u32(&locator, 16))
+            .is_none_or(|(record_disk, disk_count)| record_disk.checked_add(1) != Some(disk_count))
+    {
         return Ok(None);
     }
     let Some(zip64_offset) = read_u64(&locator, 8) else {
@@ -499,6 +596,7 @@ fn zip_directory_layout(
         .map_err(|error| ArchiveError::io("ZIP64 end record", error))?;
     if read_u32(&record, 0) != Some(ZIP64_EOCD_SIGNATURE)
         || read_u64(&record, 4).is_none_or(|size| size < 44)
+        || read_u32(&record, 16) != read_u32(&record, 20)
     {
         return Ok(None);
     }

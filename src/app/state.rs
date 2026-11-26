@@ -484,6 +484,9 @@ fn is_archive_name(name: &str) -> bool {
         .iter()
         .any(|extension| name.ends_with(extension))
         || is_numbered_archive_volume_name(&name)
+        || name.rsplit_once('.').is_some_and(|(_, extension)| {
+            crate::archive::spanned_zip_volume_number(extension).is_some()
+        })
 }
 
 fn is_numbered_archive_volume_name(name: &str) -> bool {

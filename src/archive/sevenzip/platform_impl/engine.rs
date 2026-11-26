@@ -70,6 +70,24 @@ impl SevenZipEngine {
     }
 }
 
+fn read_format(path: &Path) -> ArchiveResult<ReadFormat> {
+    archive_format(path).ok_or_else(|| {
+        ArchiveError::UnsupportedOption("7z.dll could not identify the archive format".to_owned())
+    })
+}
+
+fn read_path<'a>(
+    path: &'a Path,
+    format: ReadFormat,
+    cancel: &CancellationToken,
+) -> ArchiveResult<std::borrow::Cow<'a, Path>> {
+    if format == ReadFormat::SpannedZip {
+        format::spanned_zip_path(path, cancel).map(std::borrow::Cow::Owned)
+    } else {
+        Ok(std::borrow::Cow::Borrowed(path))
+    }
+}
+
 fn read_all_entries(
     api: &Api,
     path: &Path,
@@ -388,18 +406,16 @@ impl ArchiveEngine for SevenZipEngine {
     ) -> ArchiveResult<ArchiveListing> {
         check_cancel(cancel)?;
         let total_input = file_length(path)?;
+        let format = read_format(path)?;
+        let resolved = read_path(path, format, cancel)?;
+        let path = resolved.as_ref();
         let throttled = ThrottledProgress::new(progress, PROGRESS_INTERVAL);
         let mut opening = ProgressSnapshot::new(ProgressPhase::Opening);
         opening.total_bytes = Some(total_input);
         opening.current_file = path.display().to_string();
         throttled.report(opening, true);
 
-        let format = archive_format(path).ok_or_else(|| {
-            ArchiveError::UnsupportedOption(
-                "7z.dll could not identify the archive format".to_owned(),
-            )
-        })?;
-        let zip_name_records = if format == ReadFormat::Zip {
+        let zip_name_records = if matches!(format, ReadFormat::Zip | ReadFormat::SpannedZip) {
             read_zip_name_records(path)?
         } else {
             None
@@ -467,6 +483,10 @@ impl ArchiveEngine for SevenZipEngine {
         cancel: &CancellationToken,
     ) -> ArchiveResult<OperationSummary> {
         check_cancel(cancel)?;
+        let _ = file_length(archive)?;
+        let format = read_format(archive)?;
+        let resolved = read_path(archive, format, cancel)?;
+        let archive = resolved.as_ref();
         let destination_was_missing = match fs::symlink_metadata(destination) {
             Ok(_) => false,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -485,8 +505,6 @@ impl ArchiveEngine for SevenZipEngine {
         if is_reparse(&root_metadata) {
             return Err(ArchiveError::ReparsePoint(root.clone()));
         }
-        let _ = file_length(archive)?;
-
         // SAFETY: the references are only used by callbacks while this
         // function is running, and the shared contexts are dropped here
         // before the borrows end, so extending the lifetimes is sound.
@@ -495,12 +513,7 @@ impl ArchiveEngine for SevenZipEngine {
         let throttled = Arc::new(ThrottledProgress::new(progress, PROGRESS_INTERVAL));
         let _borrowed_progress = BorrowedProgressScope(&throttled);
 
-        let format = archive_format(archive).ok_or_else(|| {
-            ArchiveError::UnsupportedOption(
-                "7z.dll could not identify the archive format".to_owned(),
-            )
-        })?;
-        let zip_name_records = if format == ReadFormat::Zip {
+        let zip_name_records = if matches!(format, ReadFormat::Zip | ReadFormat::SpannedZip) {
             read_zip_name_records(archive)?
         } else {
             None
@@ -968,6 +981,9 @@ impl ArchiveEngine for SevenZipEngine {
     ) -> ArchiveResult<OperationSummary> {
         check_cancel(cancel)?;
         let total_input = file_length(archive)?;
+        let format = read_format(archive)?;
+        let resolved = read_path(archive, format, cancel)?;
+        let archive = resolved.as_ref();
         // SAFETY: the reference is only used by callbacks while this
         // function is running, and the shared context is dropped here
         // before the borrow ends, so extending the lifetime is sound.
@@ -979,11 +995,6 @@ impl ArchiveEngine for SevenZipEngine {
         opening.current_file = archive.display().to_string();
         throttled.report(opening, true);
 
-        let format = archive_format(archive).ok_or_else(|| {
-            ArchiveError::UnsupportedOption(
-                "7z.dll could not identify the archive format".to_owned(),
-            )
-        })?;
         let open_archive = open_for_read(&self.api, archive, format, password, 0, cancel)?;
         let entries = read_entries(
             &open_archive.in_archive,
@@ -1153,7 +1164,7 @@ fn open_for_read(
     };
     let path = first_part.as_deref().unwrap_or(path);
     let in_archive = api.create_in_archive(format.base())?;
-    let stream = if format.is_volume() {
+    let stream = if format.is_numbered_stream() {
         let paths = split_volume_paths(path).ok_or_else(|| {
             ArchiveError::InvalidInput(format!(
                 "split archive volume is missing its .001 file: {}",

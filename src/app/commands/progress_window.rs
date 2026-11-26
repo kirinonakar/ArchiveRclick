@@ -329,6 +329,32 @@ pub(super) fn start_extract_batch_window(
     elevated_retry: bool,
     ask_conflicts: bool,
 ) {
+    #[cfg(windows)]
+    let (archives, destination_overrides): (Vec<_>, Vec<_>) = if archives.len() > 1
+        && archives.iter().any(|path| {
+            path.extension()
+                .and_then(OsStr::to_str)
+                .and_then(crate::archive::spanned_zip_volume_number)
+                .is_some()
+        }) {
+        let mut seen_spanned_zips = std::collections::HashSet::new();
+        archives
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, archive)| {
+                let destination = destination_overrides.get(index).cloned().flatten();
+                if let Some(final_path) =
+                    crate::archive::sevenzip::spanned_zip_selection_path(&archive)
+                    && !seen_spanned_zips.insert((final_path, destination.clone()))
+                {
+                    return None;
+                }
+                Some((archive, destination))
+            })
+            .unzip()
+    } else {
+        (archives, destination_overrides)
+    };
     let total = archives.len();
     let first = archives[0].display().to_string();
     let initial_title =
